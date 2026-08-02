@@ -4,7 +4,7 @@ SpeakPaste is a native Swift dictation project for macOS and iPhone. It sends re
 
 The Xcode project contains three targets:
 
-- **SpeakPasteMac** — the primary macOS app, with Continuity Microphone support, a global dictation shortcut, and automatic paste.
+- **SpeakPasteMac** — the primary macOS target, producing the **SpeakPaste** app with Continuity Microphone support, a global dictation shortcut, and automatic paste.
 - **SpeakPaste** — an iPhone containing app with record, edit, copy, share, and local transcript history.
 - **SpeakPasteKeyboard** — an experimental custom keyboard that hands microphone capture to the containing app and inserts the result at the cursor.
 
@@ -19,7 +19,7 @@ The Xcode project contains three targets:
 
 1. Open `SpeakPaste.xcodeproj` in Xcode.
 2. Select the **SpeakPasteMac** scheme and **My Mac** as the destination.
-3. Build and run.
+3. Build and run. The product is named **SpeakPaste.app**.
 4. Save your ElevenLabs API key when prompted.
 5. Select any available microphone. To use Continuity Microphone, keep your iPhone nearby and locked, then select its microphone from the list.
 6. Click the record control or press **Control–Option–Space**. Press it again to stop and transcribe.

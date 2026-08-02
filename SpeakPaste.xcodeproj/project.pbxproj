@@ -41,6 +41,7 @@
 		D10000000000000000000009 /* TranscriptionModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000002 /* TranscriptionModels.swift */; };
 		D1000000000000000000000A /* ElevenLabsClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000003 /* ElevenLabsClient.swift */; };
 		D1000000000000000000000B /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000005 /* KeychainStore.swift */; };
+		D1000000000000000000000C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000B /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -109,7 +110,7 @@
 		D20000000000000000000006 /* MacGlobalHotKey.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacGlobalHotKey.swift; sourceTree = "<group>"; };
 		D20000000000000000000007 /* MacPasteController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacPasteController.swift; sourceTree = "<group>"; };
 		D20000000000000000000008 /* MacReliabilityStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacReliabilityStore.swift; sourceTree = "<group>"; };
-		D2000000000000000000000F /* SpeakPaste Mac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "SpeakPaste Mac.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		D2000000000000000000000F /* SpeakPaste.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SpeakPaste.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -229,12 +230,12 @@
 		D70000000000000000000001 /* SpeakPasteMac */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = D80000000000000000000001;
-			buildPhases = (D60000000000000000000001, D40000000000000000000001, );
+			buildPhases = (D60000000000000000000001, D40000000000000000000001, D60000000000000000000002, );
 			buildRules = ( );
 			dependencies = ( );
 			name = SpeakPasteMac;
-			productName = "SpeakPaste Mac";
-			productReference = D2000000000000000000000F /* SpeakPaste Mac.app */;
+			productName = SpeakPaste;
+			productReference = D2000000000000000000000F /* SpeakPaste.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -280,6 +281,7 @@
 
 /* Begin PBXResourcesBuildPhase section */
 		A60000000000000000000002 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A1000000000000000000000B, ); runOnlyForDeploymentPostprocessing = 0; };
+		D60000000000000000000002 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (D1000000000000000000000C, ); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -308,8 +310,8 @@
 		B10000000000000000000006 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {BUNDLE_LOADER = "$(TEST_HOST)"; CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 17.0; PRODUCT_BUNDLE_IDENTIFIER = com.example.SpeakPasteTests; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_VERSION = 6.0; TARGETED_DEVICE_FAMILY = 1; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SpeakPaste.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/SpeakPaste"; TEST_TARGET_NAME = SpeakPaste; }; name = Release; };
 		C10000000000000000000009 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {APPLICATION_EXTENSION_API_ONLY = YES; CODE_SIGN_ENTITLEMENTS = SpeakPasteKeyboard/SpeakPasteKeyboard.entitlements; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = ""; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = SpeakPasteKeyboard/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 17.0; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @executable_path/../../Frameworks"; MARKETING_VERSION = 1.0; PRODUCT_BUNDLE_IDENTIFIER = com.example.SpeakPaste.Keyboard; PRODUCT_NAME = "$(TARGET_NAME)"; SKIP_INSTALL = YES; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_VERSION = 6.0; TARGETED_DEVICE_FAMILY = 1; }; name = Debug; };
 		C1000000000000000000000A /* Release */ = {isa = XCBuildConfiguration; buildSettings = {APPLICATION_EXTENSION_API_ONLY = YES; CODE_SIGN_ENTITLEMENTS = SpeakPasteKeyboard/SpeakPasteKeyboard.entitlements; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = ""; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = SpeakPasteKeyboard/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 17.0; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @executable_path/../../Frameworks"; MARKETING_VERSION = 1.0; PRODUCT_BUNDLE_IDENTIFIER = com.example.SpeakPaste.Keyboard; PRODUCT_NAME = "$(TARGET_NAME)"; SKIP_INSTALL = YES; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_VERSION = 6.0; TARGETED_DEVICE_FAMILY = 1; }; name = Release; };
-		D90000000000000000000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; ENABLE_APP_SANDBOX = NO; ENABLE_HARDENED_RUNTIME = NO; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity"; INFOPLIST_KEY_NSMicrophoneUsageDescription = "SpeakPaste records from the microphone you select so ElevenLabs can transcribe your speech."; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; MACOSX_DEPLOYMENT_TARGET = 14.0; MARKETING_VERSION = 1.0; PRODUCT_BUNDLE_IDENTIFIER = com.example.SpeakPasteMac; PRODUCT_NAME = "SpeakPaste Mac"; SDKROOT = macosx; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_VERSION = 6.0; }; name = Debug; };
-		D90000000000000000000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; ENABLE_APP_SANDBOX = NO; ENABLE_HARDENED_RUNTIME = NO; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity"; INFOPLIST_KEY_NSMicrophoneUsageDescription = "SpeakPaste records from the microphone you select so ElevenLabs can transcribe your speech."; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; MACOSX_DEPLOYMENT_TARGET = 14.0; MARKETING_VERSION = 1.0; PRODUCT_BUNDLE_IDENTIFIER = com.example.SpeakPasteMac; PRODUCT_NAME = "SpeakPaste Mac"; SDKROOT = macosx; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_VERSION = 6.0; }; name = Release; };
+		D90000000000000000000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; ENABLE_APP_SANDBOX = NO; ENABLE_HARDENED_RUNTIME = NO; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity"; INFOPLIST_KEY_NSMicrophoneUsageDescription = "SpeakPaste records from the microphone you select so ElevenLabs can transcribe your speech."; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; MACOSX_DEPLOYMENT_TARGET = 14.0; MARKETING_VERSION = 1.0; PRODUCT_BUNDLE_IDENTIFIER = com.example.SpeakPasteMac; PRODUCT_NAME = SpeakPaste; SDKROOT = macosx; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_VERSION = 6.0; }; name = Debug; };
+		D90000000000000000000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; ENABLE_APP_SANDBOX = NO; ENABLE_HARDENED_RUNTIME = NO; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity"; INFOPLIST_KEY_NSMicrophoneUsageDescription = "SpeakPaste records from the microphone you select so ElevenLabs can transcribe your speech."; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; MACOSX_DEPLOYMENT_TARGET = 14.0; MARKETING_VERSION = 1.0; PRODUCT_BUNDLE_IDENTIFIER = com.example.SpeakPasteMac; PRODUCT_NAME = SpeakPaste; SDKROOT = macosx; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_VERSION = 6.0; }; name = Release; };
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
