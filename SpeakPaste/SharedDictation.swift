@@ -42,6 +42,11 @@ struct SharedDictationSnapshot: Codable, Equatable {
     var returnAttempts: [String]?
     var incomingURLDeliveryRoute: String?
     var incomingURLSourceApplication: String?
+    /// Whether `UIPasteboard.changeCount` moved after the completed
+    /// transcript was written from the background. Flow A's paste step rides
+    /// on that write, and whether iOS honors it headlessly is exactly the
+    /// kind of claim this store exists to settle with device evidence.
+    var clipboardLanded: Bool? = nil
     var startedAt: Date
     var updatedAt: Date
 
@@ -124,7 +129,8 @@ struct SharedDictationStore: @unchecked Sendable {
         _ phase: SharedDictationPhase,
         sessionID: UUID,
         transcript: String? = nil,
-        errorMessage: String? = nil
+        errorMessage: String? = nil,
+        clipboardLanded: Bool? = nil
     ) {
         update(sessionID: sessionID) { snapshot in
             if phase == .recording && snapshot.phase != .recording {
@@ -134,6 +140,7 @@ struct SharedDictationStore: @unchecked Sendable {
             snapshot.command = .none
             snapshot.transcript = transcript
             snapshot.errorMessage = errorMessage
+            snapshot.clipboardLanded = clipboardLanded
         }
     }
 

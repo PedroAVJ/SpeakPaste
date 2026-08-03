@@ -180,12 +180,19 @@ final class DictationEngine {
                 )
             )
             // The keyboard inserts at the cursor when it is on screen. The
-            // clipboard is the fallback for every other host.
+            // clipboard is the fallback for every other host. Whether iOS
+            // honors this write from a headless background process is
+            // contested, so record the changeCount verdict where devicectl
+            // can read it instead of arguing from blog posts.
+            let clipboardBefore = UIPasteboard.general.changeCount
             UIPasteboard.general.string = result.text
+            let clipboardLanded =
+                UIPasteboard.general.changeCount != clipboardBefore
             store.setPhase(
                 .completed,
                 sessionID: sessionID,
-                transcript: result.text
+                transcript: result.text,
+                clipboardLanded: clipboardLanded
             )
             UINotificationFeedbackGenerator().notificationOccurred(.success)
             cleanUpRecording(at: audioURL)

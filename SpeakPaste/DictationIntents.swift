@@ -7,6 +7,13 @@ import AppIntents
 /// These intents return no dialog on purpose. A dictation trigger should be
 /// invisible; a banner announcing "Listening" every time is worse than
 /// silence, and haptics already confirm the state.
+///
+/// Toggle and Stop return the transcript as an optional value: the app's own
+/// background pasteboard write is the shipping delivery, and the output lets
+/// a wrapper shortcut take over copying if that write ever proves unreliable.
+/// The start tap returns nil — a genuine no-value, never empty text, so a
+/// "has any value" gate in a shortcut cannot fire on it and wipe the
+/// clipboard. The current one-action wrapper ignores the output entirely.
 struct ToggleDictationIntent: AppIntent, AudioRecordingIntent, LiveActivityIntent {
     static let title: LocalizedStringResource = "Toggle Dictation"
     static let description = IntentDescription(
@@ -20,9 +27,9 @@ struct ToggleDictationIntent: AppIntent, AudioRecordingIntent, LiveActivityInten
     }
 
     @MainActor
-    func perform() async throws -> some IntentResult {
-        try await DictationEngine.shared.toggle()
-        return .result()
+    func perform() async throws -> some IntentResult & ReturnsValue<String?> {
+        let transcript = try await DictationEngine.shared.toggle()
+        return .result(value: transcript)
     }
 }
 
@@ -56,9 +63,9 @@ struct StopDictationIntent: AppIntent, AudioRecordingIntent, LiveActivityIntent 
     static var supportedModes: IntentModes { .background }
 
     @MainActor
-    func perform() async throws -> some IntentResult {
-        _ = try await DictationEngine.shared.stop()
-        return .result()
+    func perform() async throws -> some IntentResult & ReturnsValue<String?> {
+        let transcript = try await DictationEngine.shared.stop()
+        return .result(value: transcript)
     }
 }
 
