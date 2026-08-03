@@ -109,6 +109,17 @@ struct SharedDictationStore: @unchecked Sendable {
         return snapshot
     }
 
+    /// Start a session that is already recording. Intent-driven dictation never
+    /// launches anything, so it must not pass through `launching` and make the
+    /// keyboard announce an app switch that is not happening.
+    @discardableResult
+    func beginBackgroundSession() -> SharedDictationSnapshot {
+        var snapshot = SharedDictationSnapshot.idle
+        snapshot.phase = .recording
+        save(snapshot)
+        return snapshot
+    }
+
     func setPhase(
         _ phase: SharedDictationPhase,
         sessionID: UUID,
