@@ -30,12 +30,12 @@ final class MacAppModel: ObservableObject {
     }
     @Published private(set) var phaseStartedAt = Date()
     @Published private(set) var devices: [MacAudioInputDevice] = []
-    @Published var selectedDeviceID = "" {
-        didSet {
-            guard !selectedDeviceID.isEmpty else { return }
-            UserDefaults.standard.set(selectedDeviceID, forKey: "mac-selected-device-id")
-        }
-    }
+    /// Set only by `selectDevice(_:)` or by `refreshDevices()` choosing a
+    /// Continuity microphone. Never by an unrequested fallback.
+    @Published private(set) var selectedDeviceID = ""
+    /// Explains why no microphone is selected. Non-nil means SpeakPaste
+    /// declined to guess rather than quietly dictating through the wrong mic.
+    @Published private(set) var deviceSelectionNotice: String?
     @Published var language: TranscriptionLanguage = .automatic
     @Published var cleanSpeech = true
     @Published var autoPaste = true
@@ -59,6 +59,11 @@ final class MacAppModel: ObservableObject {
     private var destinationProcessIdentifier: pid_t?
     private var connectedDeviceID: String?
 
+    private static let chosenDeviceKey = "mac-chosen-device-id"
+    /// Earlier builds auto-persisted whatever microphone they fell back to, so
+    /// a single iPhone-absent launch pinned the built-in mic permanently.
+    private static let autoPersistedDeviceKey = "mac-selected-device-id"
+
     init(
         recorder: MacAudioRecorder = MacAudioRecorder(),
         client: ElevenLabsClientProtocol = ElevenLabsClient(),
@@ -75,6 +80,7 @@ final class MacAppModel: ObservableObject {
         self.globalHotKey = globalHotKey
         attempts = reliabilityStore.load()
         hasSavedAPIKey = keychain.load()?.isEmpty == false
+        UserDefaults.standard.removeObject(forKey: Self.autoPersistedDeviceKey)
         refreshDevices()
         observeDeviceChanges()
         recorder.setRecordingFailureHandler { [weak self] error, salvagedAudioURL in
@@ -103,18 +109,51 @@ final class MacAppModel: ObservableObject {
 
     var hotKeyLabel: String { "⌘" }
 
-    func refreshDevices() {
-        let previous = selectedDeviceID.isEmpty
-            ? UserDefaults.standard.string(forKey: "mac-selected-device-id")
-            : selectedDeviceID
-        devices = MacAudioDeviceCatalog.availableInputs()
+    /// Records the microphone the user picked in the UI. Only a deliberate
+    /// choice is persisted, so an unavailable-iPhone moment can never write
+    /// itself in as a lasting preference.
+    func selectDevice(_ deviceID: String) {
+        guard devices.contains(where: { $0.id == deviceID }) else { return }
+        selectedDeviceID = deviceID
+        deviceSelectionNotice = nil
+        UserDefaults.standard.set(deviceID, forKey: Self.chosenDeviceKey)
+    }
 
-        if let previous, devices.contains(where: { $0.id == previous }) {
-            selectedDeviceID = previous
-        } else if let continuityDevice = devices.first(where: \.isContinuityDevice) {
+    func refreshDevices() {
+        devices = MacAudioDeviceCatalog.availableInputs()
+        // Re-resolving mid-dictation could swap the device out from under an
+        // in-flight recording, so only the device list is refreshed there.
+        guard !phase.isBusy, !isMicrophoneConnected else { return }
+        resolveSelection()
+    }
+
+    private func resolveSelection() {
+        let chosen = UserDefaults.standard.string(forKey: Self.chosenDeviceKey)
+
+        if let chosen, devices.contains(where: { $0.id == chosen }) {
+            selectedDeviceID = chosen
+            deviceSelectionNotice = nil
+            return
+        }
+        if let continuityDevice = devices.first(where: \.isContinuityDevice) {
             selectedDeviceID = continuityDevice.id
+            deviceSelectionNotice = nil
+            return
+        }
+
+        // No iPhone, and no microphone this user actually asked for. Silently
+        // substituting a Mac microphone here is what made every dictation run
+        // through the built-in mic while appearing to work, so leave the
+        // choice unmade and say so.
+        selectedDeviceID = ""
+        if chosen != nil {
+            deviceSelectionNotice = devices.isEmpty
+                ? "The microphone you chose is no longer available, and no others were found."
+                : "The microphone you chose is no longer available. Bring your iPhone nearby and refresh, or pick another microphone."
         } else {
-            selectedDeviceID = devices.first?.id ?? ""
+            deviceSelectionNotice = devices.isEmpty
+                ? "No microphones found. Connect one or bring your iPhone nearby, then refresh."
+                : "No iPhone microphone is available. Bring your iPhone nearby and refresh, or pick a microphone below — SpeakPaste will not choose one for you."
         }
     }
 
@@ -166,7 +205,10 @@ final class MacAppModel: ObservableObject {
 
     private func startRecording() async {
         guard let device = selectedDevice else {
-            phase = .failed("No microphone is available.")
+            phase = .failed(
+                deviceSelectionNotice
+                    ?? "No microphone is selected. Open SpeakPaste and choose one."
+            )
             return
         }
         guard hasAPIKey else {
@@ -409,6 +451,9 @@ final class MacAppModel: ObservableObject {
                     self.isMicrophoneConnected = false
                     self.connectedDeviceID = nil
                     self.connectionLatency = nil
+                    // The earlier refresh skipped selection while the mic was
+                    // still marked connected; re-resolve now that it is not.
+                    self.resolveSelection()
                     if wasRecording {
                         self.recordFailure(
                             "The microphone disconnected while recording.",

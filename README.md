@@ -28,8 +28,10 @@ The Xcode project contains three targets:
 2. Select the **SpeakPasteMac** scheme and **My Mac** as the destination.
 3. Build and run. The product is named **SpeakPaste.app**.
 4. Save your ElevenLabs API key when prompted.
-5. Select any available microphone. To use Continuity Microphone, keep your
-   iPhone nearby and locked, then select its microphone from the list.
+5. Keep your iPhone nearby and locked and SpeakPaste selects its Continuity
+   microphone automatically. Only a microphone you pick yourself is remembered,
+   and SpeakPaste never substitutes a Mac microphone on its own: if the iPhone
+   is unavailable it says so and waits for you to choose.
 6. Click the record control or tap either **Command (⌘)** key by itself.
    Command-key combinations such as ⌘C, ⌘V, and ⌘Tab keep their normal behavior.
 7. Wait for the click-through floating HUD to change from **WAIT** to
@@ -151,7 +153,8 @@ Swift 6 type-checking. Its floating HUD exposes **WAIT**, **SPEAK NOW**,
 **RECORDING STOPPED**, **TRANSCRIBING**, **DONE**, and **ERROR**, including an
 elapsed timer for busy states. Connecting stays in **WAIT** until the microphone
 proves it is delivering a steady sample stream, so file recording does not begin
-inside the Continuity wake-up gap. Interrupted startup is retried in place, a
+inside the Continuity wake-up gap; if macOS refuses the monitoring tap that
+proves liveness, the connection fails loudly instead of recording unguarded. Interrupted startup is retried in place, a
 stream that dies mid-dictation salvages its finalized partial file, and recording
 startup, WAV finalization, and network requests have bounded watchdogs.
 

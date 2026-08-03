@@ -115,12 +115,17 @@ struct MacContentView: View {
             if model.isMicrophoneConnected {
                 activeMicrophoneRow
             } else if model.devices.isEmpty {
-                Text("No microphones found. Connect one or bring your iPhone nearby, then refresh.")
+                Text(model.deviceSelectionNotice
+                    ?? "No microphones found. Connect one or bring your iPhone nearby, then refresh.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 8)
             } else {
+                if let notice = model.deviceSelectionNotice {
+                    noticeBanner(notice)
+                }
+
                 VStack(spacing: 2) {
                     ForEach(model.devices) { device in
                         deviceRow(device)
@@ -183,7 +188,7 @@ struct MacContentView: View {
     private func deviceRow(_ device: MacAudioInputDevice) -> some View {
         let isSelected = device.id == model.selectedDeviceID
         return Button {
-            model.selectedDeviceID = device.id
+            model.selectDevice(device.id)
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: device.isContinuityDevice ? "iphone" : "laptopcomputer")
@@ -226,13 +231,29 @@ struct MacContentView: View {
         .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
+    private func noticeBanner(_ message: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "iphone.slash")
+                .foregroundStyle(.orange)
+                .accessibilityHidden(true)
+            Text(message)
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(.orange.opacity(0.08)))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.orange.opacity(0.3)))
+        .accessibilityElement(children: .combine)
+    }
+
     private var deviceStatusLine: String {
         guard let device = model.selectedDevice else {
-            return "No microphone selected."
+            return "Nothing selected — SpeakPaste will not pick a microphone for you."
         }
         return device.isContinuityDevice
             ? "Using your iPhone's microphone over Continuity."
-            : "Using a microphone on this Mac."
+            : "Using a microphone on this Mac — not your iPhone."
     }
 
     // MARK: Capture

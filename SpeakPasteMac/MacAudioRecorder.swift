@@ -12,6 +12,7 @@ enum MacAudioRecorderError: LocalizedError {
     case recordingStartTimedOut
     case recordingFinalizationTimedOut
     case audioStreamNotReady
+    case audioMonitorUnavailable
 
     var errorDescription: String? {
         switch self {
@@ -35,6 +36,8 @@ enum MacAudioRecorderError: LocalizedError {
             "The microphone did not finish the recording. SpeakPaste reset the connection; try again."
         case .audioStreamNotReady:
             "The microphone connected but never delivered audio. Lock the iPhone, keep it nearby, then try again."
+        case .audioMonitorUnavailable:
+            "macOS would not let SpeakPaste watch the microphone's audio stream, so it cannot tell when the iPhone is really ready. Recording was not started."
         }
     }
 }
@@ -93,7 +96,6 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
     private var runtimeError: NSError?
     private var recordingFailureHandler: (@Sendable (Error, URL?) -> Void)?
     private let sampleFlow = MacSampleFlowCounter()
-    private var sampleTapInstalled = false
 
     private var segmentURL: URL?
     private var segmentGeneration: UInt64?
@@ -140,13 +142,11 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
     func connect(deviceID: String) async throws -> Bool {
         try await ensurePermission()
         let createdConnection = try await establishSession(deviceID: deviceID)
-        if captureQueue.sync(execute: { sampleTapInstalled }) {
-            do {
-                try await waitForSteadyAudio(timeout: steadyAudioTimeout)
-            } catch {
-                await releaseSession(with: error)
-                throw error
-            }
+        do {
+            try await waitForSteadyAudio(timeout: steadyAudioTimeout)
+        } catch {
+            await releaseSession(with: error)
+            throw error
         }
         return createdConnection
     }
@@ -378,15 +378,15 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
 
         // A lightweight tap that only counts delivered buffers. It is how
         // connect() proves the Continuity stream is really flowing before any
-        // file recording starts.
+        // file recording starts. Without it there is no liveness gate at all,
+        // so refuse the connection instead of recording blind.
         let sampleTap = AVCaptureAudioDataOutput()
         sampleTap.setSampleBufferDelegate(self, queue: sampleQueue)
-        if session.canAddOutput(sampleTap) {
-            session.addOutput(sampleTap)
-            sampleTapInstalled = true
-        } else {
-            sampleTapInstalled = false
+        guard session.canAddOutput(sampleTap) else {
+            session.commitConfiguration()
+            throw MacAudioRecorderError.audioMonitorUnavailable
         }
+        session.addOutput(sampleTap)
         session.commitConfiguration()
 
         // WAV can hold the device's native PCM, so no compressor is needed.
@@ -588,7 +588,6 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
         activeDeviceID = nil
         runtimeError = nil
         pendingRecordingError = nil
-        sampleTapInstalled = false
 
         staleSession?.stopRunning()
         if let staleURL {
@@ -613,7 +612,6 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
         activeDeviceID = nil
         runtimeError = nil
         pendingRecordingError = preservingPendingRecordingError ? savedPendingError : nil
-        sampleTapInstalled = false
 
         // stopRunning() is synchronous. Keep teardown on the same serial queue
         // as connection/start so a retry cannot race the old iPhone stream.
