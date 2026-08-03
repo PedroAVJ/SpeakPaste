@@ -46,6 +46,14 @@
 		D10000000000000000000043 /* MacPermissions.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000043 /* MacPermissions.swift */; };
 		D10000000000000000000044 /* MacTranscriptPostProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000044 /* MacTranscriptPostProcessor.swift */; };
 		D10000000000000000000045 /* MacSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000045 /* MacSettingsView.swift */; };
+		D10000000000000000000046 /* MacDeliveryPolicyStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000046 /* MacDeliveryPolicyStore.swift */; };
+		D10000000000000000000047 /* MacPendingTranscriptStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000047 /* MacPendingTranscriptStore.swift */; };
+		D10000000000000000000048 /* MacDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000048 /* MacDiagnostics.swift */; };
+		D10000000000000000000049 /* MacPendingAudioStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000049 /* MacPendingAudioStore.swift */; };
+		D10000000000000000000050 /* MacPasteVerification.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000050 /* MacPasteVerification.swift */; };
+		F10000000000000000000101 /* MacActiveCaptureRecovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000000000000000000101 /* MacActiveCaptureRecovery.swift */; };
+		G10000000000000000000201 /* MacRecordingCancellationPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = G20000000000000000000201 /* MacRecordingCancellationPolicy.swift */; };
+		H10000000000000000000301 /* MacSingleInstanceLease.swift in Sources */ = {isa = PBXBuildFile; fileRef = H20000000000000000000301 /* MacSingleInstanceLease.swift */; };
 		D10000000000000000000007 /* MacPasteController.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000007 /* MacPasteController.swift */; };
 		D10000000000000000000008 /* MacReliabilityStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000008 /* MacReliabilityStore.swift */; };
 		D10000000000000000000009 /* TranscriptionModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000002 /* TranscriptionModels.swift */; };
@@ -141,6 +149,14 @@
 		D20000000000000000000043 /* MacPermissions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacPermissions.swift; sourceTree = "<group>"; };
 		D20000000000000000000044 /* MacTranscriptPostProcessor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacTranscriptPostProcessor.swift; sourceTree = "<group>"; };
 		D20000000000000000000045 /* MacSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacSettingsView.swift; sourceTree = "<group>"; };
+		D20000000000000000000046 /* MacDeliveryPolicyStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacDeliveryPolicyStore.swift; sourceTree = "<group>"; };
+		D20000000000000000000047 /* MacPendingTranscriptStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacPendingTranscriptStore.swift; sourceTree = "<group>"; };
+		D20000000000000000000048 /* MacDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacDiagnostics.swift; sourceTree = "<group>"; };
+		D20000000000000000000049 /* MacPendingAudioStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacPendingAudioStore.swift; sourceTree = "<group>"; };
+		D20000000000000000000050 /* MacPasteVerification.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacPasteVerification.swift; sourceTree = "<group>"; };
+		F20000000000000000000101 /* MacActiveCaptureRecovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacActiveCaptureRecovery.swift; sourceTree = "<group>"; };
+		G20000000000000000000201 /* MacRecordingCancellationPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacRecordingCancellationPolicy.swift; sourceTree = "<group>"; };
+		H20000000000000000000301 /* MacSingleInstanceLease.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacSingleInstanceLease.swift; sourceTree = "<group>"; };
 		D20000000000000000000007 /* MacPasteController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacPasteController.swift; sourceTree = "<group>"; };
 		D20000000000000000000008 /* MacReliabilityStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacReliabilityStore.swift; sourceTree = "<group>"; };
 		D20000000000000000000009 /* MacStatusHUD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacStatusHUD.swift; sourceTree = "<group>"; };
@@ -238,6 +254,14 @@
 				D20000000000000000000043 /* MacPermissions.swift */,
 				D20000000000000000000044 /* MacTranscriptPostProcessor.swift */,
 				D20000000000000000000045 /* MacSettingsView.swift */,
+				D20000000000000000000046 /* MacDeliveryPolicyStore.swift */,
+				D20000000000000000000047 /* MacPendingTranscriptStore.swift */,
+				D20000000000000000000048 /* MacDiagnostics.swift */,
+				D20000000000000000000049 /* MacPendingAudioStore.swift */,
+				D20000000000000000000050 /* MacPasteVerification.swift */,
+				F20000000000000000000101 /* MacActiveCaptureRecovery.swift */,
+				G20000000000000000000201 /* MacRecordingCancellationPolicy.swift */,
+				H20000000000000000000301 /* MacSingleInstanceLease.swift */,
 				D20000000000000000000007 /* MacPasteController.swift */,
 				D20000000000000000000008 /* MacReliabilityStore.swift */,
 				D20000000000000000000009 /* MacStatusHUD.swift */,
@@ -369,7 +393,7 @@
 		};
 		A60000000000000000000003 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A1000000000000000000000C, A1000000000000000000000D, C1000000000000000000000B, ); runOnlyForDeploymentPostprocessing = 0; };
 		C60000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (C10000000000000000000003, C10000000000000000000004, C10000000000000000000005, C10000000000000000000006, C10000000000000000000007, ); runOnlyForDeploymentPostprocessing = 0; };
-		D60000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (D10000000000000000000001, D10000000000000000000002, D10000000000000000000003, D10000000000000000000004, D10000000000000000000005, D10000000000000000000006, D10000000000000000000007, D1000000000000000000000E, D1000000000000000000000F, D10000000000000000000040, D10000000000000000000041, D10000000000000000000042, D10000000000000000000043, D10000000000000000000044, D10000000000000000000045, D10000000000000000000008, D10000000000000000000009, D1000000000000000000000A, D1000000000000000000000B, D1000000000000000000000D, ); runOnlyForDeploymentPostprocessing = 0; };
+		D60000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (D10000000000000000000001, D10000000000000000000002, D10000000000000000000003, D10000000000000000000004, D10000000000000000000005, D10000000000000000000006, D10000000000000000000007, D1000000000000000000000E, D1000000000000000000000F, D10000000000000000000040, D10000000000000000000041, D10000000000000000000042, D10000000000000000000043, D10000000000000000000044, D10000000000000000000045, D10000000000000000000046, D10000000000000000000047, D10000000000000000000048, D10000000000000000000049, D10000000000000000000050, F10000000000000000000101, G10000000000000000000201, H10000000000000000000301, D10000000000000000000008, D10000000000000000000009, D1000000000000000000000A, D1000000000000000000000B, D1000000000000000000000D, ); runOnlyForDeploymentPostprocessing = 0; };
 		E60000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (E10000000000000000000003, E10000000000000000000004, ); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 

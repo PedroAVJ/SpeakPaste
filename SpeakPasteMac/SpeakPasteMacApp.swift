@@ -1,95 +1,296 @@
 import AppKit
+import Combine
 import SwiftUI
 
-/// Refuses a second copy of the app.
-///
-/// Two instances means two event taps on the same bare right-Command tap, so
-/// every press starts two recordings and two capture sessions contend for the
-/// same iPhone. The loser fails with a Continuity error — which reads exactly
-/// like the microphone bug this app exists to fix.
+/// Owns everything that must exist only in the process holding the app lease.
+/// A secondary launch therefore never initializes `MacAppModel` and cannot
+/// migrate defaults, recovery journals, or History before it terminates.
+@MainActor
+private final class MacAppRuntime: ObservableObject {
+    let model: MacAppModel?
+    let statusHUD: MacStatusHUDController?
+    let existingApplication: NSRunningApplication?
+    let launchFailureMessage: String?
+
+    private let lease: MacSingleInstanceLease?
+    private var modelObservation: AnyCancellable?
+
+    init(bundleIdentifier: String? = Bundle.main.bundleIdentifier) {
+#if SPEAKPASTE_UI_TEST_INSTANCE
+        // This code path exists only in a specially compiled QA bundle whose
+        // CFFIXED_USER_HOME and TMPDIR are redirected before launch.
+        let acquisition = bundleIdentifier.map {
+            MacSingleInstanceLease.acquireForIsolatedTesting(
+                lockIdentifier: "\($0).isolated-ui-test"
+            )
+        } ?? .unavailable
+        let legacyInstance: NSRunningApplication? = nil
+#else
+        let acquisition = MacSingleInstanceLease.acquire()
+        // Released builds predating the product-wide lease can still be
+        // running. Detect them before constructing MacAppModel so a candidate
+        // cannot scan or migrate their shared stores.
+        let legacyInstance = Self.existingSpeakPasteApplication()
+#endif
+
+        switch acquisition {
+        case let .acquired(lease):
+            guard legacyInstance == nil else {
+                self.lease = nil
+                self.model = nil
+                self.statusHUD = nil
+                self.existingApplication = legacyInstance
+                self.launchFailureMessage = nil
+                self.modelObservation = nil
+                return
+            }
+            let model = MacAppModel()
+            self.lease = lease
+            self.model = model
+            self.statusHUD = MacStatusHUDController(model: model)
+            self.existingApplication = nil
+            self.launchFailureMessage = nil
+            self.modelObservation = nil
+            self.modelObservation = model.objectWillChange.sink { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.objectWillChange.send()
+                }
+            }
+        case .alreadyHeld:
+            self.lease = nil
+            self.model = nil
+            self.statusHUD = nil
+            self.existingApplication = legacyInstance ?? Self.existingSpeakPasteApplication()
+            self.launchFailureMessage = nil
+            self.modelObservation = nil
+        case .unavailable:
+            self.lease = nil
+            self.model = nil
+            self.statusHUD = nil
+            self.existingApplication = legacyInstance
+            self.launchFailureMessage = "SpeakPaste could not create its per-user safety lock, so it did not open or touch local dictation data. Check the permissions on your temporary folder, then try again."
+            self.modelObservation = nil
+        }
+    }
+
+    var isPrimaryInstance: Bool { lease != nil }
+
+    func start() {
+        guard let model, let statusHUD else { return }
+        statusHUD.start()
+        model.startSessionTracking()
+    }
+
+    private static func existingSpeakPasteApplication() -> NSRunningApplication? {
+        let mine = ProcessInfo.processInfo.processIdentifier
+        return NSWorkspace.shared.runningApplications.first { application in
+            guard application.processIdentifier != mine, !application.isTerminated else {
+                return false
+            }
+            let executableMatches = application.executableURL?.lastPathComponent == "SpeakPaste"
+            let bundleMatches = application.bundleURL?.lastPathComponent == "SpeakPaste.app"
+                || application.bundleIdentifier?.localizedCaseInsensitiveContains("speakpaste") == true
+            return executableMatches && bundleMatches
+        }
+    }
+}
+
+/// Terminates a secondary launch after the process lease has already prevented
+/// it from constructing app state. The running copy is brought forward when
+/// Launch Services can identify it.
 @MainActor
 final class MacSingleInstanceGuard: NSObject, NSApplicationDelegate {
+    private weak var model: MacAppModel?
+    private weak var existingApplication: NSRunningApplication?
+    private var isPrimaryInstance = false
+    private var launchFailureMessage: String?
+    private var terminationReplyPending = false
+
+    fileprivate func configure(runtime: MacAppRuntime) {
+        model = runtime.model
+        existingApplication = runtime.existingApplication
+        isPrimaryInstance = runtime.isPrimaryInstance
+        launchFailureMessage = runtime.launchFailureMessage
+    }
+
     func applicationWillFinishLaunching(_ notification: Notification) {
-        guard let identifier = Bundle.main.bundleIdentifier else { return }
-        let mine = ProcessInfo.processInfo.processIdentifier
-        let others = NSRunningApplication
-            .runningApplications(withBundleIdentifier: identifier)
-            .filter { $0.processIdentifier != mine }
-        guard let existing = others.first else { return }
-        existing.activate(options: [])
+        guard !isPrimaryInstance else { return }
+        existingApplication?.activate(options: [])
+        if let launchFailureMessage {
+            let alert = NSAlert()
+            alert.alertStyle = .critical
+            alert.messageText = "SpeakPaste did not start"
+            alert.informativeText = launchFailureMessage
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+        }
         NSApp.terminate(nil)
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let model else { return .terminateNow }
+        guard !terminationReplyPending else { return .terminateLater }
+
+        terminationReplyPending = true
+        Task { @MainActor [weak self, weak sender] in
+            guard let self else { return }
+            let mayTerminate = await model.prepareForTermination()
+            self.terminationReplyPending = false
+            if !mayTerminate {
+                sender?.activate(ignoringOtherApps: true)
+            }
+            sender?.reply(toApplicationShouldTerminate: mayTerminate)
+        }
+        return .terminateLater
     }
 }
 
 @main
 struct SpeakPasteMacApp: App {
     @NSApplicationDelegateAdaptor(MacSingleInstanceGuard.self) private var singleInstance
-    @StateObject private var model: MacAppModel
-    @StateObject private var statusHUD: MacStatusHUDController
+    @StateObject private var runtime: MacAppRuntime
 
     init() {
-        let model = MacAppModel()
-        _model = StateObject(wrappedValue: model)
-        _statusHUD = StateObject(wrappedValue: MacStatusHUDController(model: model))
+        let runtime = MacAppRuntime()
+        _runtime = StateObject(wrappedValue: runtime)
+        singleInstance.configure(runtime: runtime)
     }
 
     var body: some Scene {
-        WindowGroup {
-            MacContentView()
-                .environmentObject(model)
-                .onAppear { statusHUD.start() }
+        Window("SpeakPaste", id: "main") {
+            if let model = runtime.model {
+                MacContentView()
+                    .environmentObject(model)
+                    .onAppear { runtime.start() }
+            } else {
+                EmptyView()
+            }
         }
-        .defaultSize(width: 500, height: 620)
-        .windowResizability(.contentSize)
+        .defaultSize(width: 520, height: 680)
+        .windowResizability(.contentMinSize)
 
         Settings {
-            MacSettingsView()
-                .environmentObject(model)
+            if let model = runtime.model {
+                MacSettingsView()
+                    .environmentObject(model)
+            } else {
+                EmptyView()
+            }
         }
 
         MenuBarExtra {
-            MacMenuBarView()
-                .environmentObject(model)
+            if let model = runtime.model {
+                MacMenuBarView()
+                    .environmentObject(model)
+            }
         } label: {
-            Image(systemName: menuBarSymbol)
-                .accessibilityLabel(menuBarAccessibilityLabel)
+            if let model = runtime.model {
+                Image(systemName: menuBarSymbol(for: model))
+                    .accessibilityLabel(menuBarAccessibilityLabel(for: model))
+                    // The menu bar item exists from launch, so this runs even
+                    // when the main window never opens — a login-item start
+                    // with the Dock icon off still gets the HUD and recovery
+                    // marker.
+                    .onAppear { runtime.start() }
+            } else {
+                EmptyView()
+            }
         }
     }
 
-    private var menuBarSymbol: String {
-        switch model.phase {
+    private func menuBarSymbol(for model: MacAppModel) -> String {
+        return switch model.phase {
         case .connecting: "antenna.radiowaves.left.and.right"
         case .recording: "record.circle.fill"
         case .finalizing: "stop.circle"
         case .succeeded: "checkmark.circle.fill"
         case .failed: "exclamationmark.triangle.fill"
-        case .ready: "waveform"
+        case .ready:
+            readinessIssue(for: model) != nil
+                ? "exclamationmark.triangle.fill"
+                : (model.networkIsAvailable ? "waveform" : "wifi.slash")
         }
     }
 
-    private var menuBarAccessibilityLabel: String {
+    private func menuBarAccessibilityLabel(for model: MacAppModel) -> String {
         switch model.phase {
         case .connecting: "SpeakPaste, connecting to microphone"
-        case .recording: "SpeakPaste, recording. Speak now. Press Command to stop and transcribe"
+        case .recording: "SpeakPaste, recording. Speak now. Press the Right Command key to stop and transcribe"
         case .finalizing: "SpeakPaste, recording stopped. Releasing microphone"
         case .succeeded: "SpeakPaste, done"
         case .failed: "SpeakPaste, error"
-        case .ready: "SpeakPaste, ready. Press Command to start"
+        case .ready:
+            if let readinessIssue = readinessIssue(for: model) {
+                "SpeakPaste, setup needed. \(readinessIssue)"
+            } else if !model.networkIsAvailable {
+                "SpeakPaste, offline. Recordings remain saved and retry when the connection returns"
+            } else {
+                "SpeakPaste, ready. Press the Right Command key to start"
+            }
         }
+    }
+
+    private func readinessIssue(for model: MacAppModel) -> String? {
+        if !model.hasAPIKey { return "Add an ElevenLabs API key" }
+        if model.selectedDevice == nil { return "Choose a microphone" }
+        if model.permissions.granted[.microphone] != true { return "Grant microphone access" }
+        return nil
     }
 }
 
 struct MacMenuBarView: View {
     @EnvironmentObject private var model: MacAppModel
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
+        captureItems
+        queueItems
+
+        Divider()
+
+        lastTranscriptItems
+
+        Divider()
+
+        appItems
+
+        Divider()
+
+        microphoneStatus
+
+        Divider()
+
+        Button("Quit SpeakPaste") { NSApp.terminate(nil) }
+            .keyboardShortcut("q")
+    }
+
+    @ViewBuilder
+    private var captureItems: some View {
+        if !model.networkIsAvailable {
+            Text("OFFLINE — recordings stay saved and retry on reconnect")
+        }
         switch model.phase {
         case .connecting:
             Button("WAIT — connecting; do not speak yet") {}
                 .disabled(true)
+            Button("Cancel  \(model.cancelHotKeyLabel)") { model.requestRecordingCancellation() }
+                .accessibilityLabel("Cancel connecting, Escape key")
         case .recording:
             Button("SPEAK NOW — Stop & Transcribe  \(model.hotKeyLabel)") {
                 model.toggleRecording()
+            }
+            .accessibilityLabel("Stop and transcribe, Right Command key")
+            if let confirmation = model.recordingCancelConfirmation {
+                Text("DISCARD RECORDING? — \(confirmation.message)")
+                Button("Discard Recording Now  \(model.cancelHotKeyLabel)") {
+                    model.requestRecordingCancellation()
+                }
+                .accessibilityLabel("Confirm discard recording, Escape key")
+            } else {
+                Button("Cancel Recording  \(model.cancelHotKeyLabel)") {
+                    model.requestRecordingCancellation()
+                }
+                .accessibilityLabel("Cancel recording, Escape key")
             }
         case .finalizing:
             Button("RELEASING MICROPHONE…") {}
@@ -99,48 +300,121 @@ struct MacMenuBarView: View {
                 .disabled(true)
         case let .failed(message):
             Text("ERROR — \(message)")
-            Button("Try Again  \(model.hotKeyLabel)") { model.toggleRecording() }
-                .disabled(model.selectedDevice == nil)
+            Button("Start New Recording  \(model.hotKeyLabel)") { model.toggleRecording() }
+                .disabled(!canStartRecording)
+                .accessibilityLabel("Start a new recording, Right Command key")
         case .ready:
             if model.inFlightCount > 0 {
                 Text("TRANSCRIBING \(model.inFlightCount) — microphone is free")
             }
             Button("Start Recording  \(model.hotKeyLabel)") { model.toggleRecording() }
-                .disabled(model.selectedDevice == nil)
+                .disabled(!canStartRecording)
+                .accessibilityLabel("Start recording, Right Command key")
         }
+    }
 
+    @ViewBuilder
+    private var queueItems: some View {
         if !model.heldTranscripts.isEmpty {
-            Button("Paste \(model.heldTranscripts.count) Held Here  \(model.releaseHotKeyLabel)") {
-                model.releaseHeldTranscripts()
+            Button(heldMenuTitle) {
+                if model.hasUncertainHeldTranscripts {
+                    openWindow(id: "main")
+                    NSApp.activate(ignoringOtherApps: true)
+                } else {
+                    model.releaseHeldTranscripts()
+                }
+            }
+            .accessibilityLabel(
+                model.hasUncertainHeldTranscripts
+                    ? "Review possibly delivered transcripts in SpeakPaste"
+                    : "Paste all waiting transcripts here, Option Command V"
+            )
+        }
+        if !model.retryableFailures.isEmpty {
+            Button("Retry \(model.retryableFailures.count) Failed — audio is saved") {
+                model.retryAllFailures()
             }
         }
+    }
 
-        if !model.retryableFailures.isEmpty {
-            Button("Retry \(model.retryableFailures.count) Failed") { model.retryAllFailures() }
-        }
-        if model.phase == .recording {
-            Button("Cancel Recording") { model.cancelRecording() }
-        }
-
-        Divider()
-
-        SettingsLink { Text("Settings…") }
-
-        Button("Copy Last Transcript") { model.copyTranscript() }
+    @ViewBuilder
+    private var lastTranscriptItems: some View {
+        Button("Paste Last Transcript  \(model.pasteLastHotKeyLabel)") { model.pasteLastTranscript() }
             .disabled(model.transcript.isEmpty)
+            .accessibilityLabel("Paste last transcript, Control Command V")
+        Button("Copy Last Transcript  \(model.copyLastHotKeyLabel)") { model.copyTranscript() }
+            .disabled(model.transcript.isEmpty)
+            .accessibilityLabel("Copy last transcript, Control Command C")
+    }
 
-        Divider()
+    @ViewBuilder
+    private var appItems: some View {
+        // The whole Scribe catalog is one submenu away, with the original
+        // pinned choices on top, so switching languages never requires the
+        // Settings window mid-dictation.
+        Menu("Language: \(model.language.title)") {
+            Picker("Language", selection: $model.language) {
+                ForEach(TranscriptionLanguage.macPinnedChoices) { language in
+                    Text(language.title).tag(language)
+                }
+                Divider()
+                ForEach(TranscriptionLanguage.macAdditionalChoices) { language in
+                    Text(language.title).tag(language)
+                }
+            }
+            .pickerStyle(.inline)
+            .labelsHidden()
+        }
+        .accessibilityLabel("Transcription language, currently \(model.language.title)")
+        Button("Open SpeakPaste") {
+            openWindow(id: "main")
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        SettingsLink { Text("Settings…") }
+        Button("Replay Onboarding") {
+            model.showOnboardingAgain()
+            openWindow(id: "main")
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
 
-        if model.isMicrophoneConnected, let device = model.selectedDevice {
-            Text(
-                device.isContinuityDevice
-                    ? "iPhone microphone active — released on stop"
-                    : "\(device.name) active — released on stop"
-            )
+    @ViewBuilder
+    private var microphoneStatus: some View {
+        if let readinessMessage {
+            Label(readinessMessage, systemImage: "exclamationmark.triangle.fill")
+        } else if model.isMicrophoneConnected, let device = model.selectedDevice {
+            Text("\(device.name) · \(device.sourceLabel) active — released on stop")
         } else if let device = model.selectedDevice {
-            Text("Microphone: \(device.name)")
+            Text("Microphone: \(device.name) · \(device.sourceLabel)")
         } else {
             Text("No microphone available")
         }
+    }
+
+    /// "Held" text auto-pastes when its destination regains focus; "recovered"
+    /// text (from a previous session) never does. The label must not promise an
+    /// automatic paste for transcripts that will only move on this click.
+    private var heldMenuTitle: String {
+        let count = model.heldTranscripts.count
+        if model.hasUncertainHeldTranscripts {
+            return "Review \(count) Possibly Delivered  \(model.releaseHotKeyLabel)"
+        }
+        if model.heldTranscripts.allSatisfy(\.isRecovered) {
+            return "Paste \(count) Recovered Here  \(model.releaseHotKeyLabel)"
+        }
+        return "Paste \(count) Held Here  \(model.releaseHotKeyLabel)"
+    }
+
+    private var canStartRecording: Bool {
+        model.canStartRecording
+    }
+
+    private var readinessMessage: String? {
+        if !model.hasAPIKey { return "Setup needed: add an ElevenLabs API key" }
+        if model.selectedDevice == nil { return "Setup needed: choose a microphone" }
+        if model.permissions.granted[.microphone] != true {
+            return "Setup needed: grant microphone access"
+        }
+        return nil
     }
 }

@@ -18,7 +18,7 @@ final class DictationLiveActivity {
     }
 
     private var activity: Activity<SpeakPasteActivityAttributes>?
-    private var recordingStartedAt: Date?
+    private var recordingStartedAtBySessionID: [UUID: Date] = [:]
 
     /// `AudioRecordingIntent` requires a Live Activity for the entire capture.
     /// Without it, iOS stops recording as soon as the intent returns.
@@ -32,6 +32,7 @@ final class DictationLiveActivity {
         for existing in Activity<SpeakPasteActivityAttributes>.activities {
             await existing.end(nil, dismissalPolicy: .immediate)
         }
+        recordingStartedAtBySessionID.removeAll()
 
         let attributes = SpeakPasteActivityAttributes(
             sessionID: sessionID,
@@ -57,29 +58,33 @@ final class DictationLiveActivity {
 
     func update(
         _ phase: SpeakPasteActivityAttributes.Phase,
+        sessionID: UUID,
         recordingStartedAt: Date? = nil
     ) async {
-        guard let activity = currentActivity else { return }
+        guard let activity = currentActivity(for: sessionID) else { return }
         if phase == .recording {
-            self.recordingStartedAt = recordingStartedAt ?? Date()
+            recordingStartedAtBySessionID[sessionID] = recordingStartedAt ?? Date()
         }
         await activity.update(
             ActivityContent(
                 state: SpeakPasteActivityAttributes.ContentState(
                     phase: phase,
-                    recordingStartedAt: self.recordingStartedAt
+                    recordingStartedAt: recordingStartedAtBySessionID[sessionID]
                 ),
                 staleDate: nil
             )
         )
     }
 
-    func end(_ phase: SpeakPasteActivityAttributes.Phase) async {
-        guard let activity = currentActivity else { return }
+    func end(
+        _ phase: SpeakPasteActivityAttributes.Phase,
+        sessionID: UUID
+    ) async {
+        guard let activity = currentActivity(for: sessionID) else { return }
         let content = ActivityContent(
             state: SpeakPasteActivityAttributes.ContentState(
                 phase: phase,
-                recordingStartedAt: recordingStartedAt
+                recordingStartedAt: recordingStartedAtBySessionID[sessionID]
             ),
             staleDate: nil
         )
@@ -87,11 +92,20 @@ final class DictationLiveActivity {
             ? .immediate
             : .after(Date().addingTimeInterval(3))
         await activity.end(content, dismissalPolicy: policy)
-        self.activity = nil
-        recordingStartedAt = nil
+        recordingStartedAtBySessionID[sessionID] = nil
+        if self.activity?.id == activity.id {
+            self.activity = nil
+        }
     }
 
-    private var currentActivity: Activity<SpeakPasteActivityAttributes>? {
-        activity ?? Activity<SpeakPasteActivityAttributes>.activities.first
+    private func currentActivity(
+        for sessionID: UUID
+    ) -> Activity<SpeakPasteActivityAttributes>? {
+        if activity?.attributes.sessionID == sessionID {
+            return activity
+        }
+        return Activity<SpeakPasteActivityAttributes>.activities.first {
+            $0.attributes.sessionID == sessionID
+        }
     }
 }

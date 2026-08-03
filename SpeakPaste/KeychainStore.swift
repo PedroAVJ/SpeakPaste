@@ -1,9 +1,11 @@
 import Foundation
 import Security
 
-enum KeychainStoreError: LocalizedError {
+enum KeychainStoreError: LocalizedError, Equatable {
     case encodingFailed
     case unexpectedStatus(OSStatus)
+    case unexpectedDeleteStatus(OSStatus)
+    case deletionVerificationFailed
 
     var errorDescription: String? {
         switch self {
@@ -11,15 +13,98 @@ enum KeychainStoreError: LocalizedError {
             "The API key could not be encoded."
         case let .unexpectedStatus(status):
             "The API key could not be saved securely (\(status))."
+        case let .unexpectedDeleteStatus(status):
+            "The API key could not be removed securely (\(status))."
+        case .deletionVerificationFailed:
+            "The API key is still present after Keychain reported that it was removed."
         }
     }
 }
 
 struct KeychainStore {
+    struct Access {
+        let deleteItem: ([String: Any]) -> OSStatus
+        let loadString: ([String: Any]) -> String?
+        let upsertData: (Data, [String: Any], Bool) -> OSStatus
+
+        init(
+            deleteItem: @escaping ([String: Any]) -> OSStatus,
+            loadString: @escaping ([String: Any]) -> String?,
+            upsertData: @escaping (Data, [String: Any], Bool) -> OSStatus = Access.liveUpsert
+        ) {
+            self.deleteItem = deleteItem
+            self.loadString = loadString
+            self.upsertData = upsertData
+        }
+
+        static var live: Access {
+            Access(
+                deleteItem: { query in
+                    SecItemDelete(query as CFDictionary)
+                },
+                loadString: { base in
+                    var query = base
+                    query.merge([
+                        kSecReturnData as String: true,
+                        kSecMatchLimit as String: kSecMatchLimitOne,
+                    ]) { _, new in new }
+                    var result: CFTypeRef?
+                    guard
+                        SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+                        let data = result as? Data
+                    else {
+                        return nil
+                    }
+                    return String(data: data, encoding: .utf8)
+                },
+                upsertData: liveUpsert
+            )
+        }
+
+        static func liveUpsert(
+            _ data: Data,
+            _ query: [String: Any],
+            _ usesDataProtection: Bool
+        ) -> OSStatus {
+            var attributes: [String: Any] = [kSecValueData as String: data]
+            if usesDataProtection {
+                attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            }
+
+            let updateStatus = SecItemUpdate(
+                query as CFDictionary,
+                attributes as CFDictionary
+            )
+            if updateStatus == errSecSuccess { return updateStatus }
+            guard updateStatus == errSecItemNotFound else { return updateStatus }
+
+            var insert = query
+            insert.merge(attributes) { _, new in new }
+            return SecItemAdd(insert as CFDictionary, nil)
+        }
+    }
+
     private let service = "com.example.speakpaste"
+    /// The first signed macOS builds stored the same account under this
+    /// service. Retain it as an upgrade fallback so an existing key cannot
+    /// disappear merely because the storage label changed.
+    private let legacyService = "com.pedro.speakpaste"
     private let account = "elevenlabs-api-key"
+    private let access: Access
+
+    init(access: Access = .live) {
+        self.access = access
+    }
 
     private var baseQuery: [String: Any] {
+        baseQuery(service: service)
+    }
+
+    private var legacyBaseQuery: [String: Any] {
+        baseQuery(service: legacyService)
+    }
+
+    private func baseQuery(service: String) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -28,7 +113,15 @@ struct KeychainStore {
     }
 
     private var dataProtectionQuery: [String: Any] {
-        var query = baseQuery
+        dataProtectionQuery(base: baseQuery)
+    }
+
+    private var legacyDataProtectionQuery: [String: Any] {
+        dataProtectionQuery(base: legacyBaseQuery)
+    }
+
+    private func dataProtectionQuery(base: [String: Any]) -> [String: Any] {
+        var query = base
 #if os(macOS)
         query[kSecUseDataProtectionKeychain as String] = true
 #endif
@@ -40,75 +133,72 @@ struct KeychainStore {
             throw KeychainStoreError.encodingFailed
         }
 
-        let status = upsert(data, query: dataProtectionQuery, usesDataProtection: true)
-        if status == errSecSuccess { return }
 #if os(macOS)
-        // Local ad-hoc builds have no provisioning profile, so macOS rejects the
-        // Data Protection Keychain with errSecMissingEntitlement. Fall back to
-        // the traditional per-user Keychain instead of discarding the key.
-        if status == errSecMissingEntitlement {
-            let fallbackStatus = upsert(data, query: baseQuery, usesDataProtection: false)
-            guard fallbackStatus == errSecSuccess else {
-                throw KeychainStoreError.unexpectedStatus(fallbackStatus)
-            }
-            return
+        // The traditional per-user Keychain is the macOS source of truth
+        // across both signed and ad-hoc builds. Save it first, then synchronize
+        // the Data Protection entry when the current signature can access it.
+        // A stale DP item can therefore never shadow a newer development key.
+        let baseStatus = access.upsertData(data, baseQuery, false)
+        guard baseStatus == errSecSuccess else {
+            throw KeychainStoreError.unexpectedStatus(baseStatus)
         }
-#endif
+        _ = access.upsertData(data, dataProtectionQuery, true)
+#else
+        let status = access.upsertData(data, dataProtectionQuery, true)
         guard status == errSecSuccess else {
             throw KeychainStoreError.unexpectedStatus(status)
         }
+#endif
     }
 
     func load() -> String? {
-        if let value = load(query: dataProtectionQuery) {
+#if os(macOS)
+        if let value = access.loadString(baseQuery) {
             return value
         }
-#if os(macOS)
-        return load(query: baseQuery)
+        if let value = access.loadString(dataProtectionQuery) {
+            return value
+        }
+        if let value = access.loadString(legacyBaseQuery) {
+            return value
+        }
+        return access.loadString(legacyDataProtectionQuery)
 #else
-        return nil
+        if let value = access.loadString(dataProtectionQuery) {
+            return value
+        }
+        return access.loadString(legacyDataProtectionQuery)
 #endif
     }
 
-    func delete() {
-        SecItemDelete(dataProtectionQuery as CFDictionary)
+    func delete() throws {
+        var firstFailure: OSStatus?
+        for query in deletionQueries {
+            let status = access.deleteItem(query)
+            if !isSuccessfulDeletion(status, for: query), firstFailure == nil {
+                firstFailure = status
+            }
+        }
+        if let firstFailure {
+            throw KeychainStoreError.unexpectedDeleteStatus(firstFailure)
+        }
+        guard load() == nil else {
+            throw KeychainStoreError.deletionVerificationFailed
+        }
+    }
+
+    private func isSuccessfulDeletion(
+        _ status: OSStatus,
+        for _: [String: Any]
+    ) -> Bool {
+        status == errSecSuccess || status == errSecItemNotFound
+    }
+
+    private var deletionQueries: [[String: Any]] {
 #if os(macOS)
-        SecItemDelete(baseQuery as CFDictionary)
+        [dataProtectionQuery, baseQuery, legacyDataProtectionQuery, legacyBaseQuery]
+#else
+        [dataProtectionQuery, legacyDataProtectionQuery]
 #endif
-    }
-
-    private func load(query base: [String: Any]) -> String? {
-        var query = base
-        query.merge([
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]) { _, new in new }
-        var result: CFTypeRef?
-        guard
-            SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-            let data = result as? Data
-        else {
-            return nil
-        }
-        return String(data: data, encoding: .utf8)
-    }
-
-    private func upsert(
-        _ data: Data,
-        query: [String: Any],
-        usesDataProtection: Bool
-    ) -> OSStatus {
-        var attributes: [String: Any] = [kSecValueData as String: data]
-        if usesDataProtection {
-            attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        }
-
-        let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-        if updateStatus == errSecSuccess { return updateStatus }
-        guard updateStatus == errSecItemNotFound else { return updateStatus }
-
-        var insert = query
-        insert.merge(attributes) { _, new in new }
-        return SecItemAdd(insert as CFDictionary, nil)
     }
 }

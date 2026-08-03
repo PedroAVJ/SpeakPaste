@@ -11,6 +11,7 @@ enum MacAudioRecorderError: LocalizedError {
     case noActiveRecording
     case recordingStartTimedOut
     case recordingFinalizationTimedOut
+    case recordingFileProtectionFailed
     case audioStreamNotReady
     case audioStreamSilent
     case audioMonitorUnavailable
@@ -36,6 +37,8 @@ enum MacAudioRecorderError: LocalizedError {
             "The microphone connected but did not begin delivering audio. SpeakPaste reset the connection; try again."
         case .recordingFinalizationTimedOut:
             "The microphone did not finish the recording. SpeakPaste reset the connection; try again."
+        case .recordingFileProtectionFailed:
+            "SpeakPaste could not protect the recording file, so recording was stopped."
         case .audioStreamNotReady:
             "The microphone connected but never delivered audio. Lock the iPhone, keep it nearby, then try again."
         case .audioStreamSilent:
@@ -50,6 +53,19 @@ enum MacAudioRecorderError: LocalizedError {
 
 struct MacRecordedSegment: Sendable {
     let url: URL
+}
+
+/// A recording failure that occurred after a usable portion of the WAV had
+/// already reached disk. The recorder has fully released its capture session
+/// before throwing this error, so the caller can immediately move or upload
+/// `audioURL` without keeping ownership of the Continuity microphone.
+struct MacAudioRecorderSalvagedFailure: LocalizedError {
+    let underlying: Error
+    let audioURL: URL
+
+    var errorDescription: String? {
+        underlying.localizedDescription
+    }
 }
 
 private final class MacRuntimeErrorLatch: @unchecked Sendable {
@@ -129,6 +145,11 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
     private var startTimeoutWorkItem: DispatchWorkItem?
     private var finalizationTimeoutWorkItem: DispatchWorkItem?
     private var pendingRecordingError: Error?
+    /// A late `didFinishRecordingTo` callback belongs to AVFoundation, not to
+    /// the caller that now owns a salvaged file. Remember those URLs so that a
+    /// stale delegate callback cannot delete a partial WAV after it was handed
+    /// off for recovery.
+    private var preservedPartialURLs = Set<URL>()
 
     private let recordingStartTimeout: TimeInterval = 8
     private let finalizationTimeout: TimeInterval = 8
@@ -226,6 +247,7 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
         var steadyWindows = 0
         var audibleWindows = 0
         while steadyWindows < Self.requiredSteadyWindows {
+            try Task.checkCancellation()
             if let failure = captureQueue.sync(execute: { currentSessionFailure() }) {
                 throw failure
             }
@@ -236,7 +258,7 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
                     ? MacAudioRecorderError.audioStreamSilent
                     : MacAudioRecorderError.audioStreamNotReady
             }
-            try? await Task.sleep(for: .milliseconds(30))
+            try await Task.sleep(for: .milliseconds(30))
             let count = sampleFlow.count
             let audibleCount = sampleFlow.audibleCount
             steadyWindows = count > lastCount ? steadyWindows + 1 : 0
@@ -367,6 +389,14 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
                 // putting an AAC compressor/channel mixer in the capture graph.
                 output.audioSettings = nil
                 output.startRecording(to: url, outputFileType: .wav, recordingDelegate: self)
+                // AVFoundation creates the destination itself. Harden it on the
+                // first synchronous opportunity, then require 0600 again in the
+                // did-start callback before telling the app recording began.
+                self.hardenRecordingPermissions(
+                    at: url,
+                    output: output,
+                    generation: self.sessionGeneration
+                )
                 self.scheduleStartTimeout(
                     output: output,
                     url: url,
@@ -423,6 +453,18 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
                 self.output?.stopRecording()
             }
             self.failSession(with: MacAudioRecorderError.connectionFailed)
+        }
+    }
+
+    /// Used only at process/lifecycle boundaries where returning before
+    /// `stopRunning()` would leave the iPhone's Continuity microphone owned by
+    /// a process that is about to sleep or exit.
+    func disconnectSynchronously() {
+        captureQueue.sync {
+            if output?.isRecording == true {
+                output?.stopRecording()
+            }
+            failSession(with: MacAudioRecorderError.connectionFailed)
         }
     }
 
@@ -534,10 +576,14 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
             // receives it rather than the vague "no active recording" error.
             pendingRecordingError = error
         }
-        failSession(with: error, preservingPendingRecordingError: pendingRecordingError != nil)
+        let salvagedURL = failSession(
+            with: error,
+            preservingPendingRecordingError: pendingRecordingError != nil,
+            preservingPartialRecording: segmentDidStart
+        )
         if shouldNotifyRecordingFailure {
             // Do not surface ERROR until stopRunning() has released Continuity.
-            recordingFailureHandler?(error, nil)
+            recordingFailureHandler?(error, salvagedURL)
         }
     }
 
@@ -581,7 +627,10 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
                 self.stopContinuation != nil
             else { return }
 
-            self.failSession(with: MacAudioRecorderError.recordingFinalizationTimedOut)
+            self.failSession(
+                with: MacAudioRecorderError.recordingFinalizationTimedOut,
+                preservingPartialRecording: self.segmentDidStart
+            )
         }
         finalizationTimeoutWorkItem = workItem
         captureQueue.asyncAfter(
@@ -623,6 +672,36 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
                 !output.isRecording
             else { return }
             output.startRecording(to: url, outputFileType: .wav, recordingDelegate: self)
+            hardenRecordingPermissions(at: url, output: output, generation: generation)
+        }
+    }
+
+    /// AVFoundation owns destination creation. Poll briefly from the capture
+    /// queue so a file created just after `startRecording` is chmodded before
+    /// the delegate callback too; the callback remains the final mandatory
+    /// privacy gate.
+    private func hardenRecordingPermissions(
+        at url: URL,
+        output: AVCaptureAudioFileOutput,
+        generation: UInt64,
+        attemptsRemaining: Int = 50
+    ) {
+        if MacActiveCaptureRecovery.makeRecordingPrivate(at: url) { return }
+        guard
+            attemptsRemaining > 0,
+            matches(output: output, url: url, generation: generation),
+            startContinuation != nil
+        else {
+            return
+        }
+        captureQueue.asyncAfter(deadline: .now() + 0.01) { [weak self, weak output] in
+            guard let self, let output else { return }
+            self.hardenRecordingPermissions(
+                at: url,
+                output: output,
+                generation: generation,
+                attemptsRemaining: attemptsRemaining - 1
+            )
         }
     }
 
@@ -680,14 +759,21 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
         }
     }
 
+    /// Tears down the complete capture session before resuming either
+    /// continuation. When requested, a partially written WAV is retained only
+    /// if it is a regular, non-symlink file with a RIFF/WAVE header and payload
+    /// beyond the minimum header size.
+    @discardableResult
     private func failSession(
         with error: Error,
-        preservingPendingRecordingError: Bool = false
-    ) {
+        preservingPendingRecordingError: Bool = false,
+        preservingPartialRecording: Bool = false
+    ) -> URL? {
         let startContinuation = self.startContinuation
         let stopContinuation = self.stopContinuation
         let staleSession = session
         let staleURL = segmentURL
+        let staleSegmentDidStart = segmentDidStart
         let savedPendingError = pendingRecordingError
 
         removeRuntimeErrorObserver()
@@ -696,17 +782,78 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
         output = nil
         activeDeviceID = nil
         runtimeError = nil
-        pendingRecordingError = preservingPendingRecordingError ? savedPendingError : nil
 
         // stopRunning() is synchronous. Keep teardown on the same serial queue
         // as connection/start so a retry cannot race the old iPhone stream.
         staleSession?.stopRunning()
-        if let staleURL {
+
+        let salvagedURL: URL?
+        if
+            preservingPartialRecording,
+            staleSegmentDidStart,
+            let staleURL,
+            isPlausiblePartialWAV(at: staleURL)
+        {
+            salvagedURL = staleURL
+            preservedPartialURLs.insert(staleURL.standardizedFileURL)
+        } else {
+            salvagedURL = nil
+        }
+
+        if salvagedURL == nil, let staleURL {
             try? FileManager.default.removeItem(at: staleURL)
         }
 
+        let surfacedError: Error
+        if let salvagedURL {
+            surfacedError = MacAudioRecorderSalvagedFailure(
+                underlying: error,
+                audioURL: salvagedURL
+            )
+        } else {
+            surfacedError = error
+        }
+        if preservingPendingRecordingError {
+            pendingRecordingError = salvagedURL == nil ? savedPendingError : surfacedError
+        } else {
+            pendingRecordingError = nil
+        }
+
         startContinuation?.resume(throwing: error)
-        stopContinuation?.resume(throwing: error)
+        stopContinuation?.resume(throwing: surfacedError)
+        return salvagedURL
+    }
+
+    /// Checks enough structure to avoid treating an empty placeholder, a
+    /// directory, or an attacker-controlled symlink as recoverable audio. A
+    /// canonical PCM WAV header is at least 44 bytes, so any retained file must
+    /// contain bytes beyond that header as evidence that recording began.
+    private func isPlausiblePartialWAV(at url: URL) -> Bool {
+        let keys: Set<URLResourceKey> = [
+            .isRegularFileKey,
+            .isSymbolicLinkKey,
+            .fileSizeKey,
+        ]
+        guard
+            let values = try? url.resourceValues(forKeys: keys),
+            values.isRegularFile == true,
+            values.isSymbolicLink != true,
+            let fileSize = values.fileSize,
+            fileSize > 44,
+            let handle = try? FileHandle(forReadingFrom: url)
+        else {
+            return false
+        }
+        defer { try? handle.close() }
+
+        guard
+            let header = try? handle.read(upToCount: 12),
+            header.count == 12
+        else {
+            return false
+        }
+        return Array(header.prefix(4)) == Array("RIFF".utf8)
+            && Array(header.dropFirst(8).prefix(4)) == Array("WAVE".utf8)
     }
 
     nonisolated func fileOutput(
@@ -721,6 +868,12 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
                 self.matches(output: output, url: outputFileURL, generation: generation),
                 let continuation = self.startContinuation
             else { return }
+
+            guard MacActiveCaptureRecovery.makeRecordingPrivate(at: outputFileURL) else {
+                if output.isRecording { output.stopRecording() }
+                self.failSession(with: MacAudioRecorderError.recordingFileProtectionFailed)
+                return
+            }
 
             self.startTimeoutWorkItem?.cancel()
             self.startTimeoutWorkItem = nil
@@ -743,6 +896,9 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
                 let generation,
                 self.matches(output: output, url: outputFileURL, generation: generation)
             else {
+                if self.preservedPartialURLs.remove(outputFileURL.standardizedFileURL) != nil {
+                    return
+                }
                 try? FileManager.default.removeItem(at: outputFileURL)
                 return
             }
@@ -765,12 +921,18 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
                 if preserveForNextStop {
                     self.pendingRecordingError = failure
                 }
-                self.failSession(
+                let salvagedURL = self.failSession(
                     with: failure,
-                    preservingPendingRecordingError: preserveForNextStop
+                    preservingPendingRecordingError: preserveForNextStop,
+                    preservingPartialRecording: self.segmentDidStart
                 )
+                // This is the delegate callback the tracking set protects
+                // against, so it has now been consumed.
+                if let salvagedURL {
+                    self.preservedPartialURLs.remove(salvagedURL.standardizedFileURL)
+                }
                 if preserveForNextStop {
-                    self.recordingFailureHandler?(failure, nil)
+                    self.recordingFailureHandler?(failure, salvagedURL)
                 }
                 return
             }
@@ -793,12 +955,15 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
                 // instead of discarding it.
                 let failure = error ?? MacAudioRecorderError.noActiveRecording
                 self.pendingRecordingError = failure
-                self.segmentURL = nil
-                self.failSession(
+                let salvagedURL = self.failSession(
                     with: failure,
-                    preservingPendingRecordingError: true
+                    preservingPendingRecordingError: true,
+                    preservingPartialRecording: self.segmentDidStart
                 )
-                self.recordingFailureHandler?(failure, outputFileURL)
+                if let salvagedURL {
+                    self.preservedPartialURLs.remove(salvagedURL.standardizedFileURL)
+                }
+                self.recordingFailureHandler?(failure, salvagedURL)
                 return
             }
 

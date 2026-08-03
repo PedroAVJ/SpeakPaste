@@ -2,6 +2,7 @@ import AppKit
 @preconcurrency import ApplicationServices
 import AVFoundation
 import Combine
+import Carbon
 import CoreGraphics
 import Foundation
 import ServiceManagement
@@ -14,6 +15,7 @@ enum MacPermission: String, CaseIterable, Identifiable, Sendable {
     case microphone
     case accessibility
     case inputMonitoring
+    case postEvents
     case launchAtLogin
 
     var id: String { rawValue }
@@ -23,6 +25,7 @@ enum MacPermission: String, CaseIterable, Identifiable, Sendable {
         case .microphone: "Microphone"
         case .accessibility: "Accessibility"
         case .inputMonitoring: "Input Monitoring"
+        case .postEvents: "Keyboard Output"
         case .launchAtLogin: "Open at Login"
         }
     }
@@ -35,6 +38,8 @@ enum MacPermission: String, CaseIterable, Identifiable, Sendable {
             "Required for the global shortcut and for pasting into the app you were typing in."
         case .inputMonitoring:
             "Optional. Some Macs need it alongside Accessibility before the shortcut sees key presses."
+        case .postEvents:
+            "Required for the keystroke and type-out fallbacks when an app's Paste menu is unavailable."
         case .launchAtLogin:
             "Optional. Keeps the shortcut available after a restart without opening SpeakPaste by hand."
         }
@@ -46,6 +51,7 @@ final class MacPermissionsModel: ObservableObject {
     /// Always carries every case, so a view reading a grant never has to decide
     /// what a missing key means.
     @Published private(set) var granted: [MacPermission: Bool] = [:]
+    @Published private(set) var isSecureInputEnabled = false
 
     /// The only change macOS pushes for the accessibility trust list.
     private static let accessibilityChangedNotification = Notification.Name("com.apple.accessibility.api")
@@ -59,6 +65,7 @@ final class MacPermissionsModel: ObservableObject {
 
     init() {
         granted = Self.currentGrants()
+        isSecureInputEnabled = IsSecureEventInputEnabled()
     }
 
     /// The run loop and the notification center own the timer and the observer,
@@ -138,6 +145,9 @@ final class MacPermissionsModel: ObservableObject {
         case .inputMonitoring:
             _ = CGRequestListenEventAccess()
             syncGrants()
+        case .postEvents:
+            _ = CGRequestPostEventAccess()
+            syncGrants()
         case .launchAtLogin:
             setLaunchAtLogin(true)
         }
@@ -185,8 +195,10 @@ final class MacPermissionsModel: ObservableObject {
     /// silent rather than re-arming the shortcut every two seconds.
     private func syncGrants() {
         let current = Self.currentGrants()
-        guard current != granted else { return }
+        let secureInput = IsSecureEventInputEnabled()
+        guard current != granted || secureInput != isSecureInputEnabled else { return }
         granted = current
+        isSecureInputEnabled = secureInput
         onChange?()
     }
 
@@ -199,6 +211,7 @@ final class MacPermissionsModel: ObservableObject {
         case .microphone: AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
         case .accessibility: AXIsProcessTrusted()
         case .inputMonitoring: CGPreflightListenEventAccess()
+        case .postEvents: CGPreflightPostEventAccess()
         case .launchAtLogin: SMAppService.mainApp.status == .enabled
         }
     }
@@ -212,6 +225,7 @@ private extension MacPermission {
         case .microphone: "Privacy_Microphone"
         case .accessibility: "Privacy_Accessibility"
         case .inputMonitoring: "Privacy_ListenEvent"
+        case .postEvents: "Privacy_Accessibility"
         case .launchAtLogin: nil
         }
     }

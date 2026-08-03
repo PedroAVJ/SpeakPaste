@@ -10,6 +10,10 @@ final class SpeakPasteAppDelegate: UIResponder, UIApplicationDelegate {
             UIApplication.LaunchOptionsKey: Any
         ]? = nil
     ) -> Bool {
+        // A hard suspension can outlive URLSession's cancellation cleanup.
+        // Launch is the only safe time to sweep a prior process's exact private
+        // upload artifacts, before this process can start a transcription.
+        ElevenLabsClient.cleanupAbandonedMultipartUploads()
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(systemNavigationActionDidChange(_:)),

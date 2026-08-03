@@ -37,7 +37,7 @@ The Xcode project contains four product targets:
 6. Click the record control or tap the **right Command (⌘)** key by itself.
    The left ⌘ is deliberately untouched, so ⌘C, ⌘V, and ⌘Tab keep their normal
    behavior and cannot start a dictation by accident.
-7. Wait for the click-through floating HUD to change from **WAIT** to
+7. Wait for the nonactivating floating HUD to change from **WAIT** to
    **SPEAK NOW**, then begin speaking.
 8. Tap right Command again to stop. SpeakPaste closes the recording, fully
    releases the microphone, and then moves through **TRANSCRIBING** to **DONE**
@@ -70,19 +70,61 @@ xcodebuild \
   build
 ```
 
-Settings live behind **⌘,** and cover transcription language, delivery, sounds,
-launch at login, the API key, custom vocabulary, text replacements, transcript
-history, and a live view of the permissions the app depends on.
+Settings live behind **⌘,** and cover the full Scribe language catalog,
+delivery, sounds, HUD behavior and placement, launch at login, the API key,
+custom vocabulary, text replacements, per-app rules, transcript history,
+privacy-safe diagnostics, and a live view of every permission the app depends
+on.
 
 **Vocabulary** is the main quality control. Names, jargon, and product spellings
 added there are sent with every dictation as ElevenLabs keyterms, biasing
-recognition toward them without forcing a substitution — an unused term costs
-nothing. **Replacements** are the blunt instrument for the cases Scribe gets
-wrong every time; they always fire.
+recognition toward them without forcing a substitution. Scribe's current batch
+contract permits up to 1,000 keyterms, each fewer than 50 characters and no
+more than five words; SpeakPaste also rejects `<`, `>`, `{`, `}`, `[`, `]`,
+backslashes, and control characters before upload. Dynamic terms derived from
+opt-in caret context take the finite slots before the global vocabulary because
+they are more specific to that dictation. ElevenLabs currently adds a 20%
+surcharge whenever keyterms are sent, and using more than 100 makes every
+request bill for at least 20 seconds. **Replacements** are the blunt instrument
+for the cases Scribe gets wrong every time; they always fire locally.
 
-Transcripts are kept on this Mac in Application Support, searchable, with a
-retention window and a real one-click purge. Failed transcriptions keep their
-audio so they can be retried rather than lost.
+When language is **Auto**, SpeakPaste also reads Scribe's language-confidence
+metadata. A result below 50% is kept intact but visibly flagged for review, with
+the option to pin a language for later dictations.
+
+Transcripts are kept on this Mac in Application Support, searchable, with
+Never/1/7/30/90-day or forever retention and a confirmed one-click purge.
+Successful recordings are retained by default for playback and **Process
+Again**; that optional library is capped at 1 GiB and refuses a copy that would
+leave less than 2 GiB free. Hitting either limit does not discard the transcript.
+
+Every new recording first moves into a separate private, crash-safe recovery
+journal. It leaves that journal only after the final transcript and its linked
+consumption receipt are durable; a failed request or write leaves the audio
+available for retry or explicit discard instead of losing what was said. Every
+connectivity-caused failure is also marked for automatic retry: while offline,
+the app, menu bar, and always-visible HUD say that recordings are staying local,
+and the saved queue wakes once when macOS reports that the connection has
+returned. Because an old caret or message draft is not a safe destination, the
+recovered transcript waits for explicit manual placement and never auto-sends.
+All other service and content failures still require an explicit Retry after
+the client's bounded request retries, so a network transition cannot repeat an
+unrelated request. Every completed transcript also enters a temporary durable
+delivery escrow before
+copy or paste, under every History setting. **Never store** removes the
+completed History row and creates no successful-audio copy, while the escrow
+remains only until output is resolved. Before any external paste the escrow is
+marked as possibly delivered, so a crash at the side-effect boundary cannot
+cause an unattended duplicate after relaunch. Copy/Paste Last cannot bypass an
+unfinished handoff, and every SpeakPaste clipboard writer shares one serialized
+transaction so concurrent output cannot substitute a different transcript. A
+normal Quit during recording
+first finalizes and journals the audio; it also waits for an in-progress file
+import to finish secure staging or cancels Quit rather than abandoning a partial
+copy. Imports whose duration cannot be established fail closed and are never
+uploaded. A validated active WAV left by a process crash is recovered on the
+next primary launch. Short recordings are never discarded merely because they
+are under an arbitrary duration threshold.
 
 For local development, `SpeakPasteMac` also accepts the API key through the
 `ELEVENLABS_API_KEY` environment variable. Never commit an API key.
@@ -169,12 +211,34 @@ and [Apple's extension URL-opening contract](https://developer.apple.com/documen
   receives the key.
 - Audio is sent directly to ElevenLabs at
   `POST https://api.elevenlabs.io/v1/speech-to-text` using the `scribe_v2`
-  model.
-- Finished recordings are deleted after transcription on macOS. On iPhone,
+  model. Upload requests do not follow HTTP redirects, so the API key and
+  speech body cannot be forwarded to another origin by a 3xx response.
+- On macOS, audio is staged in a private recovery journal before upload.
+  Interrupted, failed, or not-yet-durable work remains locally recoverable.
+  After the recovery transaction closes, successful audio is retained by
+  default in a separate History library for playback and reprocessing. That
+  library is capped at 1 GiB, preserves a 2 GiB free-space reserve, follows the
+  History retention setting, and can be disabled or purged. **Never store**
+  keeps neither completed History nor successful-audio copies. On iPhone,
   manual in-app recordings are retained after an API failure so Retry can reuse
   them. Back Tap recordings are deleted after success, cancellation, or failure;
-  its passive keyboard does not expose Retry.
-- Transcript history stays on-device and is capped at 50 entries.
+  its passive keyboard does not expose Retry. A hard suspension can interrupt
+  normal upload-copy cleanup, so the next iPhone app launch removes only exact
+  private `SpeakPaste-upload-<UUID>.multipart` artifacts left by that process.
+- macOS transcript History stays on-device, has a 500-entry ordinary cap, and
+  supports Never/1/7/30/90-day or forever retention. Recovery-linked proof may
+  temporarily exceed that cap rather than be destroyed. Unresolved output
+  remains in a private delivery escrow under every retention setting; an entry
+  marked possibly delivered is never retried implicitly. A row cannot be edited
+  or reprocessed while its source-audio or delivery transaction is open. The
+  iPhone history remains capped at 50.
+- Optional recognition context reduces a small caret-local window, selection,
+  application name, and window title to spelling keyterms before upload. It is
+  off by default, never reads secure fields, and does not store the captured
+  text in diagnostics. Independently of that setting, cursor-aware local
+  formatting may read at most 256 characters before the caret in process memory
+  to choose spacing and capitalization. That local text is never uploaded or
+  stored, and secure fields remain excluded.
 - Full Access lets the keyboard share dictation state with the containing app.
   SpeakPaste does not collect general keystrokes.
 
@@ -183,15 +247,41 @@ sending sensitive audio.
 
 ## Development status
 
-The macOS target builds with local ad-hoc signing and the shared sources pass
-Swift 6 type-checking. Its floating HUD exposes **WAIT**, **SPEAK NOW**,
+The macOS target builds with local ad-hoc signing. Its floating HUD exposes
+**WAIT**, **SPEAK NOW**,
 **RECORDING STOPPED**, **TRANSCRIBING**, **DONE**, and **ERROR**, including an
 elapsed timer for busy states. Connecting stays in **WAIT** until the microphone
 proves it is delivering a steady sample stream, so file recording does not begin
 inside the Continuity wake-up gap; if macOS refuses the monitoring tap that
-proves liveness, the connection fails loudly instead of recording unguarded. Interrupted startup is retried in place, a
-stream that dies mid-dictation salvages its finalized partial file, and recording
-startup, WAV finalization, and network requests have bounded watchdogs.
+proves liveness, the connection fails loudly instead of recording unguarded.
+Interrupted startup is retried in place, a stream that dies mid-dictation
+salvages its finalized partial file, and recording startup, WAV finalization,
+network requests, retry concurrency, and long-session limits are bounded.
+
+The HUD docks to all four screen edges, reflows vertically at the left and
+right, and exposes Start while optionally kept visible at idle only when the API
+key, selected microphone, and microphone permission are ready; otherwise it
+shows **SETUP NEEDED**. It exposes Stop and Cancel during capture. A cancel
+request while connecting or before 30 seconds acts immediately. At 30 seconds
+or longer, the first request arms a three-second confirmation window in the HUD,
+dashboard, and menu, and the second discards the recording. All normal builds
+that own SpeakPaste's shared local stores use one product-wide process lease,
+independent of bundle identifier; a secondary launch exits without initializing
+app data. While the microphone is recording, SpeakPaste prevents idle display
+and system sleep, and VoiceOver announces the consequential capture phases.
+
+macOS offers Auto plus all 99 documented Scribe language hints in its settings,
+onboarding, and menu-bar picker. It intentionally exposes no provider, model,
+realtime, or speed-versus-quality selector: quality-first ElevenLabs Scribe v2
+batch transcription is the product.
+
+The current macOS capability set and the features deliberately excluded from
+the product are recorded in [the product-parity ledger](docs/macos-feature-parity.md).
+Compilation, focused logic tests, and isolated UI inspection do not prove the
+system-owned Continuity UI or a real destination application's accessibility
+behavior; follow
+[the direct-device acceptance run](docs/macos-remaining-work.md) before calling
+the complete Mac experience physically verified.
 
 For iPhone:
 
@@ -199,7 +289,9 @@ For iPhone:
   installed iOS SDK.
 - Back Tap recording uses the paired `AudioRecordingIntent` and
   `LiveActivityIntent` contracts, with a WidgetKit Live Activity spanning the
-  full capture.
+  full capture. Its finite post-stop background lane makes one bounded
+  25-second Scribe request; expiration cancels it, publishes failure, removes
+  the recording, and stops the heartbeat before iOS can suspend the process.
 - Launch, host-resolution, audio-stage, shared-session, and return-route
   diagnostics are persisted in the App Group.
 - Recorded regressions cover a failed containing-app launch, the invalid

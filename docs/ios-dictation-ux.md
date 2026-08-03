@@ -160,6 +160,14 @@ Two rules follow from the constraints:
   activated, stays active while recording, changes to transcribing after stop,
   and ends on completion, failure, or cancellation. The app does not loop fake
   silent audio to keep itself resident.
+- **Post-stop work fits iOS's finite background window.** Back Tap makes one
+  bounded 25-second Scribe request instead of inheriting macOS retries. If iOS
+  expires the task first, SpeakPaste cancels the request, commits a terminal
+  failure, removes the private recording, and stops the App Group heartbeat
+  before suspension. It releases the exact expired assertion immediately as
+  UIKit requires, while the cancelled upload and matching Live Activity close
+  on a session-scoped best-effort path. A later app launch safely removes any
+  exact private multipart artifact left by a hard process suspension.
 - **The keyboard is an inserter, never an initiator.** It has no microphone and
   no reliable knowledge of its host, so it should never start a dictation or
   try to navigate anywhere.

@@ -325,15 +325,15 @@ final class AppModel: ObservableObject {
     func saveAPIKey(_ value: String) throws {
         let key = value.trimmingCharacters(in: .whitespacesAndNewlines)
         if key.isEmpty {
-            keychain.delete()
+            try keychain.delete()
         } else {
             try keychain.save(key)
         }
         objectWillChange.send()
     }
 
-    func deleteAPIKey() {
-        keychain.delete()
+    func deleteAPIKey() throws {
+        try keychain.delete()
         objectWillChange.send()
     }
 

@@ -1,82 +1,184 @@
-# macOS: what is still unbuilt
+# macOS remaining work
 
-Companion to [the feature parity matrix](macos-feature-parity.md), which
-inventories 446 features across superwhisper, Wispr Flow, macOS platform
-expectations and the ElevenLabs Scribe API, and diffs them against this repo.
-That document holds the full reasoning, the implementation notes, and the 22
-features rejected on purpose. This one is only the outstanding list.
+The adopted core Superwhisper/Wispr Flow parity set is represented in source.
+The ledger names the behaviors deliberately excluded from SpeakPaste's
+quality-first, ElevenLabs-Scribe-only boundary; the smaller unresolved candidate
+set below is explicit rather than hidden behind a blanket parity claim.
 
-Everything below is unstarted. Nothing here is blocked by anything already
-shipped.
+What remains is acceptance and release engineering. Partial isolated UI
+inspection is useful evidence, but it is not a full real-device run: the
+system-owned Continuity surface, physical microphone release, and destination
+apps' Accessibility behavior can only be proved on the actual Mac/iPhone chain.
 
-## Blocked on the repository owner
+## Deferred capability candidates
 
-- **Developer ID signing and notarization.** Until this lands, every rebuild
-  invalidates the app's TCC grants, because macOS keys them to the code
-  signature — the microphone and Accessibility permissions have to be granted
-  again after each install. Notarization additionally needs an app-specific
-  password for `notarytool`, which only the account holder can mint.
-- **Sparkle in-app updates.** Needs a hosted appcast feed and a signing key.
-  `CURRENT_PROJECT_VERSION` is also still pinned at 1, so there is no version
-  to compare against.
+These are not claimed as implemented. They are narrower than the excluded
+automation/model/media-control surfaces, but still need product or release work:
 
-## Capture
+- Opt-in macOS notifications for a background failure or newly held output when
+  the HUD is no longer visible. Authorization, categories, and delivery should
+  be tested only after the permanent signed bundle identity exists.
+- Removing a large retained-audio library without ever waiting behind an
+  in-progress copy on the main actor. The current lock preserves consistency,
+  but a worst-case privacy-toggle cleanup can temporarily make the UI
+  unresponsive.
 
-- Stream-health monitoring *during* recording. The liveness gate only runs
-  before the first sample is written, so a stream that stalls mid-dictation
-  produces a truncated file under a clean, ticking SPEAK NOW.
-- `AVCaptureSession` interruption handling, distinguishing "another app took
-  the microphone" from "the device disconnected". The likely case is an
-  incoming call on the same iPhone serving as the Continuity microphone.
-- Sleep, wake, and screen-parameter observers. A Mac that sleeps mid-dictation
-  leaves the recorder live over a dead session; after wake the Continuity
-  device's unique ID can change, stranding the saved selection.
-- Microphone test mode: record a few seconds, play it back, report peak level,
-  clipping, silence fraction and connect latency.
-- Input gain awareness. A device sitting at 15% produces materially worse
-  recognition with no explanation anywhere in the app.
-- Maximum-duration guard, and a minimum-length guard for accidental taps.
+## Automated candidate gates
 
-## Delivery
+- [ ] Run the complete focused Swift test suite, including persistence failure,
+      pending-audio, pending-transcript ambiguity, cancellation policy,
+      vocabulary boundary, retained-audio quota/free-space, and single-instance
+      coverage.
+- [ ] Build `SpeakPasteMac` from a clean candidate checkout with the documented
+      ad-hoc command. Review every warning and confirm the generated app contains
+      the intended sources and no credential or local state.
+- [ ] Recheck the ElevenLabs multipart body: `scribe_v2` only; no redirects;
+      repeated `keyterms` fields; at most 1,000 terms; 49 characters accepted
+      and 50 rejected; no more than five words; forbidden characters rejected.
+- [ ] Prove that dynamic app/caret context receives keyterm slots before global
+      vocabulary when the combined list reaches 1,000.
+- [ ] Run storage tests on malformed, future-schema, symlinked, unreadable, and
+      write-failing documents. Each store must preserve bytes and fail closed,
+      not publish state it could not commit.
+- [ ] Run the product-wide lease test with two normal app processes using
+      different bundle identifiers. Also cover a running legacy SpeakPaste build
+      that predates the lease. The secondary process must not initialize or
+      change shared defaults, History, recovery journals, or retained audio.
 
-- Staleness guard. A dictation that finishes long after it was spoken is
-  currently delivered on the sole evidence that its app is still frontmost.
-- Per-app delivery rules keyed on bundle identifier.
-- Auto-send: optionally press Return once delivery is confirmed.
-- Type-out mode for destinations that refuse a synthetic paste.
-- `CGPreflightPostEventAccess` in the permissions dashboard. Without it the
-  dashboard can read all-green while synthetic keystrokes are being discarded.
+## Isolated macOS UI acceptance
 
-## Text quality
+Use a disposable build compiled with `SPEAKPASTE_UI_TEST_INSTANCE`, a unique
+bundle identifier, redirected `CFFIXED_USER_HOME`/`TMPDIR`, and a non-secret
+placeholder API key. Do not point this run at the installed app's Keychain,
+TCC grants, or Application Support.
 
-- Dynamic keyterms harvested from the destination's on-screen text and window
-  title, on top of the static glossary. The focused element is already captured
-  at record time, so its surrounding text is one attribute read away. Must
-  reuse the existing secure-field refusal so password fields are never read.
-- Vocabulary learned from the user's own corrections to a delivered transcript.
-- Spoken punctuation and formatting commands.
-- Language hint taken from the active keyboard input source.
+- [ ] Complete and revisit every onboarding step. Check API-key states,
+      permission/readiness explanations, microphone selection/test, shortcuts,
+      successful-audio disclosure, and the language menu.
+- [ ] Select Auto and several entries near the beginning, middle, and end of the
+      full 100-choice language catalog, then relaunch and confirm persistence.
+      Inject a low-confidence Auto response and confirm the text is preserved
+      while the detected-language review warning appears.
+- [ ] Exercise the HUD at top, bottom, left, and right. Confirm left/right use the
+      vertical layout, dragging docks to the nearest edge, the active display is
+      chosen correctly, and no state clips at normal accessibility text sizes.
+- [ ] Turn on the always-visible HUD. Confirm its idle Start button works without
+      activating SpeakPaste or stealing focus; confirm capture exposes Stop and
+      Cancel. In a fresh profile with missing prerequisites, confirm it says
+      SETUP NEEDED and exposes no Start button. Turn the option off and confirm
+      normal delayed hiding returns.
+- [ ] Verify every vocabulary action: add, search, edit Save/Cancel, paste-list
+      Save/Cancel, file-picker Cancel, and remove confirm/Cancel. Check the
+      1,000-term ceiling, fewer-than-50-character and five-word limits, forbidden
+      characters, duplicate handling, and the 20% / over-100 billing disclosure.
+- [ ] Verify every replacement and per-app-rule action, including validation,
+      enabled state, auto-send warning, Save/Cancel, and delete confirm/Cancel.
+- [ ] With an empty profile, switch History through Never store, 1, 7, 30, 90,
+      and Forever. Confirm Never store produces no false persistence error,
+      successful-audio controls disable appropriately, and Delete All is disabled
+      when there is nothing to delete.
+- [ ] Seed disposable History records and retained audio. Exercise search, Play,
+      Stop, Edit Save/Cancel, per-record delete confirm/Cancel, Delete All
+      confirm/Cancel, Process Again, and Process Again cancellation. During
+      reprocessing, actions that could race the record must stay disabled.
+- [ ] Fill retained History audio to the 1 GiB quota and simulate the 2 GiB
+      free-space reserve boundary. In both cases the transcript must remain saved,
+      the optional audio omission must be visible, and existing retained files
+      must remain usable.
 
-## Product surface
+## Delivery-crash and Never-store acceptance
 
-- First-run onboarding with staged permission requests.
-- Menu-bar agent mode (`LSUIElement`) with a hide-icon control. Note that the
-  HUD controller is started from `MacContentView.onAppear`, so it will need
-  another owner once there is no window at launch.
-- Held transcripts surviving quit and crash. The HUD promises "nothing is
-  lost"; today that promise ends at process exit.
-- Scratchpad for dictating with no destination.
-- Editing a transcript and delivering the corrected version.
-- Diagnostics export, and a crash/unexpected-quit notice on next launch.
-- App Intents for Shortcuts and Spotlight; a URL scheme; a Services provider.
-- A local MCP server over the transcript history, which is how Wispr Flow
-  integrates with Claude Code and Cursor.
-- Automated test coverage for the macOS target. There is none.
+Run these in a disposable profile with fault injection around each durable
+write. Inspect the files after every restart rather than trusting the UI alone.
 
-## Unverified
+- [ ] Under each History retention mode, prove the transcript enters the durable
+      pending-delivery escrow before source-audio proof is retired and before
+      external output. Then finish a Never-store dictation and prove that after
+      resolved delivery no completed History row or successful-audio copy remains.
+- [ ] Fail escrow creation. The transcript must not paste; History and recovery
+      audio must remain available with a visible explanation. Copy/Paste Last
+      must remain blocked; History Copy may proceed only after it repairs that
+      exact escrow and retires the source-audio retry path.
+- [ ] Fail the transition to `deliveryUncertain`. External paste must be blocked
+      and the text must remain recoverable.
+- [ ] Terminate after `deliveryUncertain` is durable and before cleanup. Relaunch
+      must label the entry possibly delivered, refuse automatic/hotkey retry, and
+      offer Copy, Discard, or a separately confirmed one-shot Paste Anyway arm.
+      Arming from the dashboard must not paste into SpeakPaste; it must require
+      returning to the destination and pressing the release shortcut.
+- [ ] Exercise a definite no-paste result and prove only entries that were
+      originally pending return to pending. An entry recovered as uncertain must
+      never be silently downgraded to safe-to-retry.
+- [ ] Exercise confirmed and unverified paste results, then force recovery-entry
+      deletion failure. Confirmed output with failed cleanup must remain visibly
+      uncertain; unverified output must never be replayed automatically.
+- [ ] Hold a pasteboard-backed delivery open while attempting Copy on a different
+      History/held transcript. The explicit copy must wait or fail without
+      replacing the text the destination is consuming, and no escrow may resolve
+      until its own clipboard write succeeds.
+- [ ] Seed two source-linked History rows for one pending-audio identifier. Launch
+      must queue only the completion-marker row when one is durable (otherwise
+      the newest row), suppress Retry for that audio, and preserve the
+      noncanonical History row without allowing a joined duplicate. If a sibling
+      is marked possibly delivered, that warning must move atomically onto the
+      canonical row before the sibling handoff is retired.
 
-No change shipped in this line of work has been exercised by a real dictation.
-Builds, installs, dylib hashes and one benchmark were verified; speech was not.
-The menu-action delivery path in `MacPasteController` is a rewrite of the
-paste mechanism and is the first thing that should be confirmed by hand — the
-attempt log names the route and whether the result was confirmed.
+## Direct physical Mac and iPhone acceptance
+
+Run this with a signed candidate, a paired iPhone, Notes, and at least one opaque
+Electron or browser text field. Record screen/video plus privacy-safe diagnostics
+for the release evidence.
+
+- [ ] Grant permissions through onboarding, select the Continuity microphone,
+      and complete the three-second microphone test.
+- [ ] Focus a Notes field, tap bare right Command, wait for **SPEAK NOW**,
+      dictate, and tap it again. Confirm text reaches that exact field and the
+      iPhone's system-owned capture surface dismisses before **TRANSCRIBING**.
+- [ ] Repeat immediately to prove clean Continuity release and reconnect, not
+      merely one successful transcription.
+- [ ] During connecting and during a recording under 30 seconds, press Escape
+      and use the HUD Cancel control; each must cancel immediately. At 30 seconds
+      or longer, confirm the first request preserves audio and shows the
+      three-second warning, the second request inside the window discards, and an
+      expired confirmation requires a new first request. Stop must still
+      transcribe normally.
+- [ ] Start in one field and switch to another before the response returns. No
+      text may enter the second field. Returning to the exact original field must
+      release only its matching held text.
+- [ ] Repeat in an opaque field. An unverifiable paste must be labelled
+      unconfirmed/possibly delivered, remain recoverable, and never insert a
+      second copy automatically.
+- [ ] Exercise an unavailable/disconnected microphone, device reconnect,
+      mid-stream loss with partial salvage, secure input, revoked permissions,
+      sleep/wake, and the 20-minute automatic stop path.
+- [ ] Exercise forced offline/timeout/429/5xx failures, automatic reconnect
+      retry, manual retry, discard, imported audio, paste/copy last,
+      clipboard-only and type-out app rules, clipboard restoration, and guarded
+      auto-send.
+- [ ] Quit normally during capture and confirm the microphone is released and the
+      finalized audio is waiting after relaunch. Terminate disposable candidates
+      during capture, upload, History commit, and delivery bookkeeping; each
+      restart must produce one recoverable item and no unattended duplicate.
+- [ ] Launch a second normal candidate while the first is active. It must bring
+      forward the owner or exit with the safety explanation, never show a second
+      recorder or mutate shared data.
+
+Until every applicable box above has recorded evidence, describe the parity
+implementation as source/build/logic tested only to the degree actually run —
+not fully end-to-end verified.
+
+## Repository-owner release work
+
+These items are genuinely unimplemented because they require product identity,
+credentials, and distribution decisions that this source pass cannot make:
+
+- [ ] Choose the permanent macOS bundle identifier and Apple Developer team.
+- [ ] Configure the release entitlements, Developer ID signing, hardened runtime,
+      versioning, notarization, and stapling; then repeat the physical acceptance
+      run with that exact artifact because TCC and Keychain behavior follow its
+      code identity.
+- [ ] Choose and implement an update channel. If Sparkle is selected, protect the
+      signing key, host the appcast, and test a real update and rollback. Do not
+      expose an inert **Check for Updates** control before the channel exists.
+- [ ] Archive the final acceptance evidence and publish only the notarized,
+      stapled artifact that produced it.

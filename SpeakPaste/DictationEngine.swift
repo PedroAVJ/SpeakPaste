@@ -16,6 +16,8 @@ final class DictationEngine {
         case missingAPIKey
         case microphoneDenied
         case backgroundCaptureUnavailable
+        case backgroundTranscriptionUnavailable
+        case backgroundTranscriptionExpired
         case pendingTranscript
 
         var errorDescription: String? {
@@ -26,6 +28,10 @@ final class DictationEngine {
                 "Microphone access is off. Enable it for SpeakPaste in Settings."
             case .backgroundCaptureUnavailable:
                 "iOS refused the microphone in the background. If another app or a screen recording is using audio, stop it and tap again."
+            case .backgroundTranscriptionUnavailable:
+                "iOS could not reserve enough background time to transcribe. The recording was discarded safely; try again."
+            case .backgroundTranscriptionExpired:
+                "iOS ended the background transcription window. The recording was discarded safely; try a shorter dictation."
             case .pendingTranscript:
                 "Switch to the SpeakPaste keyboard to insert the previous transcript before starting another dictation."
             }
@@ -45,10 +51,16 @@ final class DictationEngine {
     private var isStopping = false
     private var heartbeatTask: Task<Void, Never>?
     private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
+    private var transcriptionTask: Task<TranscriptionResult, Error>?
+    private var transcriptionAttemptID: UUID?
     private let liveActivity = DictationLiveActivity()
 
     init(
-        client: ElevenLabsClientProtocol = ElevenLabsClient(),
+        client: ElevenLabsClientProtocol = ElevenLabsClient(
+            retryPolicy: .backgroundIntent,
+            requestTimeout: 25,
+            maximumConcurrentRequests: 1
+        ),
         defaults: UserDefaults = .standard
     ) {
         self.client = client
@@ -68,12 +80,12 @@ final class DictationEngine {
         // already in flight. Those awaits are MainActor-reentrant, so checking
         // only AVAudioRecorder would let a fast extra Back Tap replace the
         // current session.
-        guard sessionID == nil, !isStarting else { return }
+        guard sessionID == nil, !isStarting, !isStopping else { return }
         try await start()
     }
 
     func start() async throws {
-        guard sessionID == nil, !isStarting else { return }
+        guard sessionID == nil, !isStarting, !isStopping else { return }
         isStarting = true
         defer { isStarting = false }
 
@@ -136,6 +148,7 @@ final class DictationEngine {
             )
             await liveActivity.update(
                 .recording,
+                sessionID: snapshot.sessionID,
                 recordingStartedAt: recordingStartedAt
             )
         } catch {
@@ -152,7 +165,7 @@ final class DictationEngine {
             } else {
                 surfacedError = error
             }
-            await liveActivity.end(.failed)
+            await liveActivity.end(.failed, sessionID: snapshot.sessionID)
             store.setPhase(
                 .failed,
                 sessionID: snapshot.sessionID,
@@ -169,16 +182,45 @@ final class DictationEngine {
         guard let sessionID, !isStarting, !isStopping else { return }
         isStopping = true
         defer { isStopping = false }
+        let attemptID = UUID()
+        transcriptionAttemptID = attemptID
+        defer {
+            if transcriptionAttemptID == attemptID {
+                transcriptionTask = nil
+                transcriptionAttemptID = nil
+            }
+        }
         // Recording itself owns background execution through the audio session
         // and Live Activity. Start a fresh finite task at stop so a long
         // dictation cannot consume the transcription window before it begins.
-        beginBackgroundExecution()
+        guard beginBackgroundExecution() else {
+            let audioURL = recorder.stop() ?? recordingURL
+            if let audioURL { cleanUpRecording(at: audioURL) }
+            transcriptionAttemptID = nil
+            stopHeartbeat()
+            store.setPhase(
+                .failed,
+                sessionID: sessionID,
+                errorMessage: EngineError.backgroundTranscriptionUnavailable.localizedDescription
+            )
+            UINotificationFeedbackGenerator().notificationOccurred(.error)
+            await liveActivity.end(.failed, sessionID: sessionID)
+            finish()
+            throw EngineError.backgroundTranscriptionUnavailable
+        }
         let audioURL = recorder.stop() ?? recordingURL
         let duration = recorder.duration
         // Keep the App Group heartbeat alive through the network request. The
         // keyboard treats a silent owner as abandoned after 15 seconds; ending
         // the heartbeat here could erase a legitimate slow transcription.
-        await liveActivity.update(.transcribing)
+        await liveActivity.update(.transcribing, sessionID: sessionID)
+
+        guard
+            self.sessionID == sessionID,
+            transcriptionAttemptID == attemptID
+        else {
+            throw EngineError.backgroundTranscriptionExpired
+        }
 
         guard
             let audioURL,
@@ -186,6 +228,7 @@ final class DictationEngine {
                 .trimmingCharacters(in: .whitespacesAndNewlines),
             !key.isEmpty
         else {
+            transcriptionAttemptID = nil
             if let audioURL { cleanUpRecording(at: audioURL) }
             stopHeartbeat()
             store.setPhase(
@@ -193,19 +236,36 @@ final class DictationEngine {
                 sessionID: sessionID,
                 errorMessage: EngineError.missingAPIKey.localizedDescription
             )
-            await liveActivity.end(.failed)
+            await liveActivity.end(.failed, sessionID: sessionID)
             finish()
             throw EngineError.missingAPIKey
         }
 
         store.setPhase(.transcribing, sessionID: sessionID)
-        do {
-            let result = try await client.transcribe(
+        let requestedLanguage = language
+        let requestedCleanSpeech = cleanSpeech
+        let client = self.client
+        let task = Task {
+            try await client.transcribe(
                 audioURL: audioURL,
                 apiKey: key,
-                language: language,
-                cleanSpeech: cleanSpeech
+                language: requestedLanguage,
+                cleanSpeech: requestedCleanSpeech
             )
+        }
+        transcriptionTask = task
+        do {
+            let result = try await task.value
+            guard
+                self.sessionID == sessionID,
+                transcriptionAttemptID == attemptID
+            else {
+                throw EngineError.backgroundTranscriptionExpired
+            }
+            // Expiration after Scribe has returned must not replace a
+            // transcript being committed with a failure.
+            transcriptionTask = nil
+            transcriptionAttemptID = nil
             history.add(
                 TranscriptItem(
                     text: result.text,
@@ -227,9 +287,17 @@ final class DictationEngine {
             )
             UINotificationFeedbackGenerator().notificationOccurred(.success)
             cleanUpRecording(at: audioURL)
-            await liveActivity.end(.completed)
+            await liveActivity.end(.completed, sessionID: sessionID)
             finish()
         } catch {
+            guard
+                self.sessionID == sessionID,
+                transcriptionAttemptID == attemptID
+            else {
+                throw EngineError.backgroundTranscriptionExpired
+            }
+            transcriptionTask = nil
+            transcriptionAttemptID = nil
             cleanUpRecording(at: audioURL)
             stopHeartbeat()
             store.setPhase(
@@ -238,7 +306,7 @@ final class DictationEngine {
                 errorMessage: error.localizedDescription
             )
             UINotificationFeedbackGenerator().notificationOccurred(.error)
-            await liveActivity.end(.failed)
+            await liveActivity.end(.failed, sessionID: sessionID)
             finish()
             throw error
         }
@@ -252,7 +320,7 @@ final class DictationEngine {
         stopHeartbeat()
         store.setPhase(.cancelled, sessionID: sessionID)
         if let recordingURL { cleanUpRecording(at: recordingURL) }
-        await liveActivity.end(.cancelled)
+        await liveActivity.end(.cancelled, sessionID: sessionID)
         finish()
     }
 
@@ -293,6 +361,9 @@ final class DictationEngine {
     }
 
     private func finish() {
+        transcriptionTask?.cancel()
+        transcriptionTask = nil
+        transcriptionAttemptID = nil
         sessionID = nil
         recordingURL = nil
         stopHeartbeat()
@@ -303,16 +374,59 @@ final class DictationEngine {
         try? FileManager.default.removeItem(at: url)
     }
 
-    private func beginBackgroundExecution() {
+    @discardableResult
+    private func beginBackgroundExecution() -> Bool {
         endBackgroundExecution()
         backgroundTaskID = UIApplication.shared.beginBackgroundTask(
             withName: "Finish background dictation"
         ) { [weak self] in
-            Task { @MainActor in self?.endBackgroundExecution() }
+            // UIKit invokes expiration handlers on the main thread. Commit the
+            // terminal shared phase synchronously so iOS cannot suspend the
+            // process between releasing the assertion and publishing failure.
+            MainActor.assumeIsolated {
+                self?.expireBackgroundTranscription()
+            }
         }
+        return backgroundTaskID != .invalid
     }
 
-    private func endBackgroundExecution() {
+    private func expireBackgroundTranscription() {
+        guard
+            let sessionID,
+            transcriptionAttemptID != nil
+        else {
+            endBackgroundExecution()
+            return
+        }
+
+        let expiringBackgroundTaskID = backgroundTaskID
+        transcriptionTask?.cancel()
+        transcriptionTask = nil
+        transcriptionAttemptID = nil
+        if let recordingURL { cleanUpRecording(at: recordingURL) }
+        stopHeartbeat()
+        store.setPhase(
+            .failed,
+            sessionID: sessionID,
+            errorMessage: EngineError.backgroundTranscriptionExpired.localizedDescription
+        )
+        UINotificationFeedbackGenerator().notificationOccurred(.error)
+        self.sessionID = nil
+        recordingURL = nil
+
+        // ActivityKit closure is session-scoped and best effort after the
+        // durable failure. UIKit requires the expired background assertion to
+        // be released immediately from this handler, not after an async join.
+        Task { @MainActor in
+            await liveActivity.end(.failed, sessionID: sessionID)
+        }
+        endBackgroundExecution(expected: expiringBackgroundTaskID)
+    }
+
+    private func endBackgroundExecution(
+        expected taskID: UIBackgroundTaskIdentifier? = nil
+    ) {
+        if let taskID, backgroundTaskID != taskID { return }
         guard backgroundTaskID != .invalid else { return }
         UIApplication.shared.endBackgroundTask(backgroundTaskID)
         backgroundTaskID = .invalid

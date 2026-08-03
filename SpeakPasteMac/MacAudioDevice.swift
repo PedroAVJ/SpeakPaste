@@ -10,15 +10,37 @@ struct MacAudioInputDevice: Identifiable, Hashable, Sendable {
     /// Continuity in English; the transport type is the same on every system
     /// locale, and it does not misfire on, say, a USB mic named "iPhone Mic".
     let isContinuityDevice: Bool
+    /// Nil means Core Audio did not identify the transport. Unknown transport
+    /// is never promoted to Continuity based on a localized/device-given name.
+    let transportType: UInt32?
+    /// Core Audio's input volume scalar when the device exposes one. Continuity
+    /// microphones commonly do not; `nil` means unavailable, not full volume.
+    let inputVolume: Float?
 
     var sourceLabel: String {
-        isContinuityDevice ? "Continuity" : "Mac"
+        switch transportType {
+        case kAudioDeviceTransportTypeContinuityCaptureWired:
+            "Continuity · wired"
+        case kAudioDeviceTransportTypeContinuityCaptureWireless:
+            "Continuity · wireless"
+        case kAudioDeviceTransportTypeBuiltIn:
+            "Built-in"
+        case kAudioDeviceTransportTypeUSB:
+            "USB"
+        case kAudioDeviceTransportTypeBluetooth, kAudioDeviceTransportTypeBluetoothLE:
+            "Bluetooth"
+        case .some(_):
+            "External"
+        case .none:
+            "Unknown transport"
+        }
     }
 }
 
 enum MacAudioDeviceCatalog {
     static func availableInputs() -> [MacAudioInputDevice] {
         let transports = MacCoreAudioTransport.transportTypesByDeviceUID()
+        let inputVolumes = MacCoreAudioTransport.inputVolumesByDeviceUID()
 
         return AVCaptureDevice.DiscoverySession(
             deviceTypes: [.microphone],
@@ -30,10 +52,9 @@ enum MacAudioDeviceCatalog {
             MacAudioInputDevice(
                 id: device.uniqueID,
                 name: device.localizedName,
-                isContinuityDevice: isContinuity(
-                    transportType: transports[device.uniqueID],
-                    name: device.localizedName
-                )
+                isContinuityDevice: isContinuity(transportType: transports[device.uniqueID]),
+                transportType: transports[device.uniqueID],
+                inputVolume: inputVolumes[device.uniqueID]
             )
         }
         .sorted {
@@ -44,16 +65,9 @@ enum MacAudioDeviceCatalog {
         }
     }
 
-    private static func isContinuity(transportType: UInt32?, name: String) -> Bool {
-        if let transportType {
-            return transportType == kAudioDeviceTransportTypeContinuityCaptureWired
-                || transportType == kAudioDeviceTransportTypeContinuityCaptureWireless
-        }
-        // Only when Core Audio will not say. Kept so a device that fails the
-        // lookup is not silently demoted to a Mac microphone.
-        return name.localizedCaseInsensitiveContains("iPhone")
-            || name.localizedCaseInsensitiveContains("iPad")
-            || name.localizedCaseInsensitiveContains("Continuity")
+    private static func isContinuity(transportType: UInt32?) -> Bool {
+        transportType == kAudioDeviceTransportTypeContinuityCaptureWired
+            || transportType == kAudioDeviceTransportTypeContinuityCaptureWireless
     }
 }
 
@@ -70,6 +84,20 @@ private enum MacCoreAudioTransport {
                 continue
             }
             result[uid] = transport
+        }
+        return result
+    }
+
+    static func inputVolumesByDeviceUID() -> [String: Float] {
+        var result: [String: Float] = [:]
+        for deviceID in allDeviceIDs() {
+            guard
+                let uid = stringProperty(kAudioDevicePropertyDeviceUID, of: deviceID),
+                let volume = floatInputProperty(kAudioDevicePropertyVolumeScalar, of: deviceID)
+            else {
+                continue
+            }
+            result[uid] = volume
         }
         return result
     }
@@ -147,5 +175,26 @@ private enum MacCoreAudioTransport {
             return nil
         }
         return value
+    }
+
+    private static func floatInputProperty(
+        _ selector: AudioObjectPropertySelector,
+        of deviceID: AudioObjectID
+    ) -> Float? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: selector,
+            mScope: kAudioDevicePropertyScopeInput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectHasProperty(deviceID, &address) else { return nil }
+        var value: Float32 = 0
+        var dataSize = UInt32(MemoryLayout<Float32>.size)
+        guard
+            AudioObjectGetPropertyData(deviceID, &address, 0, nil, &dataSize, &value) == noErr,
+            value.isFinite
+        else {
+            return nil
+        }
+        return min(1, max(0, value))
     }
 }

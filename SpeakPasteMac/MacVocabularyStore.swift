@@ -11,24 +11,46 @@ import Foundation
 @MainActor
 final class MacVocabularyStore: ObservableObject {
     @Published private(set) var terms: [String] = []
+    @Published private(set) var lastPersistenceError: String?
 
     /// Scribe's documented batch limits. Breaching any of them rejects the
     /// whole request — the transcription is lost, not just the offending term —
     /// so they are enforced on the way in rather than discovered on the wire.
     nonisolated static let maximumTerms = 1000
-    nonisolated static let maximumCharactersPerTerm = 50
+    /// The API contract is strictly fewer than 50 characters.
+    nonisolated static let maximumCharactersPerTerm = 49
     nonisolated static let maximumWordsPerTerm = 5
 
     /// Nil when Application Support could not be resolved or created. The list
     /// still works for the session; it just will not outlive it.
     private let fileURL: URL?
+    /// A document we could not fully interpret is never overwritten in place.
+    /// Removing it outside SpeakPaste is the explicit recovery boundary.
+    private var blockedExistingDocumentReason: String?
 
     /// `directory` exists so the list can be exercised against a scratch folder
     /// instead of the real Application Support, matching `MacHistoryStore`.
     /// Production callers use the default.
     init(directory: URL? = nil) {
-        fileURL = Self.storedFileURL(in: directory)
-        terms = Self.normalized(Self.decodedTerms(at: fileURL))
+        let resolvedFileURL = Self.storedFileURL(in: directory)
+        fileURL = resolvedFileURL
+        let loaded = Self.load(from: resolvedFileURL)
+        let permissionWarning: String?
+        if loaded.blockedExistingDocumentReason == nil {
+            do {
+                try MacPrivateStoreIO.secureExistingStorage(at: resolvedFileURL)
+                permissionWarning = nil
+            } catch {
+                permissionWarning = "Could not secure vocabulary storage: \(error.localizedDescription)"
+            }
+        } else {
+            permissionWarning = nil
+        }
+        terms = loaded.terms
+        blockedExistingDocumentReason = loaded.blockedExistingDocumentReason
+            ?? permissionWarning
+        let messages = [permissionWarning, loaded.warning].compactMap { $0 }
+        lastPersistenceError = messages.isEmpty ? nil : messages.joined(separator: " ")
     }
 
     /// Returns whether the term was stored. Invalid and case-insensitively
@@ -41,25 +63,31 @@ final class MacVocabularyStore: ObservableObject {
         let key = Self.duplicateKey(candidate)
         guard !terms.contains(where: { Self.duplicateKey($0) == key }) else { return false }
 
-        terms = Self.sortedForDisplay(terms + [candidate])
-        persist()
+        let proposed = Self.sortedForDisplay(terms + [candidate])
+        guard persist(proposed) else { return false }
+        terms = proposed
         return true
     }
 
     /// Matches case-insensitively, so removing a term always undoes adding that
     /// same term regardless of how either was capitalized.
-    func remove(_ term: String) {
+    @discardableResult
+    func remove(_ term: String) -> Bool {
         let key = Self.duplicateKey(term)
         let remaining = terms.filter { Self.duplicateKey($0) != key }
-        guard remaining.count != terms.count else { return }
+        guard remaining.count != terms.count else { return false }
 
+        guard persist(remaining) else { return false }
         terms = remaining
-        persist()
+        return true
     }
 
-    func replaceAll(_ terms: [String]) {
-        self.terms = Self.normalized(terms)
-        persist()
+    @discardableResult
+    func replaceAll(_ terms: [String]) -> Bool {
+        let proposed = Self.normalized(terms)
+        guard persist(proposed) else { return false }
+        self.terms = proposed
+        return true
     }
 
     /// Accepts a pasted list separated by newlines, commas, or both, and
@@ -86,8 +114,9 @@ final class MacVocabularyStore: ObservableObject {
         let added = merged.count - terms.count
         guard added > 0 else { return 0 }
 
-        terms = Self.sortedForDisplay(merged)
-        persist()
+        let proposed = Self.sortedForDisplay(merged)
+        guard persist(proposed) else { return 0 }
+        terms = proposed
         return added
     }
 
@@ -107,30 +136,58 @@ final class MacVocabularyStore: ObservableObject {
             return "Enter a word or phrase."
         }
         if candidate.count > maximumCharactersPerTerm {
-            return "Terms are limited to \(maximumCharactersPerTerm) characters."
+            return "Terms must be fewer than 50 characters."
         }
         if candidate.split(whereSeparator: \.isWhitespace).count > maximumWordsPerTerm {
             return "Terms are limited to \(maximumWordsPerTerm) words."
         }
+        let unsupported = CharacterSet(charactersIn: "<>{}[]\\")
+            .union(.controlCharacters)
+        if candidate.rangeOfCharacter(from: unsupported) != nil {
+            return "Scribe keyterms cannot contain <, >, {, }, [, ], backslashes, or control characters."
+        }
         return nil
     }
 
-    private func persist() {
-        guard let fileURL else { return }
-        let encoder = JSONEncoder()
-        // One term per line, because the point of keeping this outside
-        // UserDefaults is that a person can open it and read it.
-        encoder.outputFormatting = [.prettyPrinted]
-        guard let data = try? encoder.encode(terms) else { return }
-        // The directory exists as of launch, but the file is advertised as
-        // hand-editable — someone who moves or clears the SpeakPaste folder
-        // mid-session would otherwise lose every edit made afterwards, with an
-        // atomic write that fails silently.
-        try? FileManager.default.createDirectory(
-            at: fileURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        try? data.write(to: fileURL, options: .atomic)
+    @discardableResult
+    private func persist(_ proposed: [String]) -> Bool {
+        guard let fileURL else {
+            lastPersistenceError = "Application Support is unavailable."
+            return false
+        }
+        if let blockedExistingDocumentReason {
+            let existingFileWasRemoved: Bool
+            do {
+                existingFileWasRemoved = try !MacPrivateStoreIO
+                    .existingRegularFileIsPresent(at: fileURL)
+            } catch {
+                existingFileWasRemoved = false
+            }
+            guard existingFileWasRemoved else {
+                lastPersistenceError = blockedExistingDocumentReason
+                return false
+            }
+            self.blockedExistingDocumentReason = nil
+        }
+
+        do {
+            let encoder = JSONEncoder()
+            // One term per line, because the point of keeping this outside
+            // UserDefaults is that a person can open it and read it.
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(
+                StoredVocabulary(
+                    schemaVersion: StoredVocabulary.currentSchemaVersion,
+                    terms: proposed
+                )
+            )
+            try MacPrivateStoreIO.writeAtomically(data, to: fileURL)
+            lastPersistenceError = nil
+            return true
+        } catch {
+            lastPersistenceError = error.localizedDescription
+            return false
+        }
     }
 
     /// Trims, drops what Scribe would reject, collapses case-insensitive
@@ -165,17 +222,91 @@ final class MacVocabularyStore: ObservableObject {
         term.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
-    /// A missing or unreadable file is an empty vocabulary, never an error: a
-    /// corrupt list must not be able to stop the user from dictating.
-    private static func decodedTerms(at url: URL?) -> [String] {
-        guard
-            let url,
-            let data = try? Data(contentsOf: url),
-            let stored = try? JSONDecoder().decode([String].self, from: data)
-        else {
-            return []
+    private static func load(from fileURL: URL?) -> MacVocabularyLoadResult {
+        guard let fileURL else {
+            return MacVocabularyLoadResult(
+                terms: [],
+                warning: "Application Support is unavailable; vocabulary changes cannot be saved.",
+                blockedExistingDocumentReason: nil
+            )
         }
-        return stored
+        let data: Data
+        do {
+            guard let loaded = try MacPrivateStoreIO.readExistingData(at: fileURL) else {
+                return MacVocabularyLoadResult(
+                    terms: [],
+                    warning: nil,
+                    blockedExistingDocumentReason: nil
+                )
+            }
+            data = loaded
+        } catch {
+            let warning = "Vocabulary storage is unsafe or unreadable; it was left untouched and vocabulary changes are blocked."
+            return MacVocabularyLoadResult(
+                terms: [],
+                warning: warning,
+                blockedExistingDocumentReason: warning
+            )
+        }
+
+        guard let object = try? JSONSerialization.jsonObject(with: data) else {
+            return blockedLoad("Vocabulary is malformed; it was left untouched and vocabulary changes are blocked.")
+        }
+
+        let storedTerms: [String]
+        if object is [Any] {
+            // Raw arrays are the format shipped by earlier builds. They remain
+            // readable and migrate only after a successful user mutation.
+            guard let legacy = try? JSONDecoder().decode([String].self, from: data) else {
+                return blockedLoad("Vocabulary is malformed; it was left untouched and vocabulary changes are blocked.")
+            }
+            storedTerms = legacy
+        } else {
+            guard
+                let documentObject = object as? [String: Any],
+                Set(documentObject.keys) == Set(["schemaVersion", "terms"]),
+                let document = try? JSONDecoder().decode(StoredVocabulary.self, from: data)
+            else {
+                return blockedLoad("Vocabulary uses unsupported fields or is malformed; it was left untouched and vocabulary changes are blocked.")
+            }
+            guard document.schemaVersion == StoredVocabulary.currentSchemaVersion else {
+                return blockedLoad("Vocabulary uses unsupported schema \(document.schemaVersion); it was left untouched and vocabulary changes are blocked.")
+            }
+            storedTerms = document.terms
+        }
+
+        guard let validated = validatedStoredTerms(storedTerms) else {
+            return blockedLoad("Vocabulary contains unsupported or damaged entries; it was left untouched and vocabulary changes are blocked.")
+        }
+        return MacVocabularyLoadResult(
+            terms: validated,
+            warning: nil,
+            blockedExistingDocumentReason: nil
+        )
+    }
+
+    private static func blockedLoad(_ message: String) -> MacVocabularyLoadResult {
+        MacVocabularyLoadResult(
+            terms: [],
+            warning: message,
+            blockedExistingDocumentReason: message
+        )
+    }
+
+    private static func validatedStoredTerms(_ candidates: [String]) -> [String]? {
+        guard candidates.count <= maximumTerms else { return nil }
+        var keys = Set<String>()
+        for candidate in candidates {
+            let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard
+                candidate == trimmed,
+                validationFailure(for: candidate) == nil,
+                keys.insert(duplicateKey(candidate)).inserted
+            else {
+                return nil
+            }
+        }
+        return sortedForDisplay(candidates)
     }
 
     private static func storedFileURL(in directory: URL?) -> URL? {
@@ -197,11 +328,19 @@ final class MacVocabularyStore: ObservableObject {
             container = support.appending(path: "SpeakPaste", directoryHint: .isDirectory)
         }
 
-        do {
-            try manager.createDirectory(at: container, withIntermediateDirectories: true)
-        } catch {
-            return nil
-        }
         return container.appending(path: "vocabulary.json", directoryHint: .notDirectory)
     }
+}
+
+private struct StoredVocabulary: Codable {
+    static let currentSchemaVersion = 1
+
+    let schemaVersion: Int
+    let terms: [String]
+}
+
+private struct MacVocabularyLoadResult {
+    let terms: [String]
+    let warning: String?
+    let blockedExistingDocumentReason: String?
 }

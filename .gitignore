@@ -1,4 +1,5 @@
 DerivedData/
+.build/
 build/
 *.zip
 *.xcuserstate

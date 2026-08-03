@@ -5,7 +5,7 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var apiKeyInput = ""
-    @State private var saveErrorMessage: String?
+    @State private var apiKeyErrorMessage: String?
     @State private var showRemoveConfirmation = false
 
     private var trimmedInput: String {
@@ -34,15 +34,15 @@ struct SettingsView: View {
         .tint(Theme.accent)
         .preferredColorScheme(.dark)
         .alert(
-            "Couldn't Save Key",
+            "Couldn't Update Key",
             isPresented: Binding(
-                get: { saveErrorMessage != nil },
-                set: { if !$0 { saveErrorMessage = nil } }
+                get: { apiKeyErrorMessage != nil },
+                set: { if !$0 { apiKeyErrorMessage = nil } }
             )
         ) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text(saveErrorMessage ?? "")
+            Text(apiKeyErrorMessage ?? "")
         }
         .confirmationDialog(
             "Remove the saved API key?",
@@ -50,7 +50,11 @@ struct SettingsView: View {
             titleVisibility: .visible
         ) {
             Button("Remove Key", role: .destructive) {
-                model.deleteAPIKey()
+                do {
+                    try model.deleteAPIKey()
+                } catch {
+                    apiKeyErrorMessage = error.localizedDescription
+                }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -161,7 +165,7 @@ struct SettingsView: View {
             try model.saveAPIKey(apiKeyInput)
             apiKeyInput = ""
         } catch {
-            saveErrorMessage = error.localizedDescription
+            apiKeyErrorMessage = error.localizedDescription
         }
     }
 }
