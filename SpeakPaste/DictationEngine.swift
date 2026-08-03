@@ -44,6 +44,35 @@ final class DictationEngine {
     private var recordingURL: URL?
     private var heartbeatTask: Task<Void, Never>?
     private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
+    private let keepAlive = BackgroundAudioKeepAlive()
+
+    private enum KeepAliveKeys {
+        static let enabled = "keep-alive-enabled"
+        static let mode = "keep-alive-mode"
+    }
+
+    var isArmed: Bool { keepAlive.isArmed }
+
+    var keepAliveEnabled: Bool {
+        get { defaults.object(forKey: KeepAliveKeys.enabled) as? Bool ?? true }
+        set {
+            defaults.set(newValue, forKey: KeepAliveKeys.enabled)
+            if newValue {
+                arm()
+            } else {
+                keepAlive.disarm()
+            }
+        }
+    }
+
+    /// Arm from the foreground. Every later Back Tap then starts capture on a
+    /// session that is already live, which is the only way iOS permits it.
+    func arm() {
+        guard keepAliveEnabled, !isRecording else { return }
+        let stored = defaults.string(forKey: KeepAliveKeys.mode)
+            .flatMap(BackgroundAudioKeepAlive.Mode.init(rawValue:))
+        try? keepAlive.arm(mode: stored ?? .playbackOnly)
+    }
 
     init(
         client: ElevenLabsClientProtocol = ElevenLabsClient(),
@@ -83,7 +112,7 @@ final class DictationEngine {
         let snapshot = store.beginBackgroundSession()
         sessionID = snapshot.sessionID
         do {
-            recordingURL = try recorder.start()
+            recordingURL = try beginCapture()
         } catch {
             store.setPhase(
                 .failed,
@@ -112,7 +141,7 @@ final class DictationEngine {
     @discardableResult
     func stop() async throws -> String? {
         guard let sessionID else { return nil }
-        let audioURL = recorder.stop() ?? recordingURL
+        let audioURL = recorder.stop(deactivatesSession: !keepAlive.isArmed) ?? recordingURL
         let duration = recorder.duration
         stopHeartbeat()
 
@@ -172,11 +201,33 @@ final class DictationEngine {
 
     func cancel() {
         guard let sessionID else { return }
-        recorder.stop()
+        recorder.stop(deactivatesSession: !keepAlive.isArmed)
         stopHeartbeat()
         store.setPhase(.cancelled, sessionID: sessionID)
         if let recordingURL { cleanUpRecording(at: recordingURL) }
         finish()
+    }
+
+    /// Prefer recording on the keep-alive's live session. If the lighter
+    /// playback-only mode will not take input from the background, escalate to
+    /// holding input outright and remember that for next time.
+    private func beginCapture() throws -> URL {
+        guard keepAlive.isArmed else {
+            return try recorder.start()
+        }
+
+        do {
+            try keepAlive.prepareForRecording()
+            return try recorder.start(configuresSession: false)
+        } catch {
+            guard keepAlive.mode == .playbackOnly else { throw error }
+            try keepAlive.arm(mode: .holdsInput)
+            defaults.set(
+                BackgroundAudioKeepAlive.Mode.holdsInput.rawValue,
+                forKey: KeepAliveKeys.mode
+            )
+            return try recorder.start(configuresSession: false)
+        }
     }
 
     private var language: TranscriptionLanguage {
@@ -210,6 +261,11 @@ final class DictationEngine {
         recordingURL = nil
         stopHeartbeat()
         endBackgroundExecution()
+        // Recording ended, so re-establish the resident session that lets the
+        // next Back Tap start without a cold activation.
+        if keepAliveEnabled, let mode = keepAlive.mode {
+            try? keepAlive.arm(mode: mode)
+        }
     }
 
     private func cleanUpRecording(at url: URL) {

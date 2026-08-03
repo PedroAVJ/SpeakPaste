@@ -151,6 +151,8 @@ final class SpeakPasteSceneDelegate: UIResponder, UIWindowSceneDelegate {
 
     func sceneDidBecomeActive(_ scene: UIScene) {
         HostAppSwitcher.probeSystemNavigationAction(route: "scene-did-become-active")
+        // Arming has to happen from the foreground; that is the whole point.
+        DictationEngine.shared.arm()
         model.handleActivation()
     }
 

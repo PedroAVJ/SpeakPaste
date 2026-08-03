@@ -15,6 +15,7 @@
 		A10000000000000000000006 /* HistoryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000006 /* HistoryStore.swift */; };
 		A10000000000000000000090 /* DictationEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000090 /* DictationEngine.swift */; };
 		A10000000000000000000091 /* DictationIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000091 /* DictationIntents.swift */; };
+		A10000000000000000000092 /* BackgroundAudioKeepAlive.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000092 /* BackgroundAudioKeepAlive.swift */; };
 		A10000000000000000000007 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000007 /* AppModel.swift */; };
 		A10000000000000000000008 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000008 /* ContentView.swift */; };
 		A10000000000000000000009 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000009 /* SettingsView.swift */; };
@@ -86,6 +87,7 @@
 		A20000000000000000000006 /* HistoryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryStore.swift; sourceTree = "<group>"; };
 		A20000000000000000000090 /* DictationEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictationEngine.swift; sourceTree = "<group>"; };
 		A20000000000000000000091 /* DictationIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictationIntents.swift; sourceTree = "<group>"; };
+		A20000000000000000000092 /* BackgroundAudioKeepAlive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundAudioKeepAlive.swift; sourceTree = "<group>"; };
 		A20000000000000000000007 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		A20000000000000000000008 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		A20000000000000000000009 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
@@ -150,6 +152,7 @@
 				A2000000000000000000000A /* HistoryView.swift */,
 				A20000000000000000000090 /* DictationEngine.swift */,
 				A20000000000000000000091 /* DictationIntents.swift */,
+				A20000000000000000000092 /* BackgroundAudioKeepAlive.swift */,
 				A20000000000000000000007 /* AppModel.swift */,
 				C20000000000000000000001 /* SharedDictation.swift */,
 				C20000000000000000000002 /* HostAppSwitcher.swift */,
@@ -300,7 +303,7 @@
 		A60000000000000000000001 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
-			files = (A10000000000000000000001, A10000000000000000000002, A10000000000000000000003, A10000000000000000000004, A10000000000000000000005, A10000000000000000000006, A10000000000000000000007, A10000000000000000000090, A10000000000000000000091, C10000000000000000000001, C10000000000000000000002, A10000000000000000000008, A10000000000000000000009, A1000000000000000000000A, );
+			files = (A10000000000000000000001, A10000000000000000000002, A10000000000000000000003, A10000000000000000000004, A10000000000000000000005, A10000000000000000000006, A10000000000000000000007, A10000000000000000000092, A10000000000000000000090, A10000000000000000000091, C10000000000000000000001, C10000000000000000000002, A10000000000000000000008, A10000000000000000000009, A1000000000000000000000A, );
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		A60000000000000000000003 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A1000000000000000000000C, A1000000000000000000000D, C1000000000000000000000B, ); runOnlyForDeploymentPostprocessing = 0; };

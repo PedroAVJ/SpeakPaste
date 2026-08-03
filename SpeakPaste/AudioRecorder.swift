@@ -36,26 +36,32 @@ final class AudioRecorder: ObservableObject {
         }
     }
 
-    func start() throws -> URL {
+    /// - Parameter configuresSession: false when a keep-alive already owns an
+    ///   active session. Reconfiguring it would tear down the very thing that
+    ///   makes a background start legal.
+    func start(configuresSession: Bool = true) throws -> URL {
         let session = AVAudioSession.sharedInstance()
-        do {
-            // This app only captures speech. `spokenAudio` is a playback mode,
-            // and `duckOthers` is not valid with the record-only category;
-            // that invalid combination returns OSStatus -50 on the iPhone.
-            try session.setCategory(.record, mode: .measurement, options: [])
-        } catch {
-            throw AudioRecorderError.configurationFailed(
-                stage: "configuration",
-                underlying: error
-            )
-        }
-        do {
-            try session.setActive(true)
-        } catch {
-            throw AudioRecorderError.configurationFailed(
-                stage: "activation",
-                underlying: error
-            )
+        if configuresSession {
+            do {
+                // This app only captures speech. `spokenAudio` is a playback
+                // mode, and `duckOthers` is not valid with the record-only
+                // category; that invalid combination returns OSStatus -50 on
+                // the iPhone.
+                try session.setCategory(.record, mode: .measurement, options: [])
+            } catch {
+                throw AudioRecorderError.configurationFailed(
+                    stage: "configuration",
+                    underlying: error
+                )
+            }
+            do {
+                try session.setActive(true)
+            } catch {
+                throw AudioRecorderError.configurationFailed(
+                    stage: "activation",
+                    underlying: error
+                )
+            }
         }
 
         let directory = FileManager.default.temporaryDirectory
@@ -99,7 +105,7 @@ final class AudioRecorder: ObservableObject {
     }
 
     @discardableResult
-    func stop() -> URL? {
+    func stop(deactivatesSession: Bool = true) -> URL? {
         let url = recorder?.url
         recorder?.stop()
         recorder = nil
@@ -107,10 +113,12 @@ final class AudioRecorder: ObservableObject {
         meterTask = nil
         isRecording = false
         level = 0
-        try? AVAudioSession.sharedInstance().setActive(
-            false,
-            options: .notifyOthersOnDeactivation
-        )
+        if deactivatesSession {
+            try? AVAudioSession.sharedInstance().setActive(
+                false,
+                options: .notifyOthersOnDeactivation
+            )
+        }
         return url
     }
 
