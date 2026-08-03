@@ -32,13 +32,21 @@ The Xcode project contains three targets:
    microphone automatically. Only a microphone you pick yourself is remembered,
    and SpeakPaste never substitutes a Mac microphone on its own: if the iPhone
    is unavailable it says so and waits for you to choose.
-6. Click the record control or tap either **Command (⌘)** key by itself.
-   Command-key combinations such as ⌘C, ⌘V, and ⌘Tab keep their normal behavior.
+6. Click the record control or tap the **right Command (⌘)** key by itself.
+   The left ⌘ is deliberately untouched, so ⌘C, ⌘V, and ⌘Tab keep their normal
+   behavior and cannot start a dictation by accident.
 7. Wait for the click-through floating HUD to change from **WAIT** to
    **SPEAK NOW**, then begin speaking.
-8. Tap Command again to stop. SpeakPaste closes the recording, fully releases
-   the microphone, and then moves through **TRANSCRIBING** to **DONE** or
-   **ERROR**.
+8. Tap right Command again to stop. SpeakPaste closes the recording, fully
+   releases the microphone, and then moves through **TRANSCRIBING** to **DONE**
+   or **ERROR**.
+
+You do not have to wait at the keyboard. If the field you dictated into is no
+longer focused when the transcript arrives, SpeakPaste holds the text instead of
+pasting it somewhere else, and says so. Click back into that same field and it
+inserts itself; press **⌥⌘V** to drop it wherever your cursor is instead.
+Delivery is attempted only into the exact element that had focus when recording
+started — never merely the same application.
 
 The second Command press ends the Continuity session before transcription
 starts, allowing macOS to dismiss its system-owned capture surface on the

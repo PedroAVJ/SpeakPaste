@@ -128,3 +128,19 @@ codesign --verify --strict "$app"
 
 echo "==> Installing on $DEVICE"
 xcrun devicectl device install app --device "$DEVICE" "$app" | tail -5
+
+# A Mac cannot write to the device Keychain. Launch the debug build once with
+# the key in its environment so it can store the key itself. DEVICECTL_CHILD_
+# keeps the value out of the command line, and nothing prints it.
+if [ -n "${ELEVENLABS_API_KEY:-}" ]; then
+    echo "==> Seeding the ElevenLabs key into the device Keychain"
+    DEVICECTL_CHILD_ELEVENLABS_API_KEY="$ELEVENLABS_API_KEY" \
+        xcrun devicectl device process launch \
+        --device "$DEVICE" \
+        --terminate-existing \
+        "$APP_BUNDLE_ID" >/dev/null 2>&1 \
+        && echo "    seeded" \
+        || echo "    launch failed; open SpeakPaste and add the key in Settings"
+else
+    echo "==> ELEVENLABS_API_KEY not set; skipping Keychain seed"
+fi

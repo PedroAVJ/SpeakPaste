@@ -17,8 +17,75 @@ final class SpeakPasteAppDelegate: UIResponder, UIApplicationDelegate {
             object: nil
         )
         HostAppSwitcher.probeSystemNavigationAction(route: "application-launch")
+#if DEBUG
+        seedAPIKeyFromEnvironmentIfNeeded()
+#endif
         return true
     }
+
+#if DEBUG
+    /// A Mac cannot write to the device Keychain, so installing a debug build
+    /// leaves the app with no key until someone types one. Let a debug launch
+    /// seed it once from the environment instead. `scripts/install-iphone.sh`
+    /// passes it through `DEVICECTL_CHILD_ELEVENLABS_API_KEY`, so the value
+    /// never reaches the source tree, the app bundle, or a command line.
+    /// Release builds do not contain this path.
+    private func seedAPIKeyFromEnvironmentIfNeeded() {
+        guard
+            let value = ProcessInfo.processInfo
+                .environment["ELEVENLABS_API_KEY"]?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            !value.isEmpty
+        else {
+            return
+        }
+        // Overwrite rather than only filling a gap, so rotating the key on the
+        // Mac and re-running the install script keeps the phone in sync.
+        let keychain = KeychainStore()
+        var saveError: String?
+        if keychain.load() != value {
+            do {
+                try keychain.save(value)
+            } catch {
+                saveError = error.localizedDescription
+            }
+        }
+        recordKeychainSeedResult(
+            storedKey: keychain.load() != nil,
+            saveError: saveError
+        )
+    }
+
+    /// Report only whether a key is present, never the key itself, so an
+    /// install can be verified from the Mac without a dictation run.
+    private func recordKeychainSeedResult(storedKey: Bool, saveError: String?) {
+        guard
+            let directory = FileManager.default.urls(
+                for: .documentDirectory,
+                in: .userDomainMask
+            ).first
+        else {
+            return
+        }
+        let report: [String: Any] = [
+            "hasAPIKey": storedKey,
+            "saveError": saveError ?? "none",
+            "checkedAt": ISO8601DateFormatter().string(from: Date()),
+        ]
+        guard
+            let data = try? JSONSerialization.data(
+                withJSONObject: report,
+                options: [.prettyPrinted, .sortedKeys]
+            )
+        else {
+            return
+        }
+        try? data.write(
+            to: directory.appendingPathComponent("last-install-check.json"),
+            options: .atomic
+        )
+    }
+#endif
 
     @objc private func systemNavigationActionDidChange(_ notification: Notification) {
         HostAppSwitcher.probeSystemNavigationAction(route: "action-changed")
