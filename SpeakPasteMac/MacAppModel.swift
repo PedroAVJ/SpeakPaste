@@ -57,9 +57,15 @@ final class MacAppModel: ObservableObject {
     /// Explains why no microphone is selected. Non-nil means SpeakPaste
     /// declined to guess rather than quietly dictating through the wrong mic.
     @Published private(set) var deviceSelectionNotice: String?
-    @Published var language: TranscriptionLanguage = .automatic
-    @Published var cleanSpeech = true
-    @Published var autoPaste = true
+    @Published var language: TranscriptionLanguage = .automatic {
+        didSet { UserDefaults.standard.set(language.rawValue, forKey: Self.languageKey) }
+    }
+    @Published var cleanSpeech = true {
+        didSet { UserDefaults.standard.set(cleanSpeech, forKey: Self.cleanSpeechKey) }
+    }
+    @Published var autoPaste = true {
+        didSet { UserDefaults.standard.set(autoPaste, forKey: Self.autoPasteKey) }
+    }
     @Published private(set) var elapsed: TimeInterval = 0
     @Published private(set) var inputLevel: Double = 0
     @Published var transcript = ""
@@ -87,6 +93,9 @@ final class MacAppModel: ObservableObject {
     private var deliveryTarget: MacDeliveryTarget?
     private var connectedDeviceID: String?
     private var pendingWatchTimer: Timer?
+    /// Delivery is asynchronous now, so the 0.4 s watcher must not start a
+    /// second paste on top of one already in progress.
+    private var isDeliveringHeldTranscripts = false
     /// Dictations deliver in the order they were spoken even when a later,
     /// shorter one finishes transcribing first. `nextDeliverySequence` is the
     /// ticket now being served; results that arrive early wait in `completed`.
@@ -95,6 +104,9 @@ final class MacAppModel: ObservableObject {
     private var completedDictations: [Int: MacFinishedDictation] = [:]
 
     private static let chosenDeviceKey = "mac-chosen-device-id"
+    private static let languageKey = "mac-language"
+    private static let cleanSpeechKey = "mac-clean-speech"
+    private static let autoPasteKey = "mac-auto-paste"
     /// Earlier builds auto-persisted whatever microphone they fell back to, so
     /// a single iPhone-absent launch pinned the built-in mic permanently.
     private static let autoPersistedDeviceKey = "mac-selected-device-id"
@@ -115,6 +127,20 @@ final class MacAppModel: ObservableObject {
         self.globalHotKey = globalHotKey
         attempts = reliabilityStore.load()
         hasSavedAPIKey = keychain.load()?.isEmpty == false
+        // Settings were rebuilt at their defaults on every launch, so a chosen
+        // language or a disabled auto-paste never survived a restart.
+        let defaults = UserDefaults.standard
+        if let stored = defaults.string(forKey: Self.languageKey),
+           let restored = TranscriptionLanguage(rawValue: stored) {
+            language = restored
+        }
+        if defaults.object(forKey: Self.cleanSpeechKey) != nil {
+            cleanSpeech = defaults.bool(forKey: Self.cleanSpeechKey)
+        }
+        if defaults.object(forKey: Self.autoPasteKey) != nil {
+            autoPaste = defaults.bool(forKey: Self.autoPasteKey)
+        }
+        MacKeyboardLayout.startObservingLayoutChanges()
         UserDefaults.standard.removeObject(forKey: Self.autoPersistedDeviceKey)
         refreshDevices()
         observeDeviceChanges()
@@ -418,9 +444,9 @@ final class MacAppModel: ObservableObject {
             autoPaste: autoPaste
         )
         var detail = delivery.detail
-        if delivery == .held, let target = finished.target {
+        if case let .held(reason) = delivery, let target = finished.target {
             hold(finished.text, for: target)
-            detail = "Held for \(target.applicationName)"
+            detail = "Held for \(target.applicationName) — \(reason.explanation)"
         } else if let target = finished.target {
             // Naming the destination and the route makes the attempt log the
             // record of where each dictation actually went.
@@ -489,6 +515,7 @@ final class MacAppModel: ObservableObject {
             stopPendingWatcher()
             return
         }
+        guard !isDeliveringHeldTranscripts else { return }
         let ready = heldTranscripts.filter { $0.target.canDeliverOnReturn }
         guard !ready.isEmpty else { return }
 
@@ -496,31 +523,45 @@ final class MacAppModel: ObservableObject {
         // insert. Two dictations while away should read as two sentences, not
         // arrive as a race.
         let text = ready.map(\.text).joined(separator: " ")
-        guard let target = ready.first?.target else { return }
-
         let readyIdentifiers = Set(ready.map(\.id))
-        guard pasteController.pasteAtCurrentFocus(text) != .copiedNeedsAccessibility else { return }
-        heldTranscripts.removeAll { readyIdentifiers.contains($0.id) }
-        if heldTranscripts.isEmpty { stopPendingWatcher() }
-        phase = .succeeded("Pasted where you left off")
-        scheduleReadyReset()
+        isDeliveringHeldTranscripts = true
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.isDeliveringHeldTranscripts = false }
+            let result = await self.pasteController.pasteAtCurrentFocus(text)
+            // Held text is only forgotten once it has actually gone somewhere.
+            // Anything else — secure input, a refused menu action, a swallowed
+            // keystroke — keeps it queued, because the HUD promises it is safe.
+            guard result.isDelivered else { return }
+            self.heldTranscripts.removeAll { readyIdentifiers.contains($0.id) }
+            if self.heldTranscripts.isEmpty { self.stopPendingWatcher() }
+            guard !self.phase.isBusy else { return }
+            self.phase = .succeeded("Pasted where you left off")
+            self.scheduleReadyReset()
+        }
     }
 
     /// Drops everything held at the caret's current location, wherever that is.
     /// The user is explicitly asking for this destination, so no target match is
     /// required.
     func releaseHeldTranscripts() {
-        guard !heldTranscripts.isEmpty else { return }
+        guard !heldTranscripts.isEmpty, !isDeliveringHeldTranscripts else { return }
         let text = heldTranscripts.map(\.text).joined(separator: " ")
-        let result = pasteController.pasteAtCurrentFocus(text)
-        guard result != .copiedNeedsAccessibility else {
-            phase = .failed("Enable Accessibility for SpeakPaste to insert held text.")
-            return
+        isDeliveringHeldTranscripts = true
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.isDeliveringHeldTranscripts = false }
+            let result = await self.pasteController.pasteAtCurrentFocus(text)
+            guard result.isDelivered else {
+                // The text stays queued. Saying why beats a silent no-op.
+                self.phase = .failed("Could not place the held text — \(result.detail).")
+                return
+            }
+            self.heldTranscripts.removeAll()
+            self.stopPendingWatcher()
+            self.phase = .succeeded("Pasted here")
+            self.scheduleReadyReset()
         }
-        heldTranscripts.removeAll()
-        stopPendingWatcher()
-        phase = .succeeded("Pasted here")
-        scheduleReadyReset()
     }
 
     func discardHeldTranscripts() {
