@@ -83,6 +83,10 @@ struct MacDeliveryTarget {
 }
 
 enum MacAccessibility {
+    /// A wedged target — an Electron app mid-render, say — can otherwise block
+    /// an accessibility call indefinitely, and these run on the main actor.
+    static let messagingTimeout: Float = 1.5
+
     static func systemFocusedElement() -> AXUIElement? {
         guard AXIsProcessTrusted() else { return nil }
         var value: CFTypeRef?
@@ -115,6 +119,95 @@ enum MacAccessibility {
         return role == (kAXTextFieldRole as String)
             || role == (kAXTextAreaRole as String)
             || role == (kAXComboBoxRole as String)
+    }
+
+    /// The text currently in the focused field, when it exposes one. Used to
+    /// confirm a paste actually landed rather than trusting that a synthesized
+    /// keystroke was delivered.
+    static func focusedText() -> String? {
+        guard let element = systemFocusedElement() else { return nil }
+        AXUIElementSetMessagingTimeout(element, messagingTimeout)
+        return stringAttribute(kAXValueAttribute, of: element)
+    }
+
+    /// Invokes the target application's own Edit ▸ Paste menu item.
+    ///
+    /// This is the delivery path superwhisper tries first, and it is better
+    /// than a synthesized ⌘V on three counts: it is independent of keyboard
+    /// layout, it is unaffected by Secure Event Input, and it needs no
+    /// post-event grant. The item is matched on its command character rather
+    /// than the title "Paste", so a localized menu still resolves.
+    static func pressPasteMenuItem(inProcess processIdentifier: pid_t) -> Bool {
+        let application = AXUIElementCreateApplication(processIdentifier)
+        AXUIElementSetMessagingTimeout(application, messagingTimeout)
+
+        var menuBarValue: CFTypeRef?
+        guard
+            AXUIElementCopyAttributeValue(
+                application,
+                kAXMenuBarAttribute as CFString,
+                &menuBarValue
+            ) == .success,
+            let menuBarValue,
+            CFGetTypeID(menuBarValue) == AXUIElementGetTypeID()
+        else {
+            return false
+        }
+        let menuBar = menuBarValue as! AXUIElement
+
+        for topLevel in children(of: menuBar) {
+            for menu in children(of: topLevel) {
+                for item in children(of: menu) {
+                    guard
+                        stringAttribute(kAXMenuItemCmdCharAttribute, of: item) == "v",
+                        // ⌘V carries no extra modifier; ⇧⌘V is Paste and Match
+                        // Style, which would reformat the user's text.
+                        numberAttribute(kAXMenuItemCmdModifiersAttribute, of: item) == 0,
+                        isEnabled(item)
+                    else {
+                        continue
+                    }
+                    return AXUIElementPerformAction(item, kAXPressAction as CFString) == .success
+                }
+            }
+        }
+        return false
+    }
+
+    private static func children(of element: AXUIElement) -> [AXUIElement] {
+        var value: CFTypeRef?
+        guard
+            AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &value) == .success,
+            let value,
+            CFGetTypeID(value) == CFArrayGetTypeID()
+        else {
+            return []
+        }
+        return (value as! CFArray) as? [AXUIElement] ?? []
+    }
+
+    private static func isEnabled(_ element: AXUIElement) -> Bool {
+        var value: CFTypeRef?
+        guard
+            AXUIElementCopyAttributeValue(element, kAXEnabledAttribute as CFString, &value) == .success,
+            let value,
+            CFGetTypeID(value) == CFBooleanGetTypeID()
+        else {
+            return true
+        }
+        return CFBooleanGetValue((value as! CFBoolean))
+    }
+
+    private static func numberAttribute(_ attribute: String, of element: AXUIElement) -> Int? {
+        var value: CFTypeRef?
+        guard
+            AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
+            let value,
+            CFGetTypeID(value) == CFNumberGetTypeID()
+        else {
+            return nil
+        }
+        return ((value as! NSNumber)).intValue
     }
 
     private static func stringAttribute(_ attribute: String, of element: AXUIElement) -> String? {
