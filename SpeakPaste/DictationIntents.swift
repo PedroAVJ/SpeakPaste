@@ -3,7 +3,7 @@ import AppIntents
 /// Bind this to Back Tap (Settings → Accessibility → Touch → Back Tap) through
 /// a one-action Shortcut. `openAppWhenRun` stays false so the app you are
 /// typing in never loses the screen.
-struct ToggleDictationIntent: AppIntent {
+struct ToggleDictationIntent: AppIntent, AudioRecordingIntent, ForegroundContinuableIntent {
     static let title: LocalizedStringResource = "Toggle Dictation"
     static let description = IntentDescription(
         "Start dictating, or finish and insert the transcript, without leaving the app you are in."
@@ -12,14 +12,26 @@ struct ToggleDictationIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        if let transcript = try await DictationEngine.shared.toggle() {
-            return .result(dialog: IntentDialog("Inserted \(transcript.count) characters"))
+        do {
+            if let transcript = try await DictationEngine.shared.toggle() {
+                return .result(
+                    dialog: IntentDialog("Inserted \(transcript.count) characters")
+                )
+            }
+            return .result(dialog: IntentDialog("Listening"))
+        } catch DictationEngine.EngineError.backgroundCaptureUnavailable {
+            // Stopping never needs the foreground, so only a cold start lands
+            // here. Hand off rather than failing silently.
+            throw needsToContinueInForegroundError(
+                IntentDialog("Opening SpeakPaste to start the microphone")
+            ) {
+                try await DictationEngine.shared.start()
+            }
         }
-        return .result(dialog: IntentDialog("Listening"))
     }
 }
 
-struct StartDictationIntent: AppIntent {
+struct StartDictationIntent: AppIntent, AudioRecordingIntent {
     static let title: LocalizedStringResource = "Start Dictation"
     static let description = IntentDescription(
         "Begin recording in the background without switching apps."
@@ -33,7 +45,7 @@ struct StartDictationIntent: AppIntent {
     }
 }
 
-struct StopDictationIntent: AppIntent {
+struct StopDictationIntent: AppIntent, AudioRecordingIntent {
     static let title: LocalizedStringResource = "Stop Dictation"
     static let description = IntentDescription(
         "Finish recording, transcribe, and hand the text to the keyboard and clipboard."

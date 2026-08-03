@@ -15,6 +15,11 @@ final class DictationEngine {
     enum EngineError: LocalizedError {
         case missingAPIKey
         case microphoneDenied
+        /// iOS refuses to activate a recording session for an app that is not
+        /// already running one. Only the call-management frameworks (CallKit,
+        /// LiveCommunicationKit, PushToTalk) may start capture from a cold
+        /// background launch, so the intent has to continue in the foreground.
+        case backgroundCaptureUnavailable
 
         var errorDescription: String? {
             switch self {
@@ -22,6 +27,8 @@ final class DictationEngine {
                 "Add your ElevenLabs API key in SpeakPaste before dictating."
             case .microphoneDenied:
                 "Microphone access is off. Enable it for SpeakPaste in Settings."
+            case .backgroundCaptureUnavailable:
+                "iOS will not start the microphone while SpeakPaste is in the background."
             }
         }
     }
@@ -84,6 +91,13 @@ final class DictationEngine {
                 errorMessage: error.localizedDescription
             )
             sessionID = nil
+            if
+                case let AudioRecorderError.configurationFailed(stage, _) = error,
+                stage == "activation",
+                UIApplication.shared.applicationState != .active
+            {
+                throw EngineError.backgroundCaptureUnavailable
+            }
             throw error
         }
 
