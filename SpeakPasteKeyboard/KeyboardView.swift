@@ -1,14 +1,58 @@
 import SwiftUI
+import UIKit
 
 private enum KBTheme {
-    static let keyboardBackground = Color(red: 0.82, green: 0.84, blue: 0.87)
-    static let key = Color(red: 0.99, green: 0.99, blue: 1.0)
-    static let utilityKey = Color(red: 0.67, green: 0.70, blue: 0.74)
-    static let ink = Color(red: 0.08, green: 0.09, blue: 0.10)
-    static let inkMuted = Color(red: 0.34, green: 0.36, blue: 0.39)
-    static let accent = Color(red: 0.94, green: 0.40, blue: 0.20)
-    static let accentSoft = Color(red: 1.0, green: 0.89, blue: 0.83)
-    static let danger = Color(red: 0.85, green: 0.18, blue: 0.16)
+    /// The system keyboard follows the appearance the host asks for, so these
+    /// resolve per trait collection instead of being fixed light values.
+    private static func adaptive(
+        light: (CGFloat, CGFloat, CGFloat),
+        dark: (CGFloat, CGFloat, CGFloat)
+    ) -> Color {
+        Color(
+            UIColor { traits in
+                let channels = traits.userInterfaceStyle == .dark ? dark : light
+                return UIColor(
+                    red: channels.0,
+                    green: channels.1,
+                    blue: channels.2,
+                    alpha: 1
+                )
+            }
+        )
+    }
+
+    static let keyboardBackground = adaptive(
+        light: (0.82, 0.84, 0.87),
+        dark: (0.13, 0.13, 0.14)
+    )
+    static let key = adaptive(
+        light: (0.99, 0.99, 1.0),
+        dark: (0.42, 0.42, 0.44)
+    )
+    static let utilityKey = adaptive(
+        light: (0.67, 0.70, 0.74),
+        dark: (0.27, 0.27, 0.29)
+    )
+    static let ink = adaptive(
+        light: (0.08, 0.09, 0.10),
+        dark: (0.98, 0.98, 1.0)
+    )
+    static let inkMuted = adaptive(
+        light: (0.34, 0.36, 0.39),
+        dark: (0.72, 0.73, 0.76)
+    )
+    static let accent = adaptive(
+        light: (0.94, 0.40, 0.20),
+        dark: (1.0, 0.51, 0.31)
+    )
+    static let accentSoft = adaptive(
+        light: (1.0, 0.89, 0.83),
+        dark: (0.29, 0.16, 0.11)
+    )
+    static let danger = adaptive(
+        light: (0.85, 0.18, 0.16),
+        dark: (1.0, 0.42, 0.40)
+    )
 
     static func timeString(_ interval: TimeInterval) -> String {
         let total = Int(interval)
@@ -131,7 +175,6 @@ struct KeyboardView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(KBTheme.keyboardBackground.ignoresSafeArea())
-        .environment(\.colorScheme, .light)
         .dynamicTypeSize(...DynamicTypeSize.xLarge)
         .animation(
             reduceMotion ? nil : .easeInOut(duration: 0.18),

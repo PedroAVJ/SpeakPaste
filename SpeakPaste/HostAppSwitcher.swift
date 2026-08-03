@@ -123,17 +123,6 @@ enum HostAppSwitcher {
     private static let actionChangedNotification = Notification.Name(
         "UIApplicationSystemNavigationActionChangedNotification"
     )
-    private static let knownReturnBundleIdentifiers: Set<String> = [
-        "com.apple.MobileSMS",
-        "com.apple.mobilenotes",
-        "com.apple.mobilemail",
-        "com.openai.chat",
-        "com.anthropic.claude",
-        "net.whatsapp.WhatsApp",
-        "com.tinyspeck.chatlyio",
-        "com.google.Gmail",
-        "com.linkedin.LinkedIn",
-    ]
     private static var attemptedSystemNavigationActions: [WeakSystemNavigationAction] = []
     private static var systemNavigationProbeHistory: [String] = []
 
@@ -768,10 +757,15 @@ enum HostAppSwitcher {
                 Bundle.main.bundleIdentifier.map { $0 + ".Keyboard" },
             ].compactMap { $0 }
         )
+        // The keyboard resolves the host by reading that app's own bundle
+        // rather than inferring it, so any well-formed identifier is usable.
+        // Hosts outside the curated list simply have no URL scheme and fall
+        // through to bundle activation.
         guard
             !invalidValues.contains(identifier.lowercased()),
             !ownBundleIdentifiers.contains(identifier),
-            knownReturnBundleIdentifiers.contains(identifier)
+            identifier.contains("."),
+            !identifier.contains(" ")
         else {
             return nil
         }

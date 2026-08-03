@@ -8,6 +8,7 @@ enum SharedDictationConstants {
     /// directory. A device-only launch or return failure stays actionable
     /// without reproducing it while attached to Xcode.
     static let diagnosticsFileName = "last-dictation-session.json"
+    static let diagnosticsHistoryFileName = "dictation-sessions.jsonl"
 }
 
 enum SharedDictationPhase: String, Codable {
@@ -244,5 +245,37 @@ struct SharedDictationStore: @unchecked Sendable {
             ),
             options: .atomic
         )
+
+        // A reset overwrites the latest snapshot, which is exactly when the
+        // preceding failure diagnostics matter most. Keep a bounded history so
+        // a session can be reconstructed after it ends.
+        appendToHistory(mirrored, in: directory)
+    }
+
+    private func appendToHistory(
+        _ snapshot: SharedDictationSnapshot,
+        in directory: URL
+    ) {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        guard
+            let line = try? encoder.encode(snapshot),
+            var text = String(data: line, encoding: .utf8)
+        else {
+            return
+        }
+        text += "\n"
+
+        let url = directory.appendingPathComponent(
+            SharedDictationConstants.diagnosticsHistoryFileName
+        )
+        var existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        existing += text
+        let lines = existing.split(separator: "\n", omittingEmptySubsequences: true)
+        if lines.count > 400 {
+            existing = lines.suffix(400).joined(separator: "\n") + "\n"
+        }
+        try? existing.write(to: url, atomically: true, encoding: .utf8)
     }
 }

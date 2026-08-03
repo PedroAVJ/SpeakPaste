@@ -61,8 +61,28 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        applyKeyboardAppearance()
         model.hasFullAccess = hasFullAccess
         model.startPolling()
+    }
+
+    override func textDidChange(_ textInput: UITextInput?) {
+        super.textDidChange(textInput)
+        applyKeyboardAppearance()
+    }
+
+    /// Most hosts leave this `.default`, and the system appearance already
+    /// reaches the trait collection. A host that asks for a specific keyboard
+    /// appearance overrides that, so honor it too.
+    private func applyKeyboardAppearance() {
+        switch textDocumentProxy.keyboardAppearance {
+        case .dark:
+            overrideUserInterfaceStyle = .dark
+        case .light:
+            overrideUserInterfaceStyle = .light
+        default:
+            overrideUserInterfaceStyle = .unspecified
+        }
     }
 
     override func viewWillDisappear(_ animated: Bool) {

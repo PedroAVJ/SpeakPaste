@@ -34,15 +34,29 @@ struct HostApplicationResolver {
             return resolution(identifier, attempts)
         }
 
-        if
-            let processID = hostProcessIdentifier(for: controller),
-            let processValue = bundleIdentifier(forProcessID: processID),
-            let identifier = knownBundleIdentifier(exactValue: processValue)
-        {
-            attempts.append("controller-host-pid:\(processID)=\(identifier)")
-            return resolution(identifier, attempts)
+        if let processID = hostProcessIdentifier(for: controller) {
+            if
+                let processValue = bundleIdentifier(forProcessID: processID),
+                let identifier = knownBundleIdentifier(exactValue: processValue)
+            {
+                attempts.append("controller-host-pid:\(processID)=\(identifier)")
+                return resolution(identifier, attempts)
+            }
+
+            // SpringBoardServices refuses to name the host process from inside
+            // a keyboard extension, but its executable path still leads to the
+            // host's own bundle. Reading that Info.plist is authoritative
+            // rather than a guess, so it does not need the curated allowlist.
+            let pathValue = bundleIdentifier(fromExecutablePathFor: processID)
+            attempts.append(
+                "controller-host-path:\(processID)=\(diagnosticValue(pathValue))"
+            )
+            if let identifier = plausibleBundleIdentifier(pathValue) {
+                return resolution(identifier, attempts)
+            }
+        } else {
+            attempts.append("controller-host-pid:<nil>")
         }
-        attempts.append("controller-host-pid:<nil>")
 
         let environment = ProcessInfo.processInfo.environment
         let environmentValue = environment["XPCExtensionHostBundleIdentifier"]
@@ -666,6 +680,74 @@ struct HostApplicationResolver {
 
     private func className(_ object: NSObject) -> String {
         NSStringFromClass(type(of: object))
+    }
+
+    /// Walk a running process's executable path up to its `.app` wrapper and
+    /// read the identifier the bundle declares about itself.
+    private func bundleIdentifier(fromExecutablePathFor processID: Int32) -> String? {
+        // libproc is not surfaced by the iOS SDK, so bind the symbol the same
+        // way this file reaches SpringBoardServices.
+        typealias ProcessPathFunction = @convention(c) (
+            Int32,
+            UnsafeMutableRawPointer?,
+            UInt32
+        ) -> Int32
+        guard
+            let symbol = dlsym(
+                UnsafeMutableRawPointer(bitPattern: -2),
+                "proc_pidpath"
+            )
+        else {
+            return nil
+        }
+        let processPath = unsafeBitCast(symbol, to: ProcessPathFunction.self)
+
+        var buffer = [UInt8](repeating: 0, count: Int(4 * MAXPATHLEN))
+        let length = buffer.withUnsafeMutableBytes { raw in
+            processPath(processID, raw.baseAddress, UInt32(raw.count))
+        }
+        guard length > 0 else { return nil }
+
+        let path = String(decoding: buffer[..<Int(length)], as: UTF8.self)
+        var directory = URL(fileURLWithPath: path)
+            .deletingLastPathComponent()
+        while directory.pathExtension != "app", directory.path != "/" {
+            directory = directory.deletingLastPathComponent()
+        }
+        guard directory.pathExtension == "app" else { return nil }
+
+        let infoPlist = directory.appendingPathComponent("Info.plist")
+        guard
+            let contents = NSDictionary(contentsOf: infoPlist),
+            let identifier = contents["CFBundleIdentifier"] as? String
+        else {
+            return nil
+        }
+        return identifier
+    }
+
+    /// Accept an identifier resolved from a bundle rather than inferred, as
+    /// long as it is well formed and is not SpeakPaste itself.
+    private func plausibleBundleIdentifier(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let identifier = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard
+            identifier.contains("."),
+            !identifier.contains(" "),
+            let ownIdentifier = Bundle.main.bundleIdentifier
+        else {
+            return identifier.contains(".") ? identifier : nil
+        }
+        let containingIdentifier = ownIdentifier.hasSuffix(".Keyboard")
+            ? String(ownIdentifier.dropLast(".Keyboard".count))
+            : ownIdentifier
+        guard
+            identifier != ownIdentifier,
+            identifier != containingIdentifier
+        else {
+            return nil
+        }
+        return identifier
     }
 
     private func bundleIdentifier(forProcessID processID: Int32) -> String? {
