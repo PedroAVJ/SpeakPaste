@@ -154,15 +154,51 @@ Two rules follow from the constraints:
   no reliable knowledge of its host, so it should never start a dictation or
   try to navigate anywhere.
 
-### Delivery: the one real tradeoff
+### Delivery: the two real flows
 
-Only a keyboard can insert at the cursor. So either:
+Only the currently active keyboard extension can type into another app's text
+field — no background process, intent, shortcut, or accessibility API can, and
+nothing can synthesize a paste into another app either. So the last inch into
+the text field has exactly two doors: the user's finger pastes, or the active
+keyboard inserts. Every flow below is a different way of paying that toll.
 
-- **SpeakPaste is the active keyboard** — text appears at the cursor with no
-  extra gesture. iOS remembers the last-used keyboard globally, so this is a
-  one-time switch, not a per-dictation cost. The keyboard ships a full typing
-  layout for exactly this reason.
-- **It is not** — the transcript goes to the clipboard and is pasted manually.
+**Flow A — Back Tap + paste (being tested in the real world, 2026-08-03):**
+
+1. Double-tap the back of the phone. Recording starts, wherever you are.
+2. Talk. Your app keeps the screen; Apple's keyboard stays your keyboard.
+3. Double-tap again. The transcript lands on the clipboard.
+4. Single-tap the cursor and hit Paste in the edit-menu callout. No long
+   press needed — a plain tap at the cursor offers Paste since iOS 16.
+
+Invocation is zero-touch from anywhere; delivery costs one tap plus the
+callout. The flow depends on the background clipboard write landing reliably,
+which is still unverified on this phone.
+
+**Flow B — the keyboard-button round trip (Wispr Flow's shipping flow,
+documented from the 2026-08-02 19:04 screen recording):**
+
+1. Globe-flip to the dictation keyboard.
+2. Tap its dictate button. The first time in each app, iOS bounces to the
+   dictation app and asks for confirmation before returning.
+3. Talk, with a "Listening" panel in the keyboard area; tap done.
+4. Text inserts at the cursor automatically — and you are now stranded in
+   the dictation keyboard until you flip back.
+
+Rejected as SpeakPaste's default: invocation costs two to three touches plus
+a per-new-app confirmation, the exit costs another flip, and on this codebase
+it is the deprecated keyboard-initiated round trip (constraint 9) that the
+2026-08-02 23:15 recording shows dumping to the Home Screen.
+
+**The queue variant, free with flow A:** completed transcripts wait in the App
+Group store and auto-insert the moment the SpeakPaste keyboard comes on
+screen, so "Back Tap → talk → Back Tap → one globe flip" delivers without a
+paste whenever that feels cheaper.
+
+**The endgame:** if the SpeakPaste keyboard ever becomes livable enough to be
+the daily keyboard (exact Apple layout, English + Spanish, credible
+autocorrect), flow A's paste step simply disappears — invocation is already
+right. Keyboard quality is the only thing standing between flow A and zero
+friction, which is why it is core scope rather than a demo shell.
 
 ## Status
 
@@ -189,6 +225,8 @@ Unverified:
 - First-tap reliability of the retry + mixable-session build across cold
   launches, and behavior while music is playing (it should duck, record, and
   come back).
+- Whether the background clipboard write lands reliably; flow A's paste step
+  depends on it. The keyboard auto-insert path does not touch the clipboard.
 
 Deprecated but still present:
 
