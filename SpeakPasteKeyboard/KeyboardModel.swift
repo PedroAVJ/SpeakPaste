@@ -180,12 +180,31 @@ final class KeyboardModel: ObservableObject {
         refresh()
     }
 
+    /// The containing app heartbeats every few seconds while it owns a session.
+    /// Well past that interval means the app is gone and the session will never
+    /// finish on its own.
+    private static let abandonedSessionTimeout: TimeInterval = 15
+
+    private static func isOwnedByContainingApp(
+        _ phase: SharedDictationPhase
+    ) -> Bool {
+        switch phase {
+        case .launching, .recording, .transcribing:
+            return true
+        case .idle, .completed, .failed, .cancelled, .inserted:
+            return false
+        }
+    }
+
     private func refresh() {
         var latest = store.load()
         if
-            latest.phase == .launching,
-            Date().timeIntervalSince(latest.updatedAt) > 15
+            Self.isOwnedByContainingApp(latest.phase),
+            Date().timeIntervalSince(latest.updatedAt)
+                > Self.abandonedSessionTimeout
         {
+            // Recover instead of showing Listening forever. A force quit, a
+            // crash, or an interrupted launch all land here.
             store.reset()
             latest = store.load()
             localError = nil

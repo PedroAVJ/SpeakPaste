@@ -174,6 +174,13 @@ struct SharedDictationStore: @unchecked Sendable {
         }
     }
 
+    /// Refresh `updatedAt` without changing anything else. The containing app
+    /// owns every active phase, so a session that stops being touched is one
+    /// whose process is gone.
+    func touch(sessionID: UUID) {
+        update(sessionID: sessionID) { _ in }
+    }
+
     func send(_ command: SharedDictationCommand, sessionID: UUID) {
         update(sessionID: sessionID) { snapshot in
             snapshot.command = command

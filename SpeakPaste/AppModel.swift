@@ -436,9 +436,19 @@ final class AppModel: ObservableObject {
     private func startSharedCommandMonitor(sessionID: UUID) {
         sharedMonitorTask?.cancel()
         sharedMonitorTask = Task { [weak self] in
+            var tick = 0
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(120))
                 guard let self, self.activeSharedSessionID == sessionID else { return }
+
+                // Heartbeat so the keyboard can tell a live dictation from one
+                // this process no longer owns. Without it a killed app leaves
+                // the keyboard showing Listening with no way back.
+                tick += 1
+                if tick.isMultiple(of: 25) {
+                    self.sharedStore.touch(sessionID: sessionID)
+                }
+
                 let snapshot = self.sharedStore.load()
                 guard snapshot.sessionID == sessionID else { continue }
 
