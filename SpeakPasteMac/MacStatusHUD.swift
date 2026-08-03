@@ -117,11 +117,15 @@ final class MacStatusHUDController: ObservableObject {
             max(desiredX, visibleFrame.minX + horizontalInset),
             visibleFrame.maxX - Self.panelSize.width - horizontalInset
         )
-        let desiredY = visibleFrame.minY + 64
-        let y = min(
-            desiredY,
-            visibleFrame.maxY - Self.panelSize.height - 24
-        )
+        // Directly under the menu bar. The apps SpeakPaste dictates into put
+        // their text field at the bottom center of the window, which is exactly
+        // where a bottom-anchored HUD lands, so it covered the insertion point
+        // it was reporting on. The top edge also stays clear of notification
+        // banners on the right and the Dock below. `visibleFrame` already
+        // excludes the menu bar and any notch.
+        let topInset: CGFloat = 12
+        let desiredY = visibleFrame.maxY - Self.panelSize.height - topInset
+        let y = max(desiredY, visibleFrame.minY)
         panel.setFrameOrigin(NSPoint(x: x.rounded(), y: y.rounded()))
     }
 }
