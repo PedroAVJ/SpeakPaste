@@ -74,7 +74,7 @@ Review [ElevenLabs' privacy policy](https://elevenlabs.io/privacy-policy) before
 
 ## Development status
 
-The macOS target builds with local ad-hoc signing and the shared sources pass Swift 6 type-checking. Its floating HUD exposes **WAIT**, **SPEAK NOW**, **RECORDING STOPPED**, **TRANSCRIBING**, **DONE**, and **ERROR**, including an elapsed timer for busy states. Recording startup and WAV finalization have eight-second watchdogs, and ElevenLabs requests time out after 45 seconds. The core multipart request and local history/session stores have XCTest coverage.
+The macOS target builds with local ad-hoc signing and the shared sources pass Swift 6 type-checking. Its floating HUD exposes **WAIT**, **SPEAK NOW**, **RECORDING STOPPED**, **TRANSCRIBING**, **DONE**, and **ERROR**, including an elapsed timer for busy states. Connecting stays in **WAIT** until the microphone proves it is delivering a steady sample stream (15-second limit), so file recording never starts inside the Continuity wake-up gap that AVFoundation reports as a media discontinuity. A recording that still stutters before its first written sample is retried in place, and a stream that dies mid-dictation hands its finalized partial file to transcription instead of discarding it. Recording startup and WAV finalization have eight-second watchdogs, and ElevenLabs requests time out after 45 seconds. The core multipart request and local history/session stores have XCTest coverage.
 
 The iPhone app and keyboard remain experimental. Their physical-device microphone, background recording, switchback, insertion, cancellation, retry, Full Access denial, and manual fallback flows have not all been verified end to end.
 

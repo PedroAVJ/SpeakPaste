@@ -11,6 +11,7 @@ enum MacAudioRecorderError: LocalizedError {
     case noActiveRecording
     case recordingStartTimedOut
     case recordingFinalizationTimedOut
+    case audioStreamNotReady
 
     var errorDescription: String? {
         switch self {
@@ -32,6 +33,8 @@ enum MacAudioRecorderError: LocalizedError {
             "The microphone connected but did not begin delivering audio. SpeakPaste reset the connection; try again."
         case .recordingFinalizationTimedOut:
             "The microphone did not finish the recording. SpeakPaste reset the connection; try again."
+        case .audioStreamNotReady:
+            "The microphone connected but never delivered audio. Lock the iPhone, keep it nearby, then try again."
         }
     }
 }
@@ -57,8 +60,30 @@ private final class MacRuntimeErrorLatch: @unchecked Sendable {
     }
 }
 
-final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate, @unchecked Sendable {
+/// Counts audio sample buffers delivered by the capture session so callers can
+/// tell whether audio is actually flowing, not just whether the session claims
+/// to be running.
+private final class MacSampleFlowCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedCount: UInt64 = 0
+
+    func increment() {
+        lock.lock()
+        storedCount &+= 1
+        lock.unlock()
+    }
+
+    var count: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedCount
+    }
+}
+
+final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
+    AVCaptureAudioDataOutputSampleBufferDelegate, @unchecked Sendable {
     private let captureQueue = DispatchQueue(label: "com.example.speakpaste.capture")
+    private let sampleQueue = DispatchQueue(label: "com.example.speakpaste.samples")
     private var session: AVCaptureSession?
     private var output: AVCaptureAudioFileOutput?
     private var activeDeviceID: String?
@@ -66,11 +91,14 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate, @u
     private var runtimeErrorObserver: NSObjectProtocol?
     private var runtimeErrorLatch: MacRuntimeErrorLatch?
     private var runtimeError: NSError?
-    private var recordingFailureHandler: (@Sendable (Error) -> Void)?
+    private var recordingFailureHandler: (@Sendable (Error, URL?) -> Void)?
+    private let sampleFlow = MacSampleFlowCounter()
+    private var sampleTapInstalled = false
 
     private var segmentURL: URL?
     private var segmentGeneration: UInt64?
     private var segmentDidStart = false
+    private var segmentStartRetriesRemaining = 0
     private var startContinuation: CheckedContinuation<URL, Error>?
     private var stopContinuation: CheckedContinuation<MacRecordedSegment, Error>?
     private var startTimeoutWorkItem: DispatchWorkItem?
@@ -79,8 +107,12 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate, @u
 
     private let recordingStartTimeout: TimeInterval = 8
     private let finalizationTimeout: TimeInterval = 8
+    private let steadyAudioTimeout: TimeInterval = 15
+    private static let requiredSteadyWindows = 6
 
-    func setRecordingFailureHandler(_ handler: @escaping @Sendable (Error) -> Void) {
+    /// The second closure argument carries a finalized partial recording when
+    /// the stream died mid-dictation but AVFoundation completed the file.
+    func setRecordingFailureHandler(_ handler: @escaping @Sendable (Error, URL?) -> Void) {
         captureQueue.async { [weak self] in
             self?.recordingFailureHandler = handler
         }
@@ -99,11 +131,28 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate, @u
         }
     }
 
-    /// Connects the selected microphone for the next dictation.
+    /// Connects the selected microphone for the next dictation and returns
+    /// only after it is delivering a steady audio stream. Continuity
+    /// microphones report a running session seconds before audio actually
+    /// flows, and recording across that wake-up gap kills the file output
+    /// with AVError -11812 (media discontinuity).
     /// Returns true only when a new audio session was created.
     func connect(deviceID: String) async throws -> Bool {
         try await ensurePermission()
-        return try await withCheckedThrowingContinuation { continuation in
+        let createdConnection = try await establishSession(deviceID: deviceID)
+        if captureQueue.sync(execute: { sampleTapInstalled }) {
+            do {
+                try await waitForSteadyAudio(timeout: steadyAudioTimeout)
+            } catch {
+                await releaseSession(with: error)
+                throw error
+            }
+        }
+        return createdConnection
+    }
+
+    private func establishSession(deviceID: String) async throws -> Bool {
+        try await withCheckedThrowingContinuation { continuation in
             captureQueue.async { [weak self] in
                 guard let self else {
                     continuation.resume(throwing: MacAudioRecorderError.connectionFailed)
@@ -143,6 +192,52 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate, @u
         }
     }
 
+    /// Waits until the capture session delivers audio buffers in several
+    /// consecutive observation windows, proving the stream is live and gapless
+    /// right now rather than merely negotiated.
+    private func waitForSteadyAudio(timeout: TimeInterval) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(timeout))
+        var lastCount = sampleFlow.count
+        var steadyWindows = 0
+        while steadyWindows < Self.requiredSteadyWindows {
+            if let failure = captureQueue.sync(execute: { currentSessionFailure() }) {
+                throw failure
+            }
+            guard clock.now < deadline else {
+                throw MacAudioRecorderError.audioStreamNotReady
+            }
+            try? await Task.sleep(for: .milliseconds(30))
+            let count = sampleFlow.count
+            steadyWindows = count > lastCount ? steadyWindows + 1 : 0
+            lastCount = count
+        }
+    }
+
+    /// Must run on captureQueue.
+    private func currentSessionFailure() -> Error? {
+        if let runtimeError { return runtimeError }
+        guard session?.isRunning == true else { return MacAudioRecorderError.connectionFailed }
+        return nil
+    }
+
+    private func releaseSession(with error: Error) async {
+        await withCheckedContinuation { continuation in
+            captureQueue.async { [weak self] in
+                self?.failSession(with: error)
+                continuation.resume()
+            }
+        }
+    }
+
+    nonisolated func captureOutput(
+        _ output: AVCaptureOutput,
+        didOutput sampleBuffer: CMSampleBuffer,
+        from connection: AVCaptureConnection
+    ) {
+        sampleFlow.increment()
+    }
+
     /// Returns only after AVFoundation confirms that the first audio samples
     /// are being written. The caller can safely show "Speak now" after this.
     func startSegment() async throws -> URL {
@@ -179,6 +274,7 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate, @u
                 self.segmentURL = url
                 self.segmentGeneration = self.sessionGeneration
                 self.segmentDidStart = false
+                self.segmentStartRetriesRemaining = 2
                 self.startContinuation = continuation
                 self.pendingRecordingError = nil
 
@@ -279,6 +375,18 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate, @u
             throw MacAudioRecorderError.outputCannotBeAdded
         }
         session.addOutput(output)
+
+        // A lightweight tap that only counts delivered buffers. It is how
+        // connect() proves the Continuity stream is really flowing before any
+        // file recording starts.
+        let sampleTap = AVCaptureAudioDataOutput()
+        sampleTap.setSampleBufferDelegate(self, queue: sampleQueue)
+        if session.canAddOutput(sampleTap) {
+            session.addOutput(sampleTap)
+            sampleTapInstalled = true
+        } else {
+            sampleTapInstalled = false
+        }
         session.commitConfiguration()
 
         // WAV can hold the device's native PCM, so no compressor is needed.
@@ -344,7 +452,7 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate, @u
         failSession(with: error, preservingPendingRecordingError: pendingRecordingError != nil)
         if shouldNotifyRecordingFailure {
             // Do not surface ERROR until stopRunning() has released Continuity.
-            recordingFailureHandler?(error)
+            recordingFailureHandler?(error, nil)
         }
     }
 
@@ -397,6 +505,42 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate, @u
         )
     }
 
+    /// Must run on captureQueue.
+    private func canRetrySegmentStart() -> Bool {
+        startContinuation != nil
+            && segmentStartRetriesRemaining > 0
+            && runtimeError == nil
+            && session?.isRunning == true
+            && output?.isRecording != true
+    }
+
+    private func isRetryableStartFailure(_ failure: Error) -> Bool {
+        let nsError = failure as NSError
+        guard nsError.domain == AVFoundationErrorDomain else { return false }
+        return nsError.code == AVError.Code.mediaDiscontinuity.rawValue
+            || nsError.code == AVError.Code.noDataCaptured.rawValue
+    }
+
+    private func retrySegmentStart(url: URL, generation: UInt64) {
+        segmentStartRetriesRemaining -= 1
+        try? FileManager.default.removeItem(at: url)
+        // Give the stream a moment to settle past the discontinuity before
+        // writing again. The original start timeout stays armed as the
+        // overall bound.
+        captureQueue.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            guard
+                let self,
+                let output = self.output,
+                self.matches(output: output, url: url, generation: generation),
+                self.startContinuation != nil,
+                self.runtimeError == nil,
+                self.session?.isRunning == true,
+                !output.isRecording
+            else { return }
+            output.startRecording(to: url, outputFileType: .wav, recordingDelegate: self)
+        }
+    }
+
     private func matches(
         output: AVCaptureFileOutput,
         url: URL,
@@ -421,6 +565,7 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate, @u
         segmentURL = nil
         segmentGeneration = nil
         segmentDidStart = false
+        segmentStartRetriesRemaining = 0
         startContinuation = nil
         stopContinuation = nil
     }
@@ -443,6 +588,7 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate, @u
         activeDeviceID = nil
         runtimeError = nil
         pendingRecordingError = nil
+        sampleTapInstalled = false
 
         staleSession?.stopRunning()
         if let staleURL {
@@ -467,6 +613,7 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate, @u
         activeDeviceID = nil
         runtimeError = nil
         pendingRecordingError = preservingPendingRecordingError ? savedPendingError : nil
+        sampleTapInstalled = false
 
         // stopRunning() is synchronous. Keep teardown on the same serial queue
         // as connection/start so a retry cannot race the old iPhone stream.
@@ -522,6 +669,13 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate, @u
             let failure = error.flatMap { finishedSuccessfully == true ? nil : $0 }
 
             if let failure {
+                if self.canRetrySegmentStart(), self.isRetryableStartFailure(failure) {
+                    // The stream stuttered before the first sample was written.
+                    // It is still flowing, so restart the file instead of
+                    // tearing down the whole Continuity connection.
+                    self.retrySegmentStart(url: outputFileURL, generation: generation)
+                    return
+                }
                 let preserveForNextStop = self.segmentDidStart
                     && self.startContinuation == nil
                     && self.stopContinuation == nil
@@ -533,7 +687,7 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate, @u
                     preservingPendingRecordingError: preserveForNextStop
                 )
                 if preserveForNextStop {
-                    self.recordingFailureHandler?(failure)
+                    self.recordingFailureHandler?(failure, nil)
                 }
                 return
             }
@@ -541,18 +695,27 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate, @u
             if self.startContinuation != nil {
                 // A recording that finishes before didStart never delivered a
                 // sample, even if AVFoundation omitted an NSError.
+                if self.canRetrySegmentStart() {
+                    self.retrySegmentStart(url: outputFileURL, generation: generation)
+                    return
+                }
                 self.failSession(with: MacAudioRecorderError.connectionFailed)
                 return
             }
 
             guard let continuation = self.stopContinuation else {
-                let failure = MacAudioRecorderError.noActiveRecording
+                // The stream ended on its own, but AVFoundation finalized the
+                // file, so the dictation captured so far is still usable. Keep
+                // the file out of failSession's cleanup and hand it to the app
+                // instead of discarding it.
+                let failure = error ?? MacAudioRecorderError.noActiveRecording
                 self.pendingRecordingError = failure
+                self.segmentURL = nil
                 self.failSession(
                     with: failure,
                     preservingPendingRecordingError: true
                 )
-                self.recordingFailureHandler?(failure)
+                self.recordingFailureHandler?(failure, outputFileURL)
                 return
             }
 

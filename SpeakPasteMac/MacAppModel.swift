@@ -77,9 +77,9 @@ final class MacAppModel: ObservableObject {
         hasSavedAPIKey = keychain.load()?.isEmpty == false
         refreshDevices()
         observeDeviceChanges()
-        recorder.setRecordingFailureHandler { [weak self] error in
+        recorder.setRecordingFailureHandler { [weak self] error, salvagedAudioURL in
             Task { @MainActor [weak self] in
-                self?.handleUnexpectedRecordingFailure(error)
+                self?.handleUnexpectedRecordingFailure(error, salvagedAudioURL: salvagedAudioURL)
             }
         }
         globalHotKey.install { [weak self] in
@@ -204,16 +204,45 @@ final class MacAppModel: ObservableObject {
     private func stopAndTranscribe() async {
         let deviceName = selectedDevice?.name ?? "Unknown microphone"
         let recordingDuration = Date().timeIntervalSince(recordingStartedAt ?? Date())
-        var didFinalizeRecording = false
 
+        let segment: MacRecordedSegment
         do {
-            let segment = try await recorder.stop()
-            didFinalizeRecording = true
+            segment = try await recorder.stop()
+        } catch {
             isMicrophoneConnected = false
             connectedDeviceID = nil
             connectionLatency = nil
-            let audioURL = segment.url
-            defer { try? FileManager.default.removeItem(at: audioURL) }
+            recordFailure(
+                diagnosticMessage(for: error),
+                deviceName: deviceName,
+                recordingDuration: recordingDuration,
+                transcriptionDuration: 0
+            )
+            return
+        }
+        isMicrophoneConnected = false
+        connectedDeviceID = nil
+        connectionLatency = nil
+        await transcribeAndDeliver(
+            audioURL: segment.url,
+            deviceName: deviceName,
+            recordingDuration: recordingDuration,
+            interruption: nil
+        )
+    }
+
+    /// Transcribes a finished recording and delivers the text. When
+    /// `interruption` is set, the audio is a partial dictation salvaged from a
+    /// stream that died mid-recording; the attempt is logged as a failure but
+    /// the text the user already spoke is still delivered.
+    private func transcribeAndDeliver(
+        audioURL: URL,
+        deviceName: String,
+        recordingDuration: TimeInterval,
+        interruption: String?
+    ) async {
+        defer { try? FileManager.default.removeItem(at: audioURL) }
+        do {
             guard let apiKey = resolvedAPIKey else {
                 throw ElevenLabsClientError.api(statusCode: 401, message: "ElevenLabs API key is missing.")
             }
@@ -239,6 +268,19 @@ final class MacAppModel: ObservableObject {
             case .copied: detail = "Transcribed and copied"
             case .copiedNeedsAccessibility: detail = "Copied; enable Accessibility for automatic paste"
             }
+            if let interruption {
+                attempts = reliabilityStore.prepend(
+                    MacReliabilityAttempt(
+                        deviceName: deviceName,
+                        recordingDuration: recordingDuration,
+                        transcriptionDuration: transcriptionDuration,
+                        outcome: .failure,
+                        detail: "Stream dropped mid-dictation; partial audio recovered. \(detail). \(interruption)"
+                    )
+                )
+                phase = .failed("Recording stopped early — the dictation captured so far was still transcribed. \(detail).")
+                return
+            }
             attempts = reliabilityStore.prepend(
                 MacReliabilityAttempt(
                     deviceName: deviceName,
@@ -256,11 +298,6 @@ final class MacAppModel: ObservableObject {
                 self.phase = .ready
             }
         } catch {
-            if !didFinalizeRecording {
-                isMicrophoneConnected = false
-                connectedDeviceID = nil
-                connectionLatency = nil
-            }
             recordFailure(
                 diagnosticMessage(for: error),
                 deviceName: deviceName,
@@ -289,22 +326,43 @@ final class MacAppModel: ObservableObject {
         phase = .failed(message)
     }
 
-    private func handleUnexpectedRecordingFailure(_ error: Error) {
+    private func handleUnexpectedRecordingFailure(_ error: Error, salvagedAudioURL: URL?) {
         // Once Command has moved the phase to finalizing, stopAndTranscribe
         // owns this same failure. This callback handles failures while the UI
         // would otherwise continue to claim that it is safe to speak.
-        guard phase == .recording else { return }
+        guard phase == .recording else {
+            if let salvagedAudioURL {
+                try? FileManager.default.removeItem(at: salvagedAudioURL)
+            }
+            return
+        }
         let deviceName = selectedDevice?.name ?? "Unknown microphone"
         let recordingDuration = Date().timeIntervalSince(recordingStartedAt ?? Date())
+        stopMeter()
         isMicrophoneConnected = false
         connectedDeviceID = nil
         connectionLatency = nil
-        recordFailure(
-            diagnosticMessage(for: error),
-            deviceName: deviceName,
-            recordingDuration: recordingDuration,
-            transcriptionDuration: 0
-        )
+        guard let salvagedAudioURL else {
+            recordFailure(
+                diagnosticMessage(for: error),
+                deviceName: deviceName,
+                recordingDuration: recordingDuration,
+                transcriptionDuration: 0
+            )
+            return
+        }
+        // AVFoundation finalized the file before the stream died, so the words
+        // already spoken are recoverable instead of lost.
+        let interruption = diagnosticMessage(for: error)
+        phase = .transcribing
+        Task {
+            await transcribeAndDeliver(
+                audioURL: salvagedAudioURL,
+                deviceName: deviceName,
+                recordingDuration: recordingDuration,
+                interruption: interruption
+            )
+        }
     }
 
     private func startMeter() {
@@ -368,7 +426,26 @@ final class MacAppModel: ObservableObject {
         let nsError = error as NSError
         let description = error.localizedDescription
         guard nsError.domain != NSCocoaErrorDomain else { return description }
+        if nsError.domain == AVFoundationErrorDomain, let hint = continuityHint(for: nsError.code) {
+            return "\(hint) [\(nsError.domain) \(nsError.code)]"
+        }
         return "\(description) [\(nsError.domain) \(nsError.code)]"
+    }
+
+    /// AVFoundation's localized descriptions for capture failures ("Recording
+    /// Stopped") hide what actually happened. Translate the Continuity-mic
+    /// failures seen in practice into actionable language.
+    private func continuityHint(for code: Int) -> String? {
+        switch code {
+        case AVError.Code.mediaDiscontinuity.rawValue:
+            "The iPhone paused its microphone stream."
+        case AVError.Code.noDataCaptured.rawValue:
+            "The microphone connected but sent no audio."
+        case AVError.Code.deviceWasDisconnected.rawValue, AVError.Code.deviceNotConnected.rawValue:
+            "The microphone disconnected."
+        default:
+            nil
+        }
     }
 
     private var environmentAPIKey: String? {
