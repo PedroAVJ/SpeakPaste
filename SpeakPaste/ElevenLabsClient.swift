@@ -49,12 +49,14 @@ final class ElevenLabsClient: ElevenLabsClientProtocol, @unchecked Sendable {
 
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
+        request.timeoutInterval = 45
         request.setValue(apiKey, forHTTPHeaderField: "xi-api-key")
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         request.httpBody = Self.multipartBody(
             boundary: boundary,
             audioData: audioData,
             filename: audioURL.lastPathComponent,
+            audioContentType: Self.audioContentType(for: audioURL),
             languageCode: language.apiCode,
             cleanSpeech: cleanSpeech
         )
@@ -88,6 +90,7 @@ final class ElevenLabsClient: ElevenLabsClientProtocol, @unchecked Sendable {
         boundary: String,
         audioData: Data,
         filename: String,
+        audioContentType: String,
         languageCode: String?,
         cleanSpeech: Bool
     ) -> Data {
@@ -112,10 +115,18 @@ final class ElevenLabsClient: ElevenLabsClientProtocol, @unchecked Sendable {
 
         append("--\(boundary)\r\n")
         append("Content-Disposition: form-data; name=\"file\"; filename=\"\(filename)\"\r\n")
-        append("Content-Type: audio/mp4\r\n\r\n")
+        append("Content-Type: \(audioContentType)\r\n\r\n")
         body.append(audioData)
         append("\r\n--\(boundary)--\r\n")
         return body
+    }
+
+    private static func audioContentType(for url: URL) -> String {
+        switch url.pathExtension.lowercased() {
+        case "wav": "audio/wav"
+        case "mp3": "audio/mpeg"
+        default: "audio/mp4"
+        }
     }
 
     private static func errorMessage(from data: Data) -> String {

@@ -12,7 +12,7 @@ SpeakPaste is an open-source native Swift dictation project. It contains a macOS
 ## Working rules
 
 - Never commit or print the ElevenLabs API key. Runtime code reads it from the per-app Keychain or `ELEVENLABS_API_KEY`.
-- Preserve the warm Continuity-microphone session between macOS dictations; startup latency, sample readiness, and recording reliability are core product behavior.
+- Fully release the Continuity-microphone session after every dictation, before transcription. Returning control of the iPhone takes priority over warm-start latency.
 - Keep generated builds, DerivedData, user Xcode state, and packaged ZIPs out of Git.
 - Prefer focused Swift type-checks and target builds. Do not modify signing teams or publish through the App Store unless explicitly requested.
 

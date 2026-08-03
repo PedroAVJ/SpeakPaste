@@ -7,20 +7,28 @@ enum MacCapturePhase: Equatable {
     case ready
     case connecting
     case recording
+    case finalizing
     case transcribing
+    case succeeded(String)
     case failed(String)
 
     var isBusy: Bool {
         switch self {
-        case .connecting, .recording, .transcribing: true
-        case .ready, .failed: false
+        case .connecting, .recording, .finalizing, .transcribing: true
+        case .ready, .succeeded, .failed: false
         }
     }
 }
 
 @MainActor
 final class MacAppModel: ObservableObject {
-    @Published private(set) var phase: MacCapturePhase = .ready
+    @Published private(set) var phase: MacCapturePhase = .ready {
+        didSet {
+            guard phase != oldValue else { return }
+            phaseStartedAt = Date()
+        }
+    }
+    @Published private(set) var phaseStartedAt = Date()
     @Published private(set) var devices: [MacAudioInputDevice] = []
     @Published var selectedDeviceID = "" {
         didSet {
@@ -69,6 +77,11 @@ final class MacAppModel: ObservableObject {
         hasSavedAPIKey = keychain.load()?.isEmpty == false
         refreshDevices()
         observeDeviceChanges()
+        recorder.setRecordingFailureHandler { [weak self] error in
+            Task { @MainActor [weak self] in
+                self?.handleUnexpectedRecordingFailure(error)
+            }
+        }
         globalHotKey.install { [weak self] in
             self?.toggleRecording()
         }
@@ -88,7 +101,7 @@ final class MacAppModel: ObservableObject {
         hasSavedAPIKey || environmentAPIKey?.isEmpty == false
     }
 
-    var hotKeyLabel: String { "⌃⌥Space" }
+    var hotKeyLabel: String { "⌘" }
 
     func refreshDevices() {
         let previous = selectedDeviceID.isEmpty
@@ -126,10 +139,13 @@ final class MacAppModel: ObservableObject {
     func toggleRecording() {
         switch phase {
         case .recording:
+            stopMeter()
+            phase = .finalizing
             Task { await stopAndTranscribe() }
-        case .ready, .failed:
+        case .ready, .succeeded, .failed:
+            phase = .connecting
             Task { await startRecording() }
-        case .connecting, .transcribing:
+        case .connecting, .finalizing, .transcribing:
             break
         }
     }
@@ -142,14 +158,6 @@ final class MacAppModel: ObservableObject {
 
     func clearTranscript() {
         transcript = ""
-    }
-
-    func disconnectMicrophone() {
-        guard !phase.isBusy else { return }
-        recorder.disconnect()
-        isMicrophoneConnected = false
-        connectedDeviceID = nil
-        connectionLatency = nil
     }
 
     func clearFailure() {
@@ -171,9 +179,6 @@ final class MacAppModel: ObservableObject {
             destinationProcessIdentifier = nil
         }
 
-        // Continuity can take several seconds to wake. Entering this phase first
-        // prevents repeated clicks from creating overlapping iPhone sessions.
-        phase = .connecting
         do {
             let connectionStartedAt = Date()
             let createdConnection = try await recorder.connect(deviceID: device.id)
@@ -189,9 +194,9 @@ final class MacAppModel: ObservableObject {
             phase = .recording
             startMeter()
         } catch {
-            if connectedDeviceID != device.id {
-                isMicrophoneConnected = false
-            }
+            isMicrophoneConnected = false
+            connectedDeviceID = nil
+            connectionLatency = nil
             recordFailure(diagnosticMessage(for: error), deviceName: device.name, recordingDuration: 0, transcriptionDuration: 0)
         }
     }
@@ -199,16 +204,21 @@ final class MacAppModel: ObservableObject {
     private func stopAndTranscribe() async {
         let deviceName = selectedDevice?.name ?? "Unknown microphone"
         let recordingDuration = Date().timeIntervalSince(recordingStartedAt ?? Date())
-        stopMeter()
-        phase = .transcribing
+        var didFinalizeRecording = false
 
         do {
-            let audioURL = try await recorder.stop()
+            let segment = try await recorder.stop()
+            didFinalizeRecording = true
+            isMicrophoneConnected = false
+            connectedDeviceID = nil
+            connectionLatency = nil
+            let audioURL = segment.url
             defer { try? FileManager.default.removeItem(at: audioURL) }
             guard let apiKey = resolvedAPIKey else {
                 throw ElevenLabsClientError.api(statusCode: 401, message: "ElevenLabs API key is missing.")
             }
 
+            phase = .transcribing
             let transcriptionStartedAt = Date()
             let result = try await client.transcribe(
                 audioURL: audioURL,
@@ -238,8 +248,19 @@ final class MacAppModel: ObservableObject {
                     detail: detail
                 )
             )
-            phase = .ready
+            let successPhase = MacCapturePhase.succeeded(detail)
+            phase = successPhase
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(1.5))
+                guard let self, self.phase == successPhase else { return }
+                self.phase = .ready
+            }
         } catch {
+            if !didFinalizeRecording {
+                isMicrophoneConnected = false
+                connectedDeviceID = nil
+                connectionLatency = nil
+            }
             recordFailure(
                 diagnosticMessage(for: error),
                 deviceName: deviceName,
@@ -266,6 +287,24 @@ final class MacAppModel: ObservableObject {
             )
         )
         phase = .failed(message)
+    }
+
+    private func handleUnexpectedRecordingFailure(_ error: Error) {
+        // Once Command has moved the phase to finalizing, stopAndTranscribe
+        // owns this same failure. This callback handles failures while the UI
+        // would otherwise continue to claim that it is safe to speak.
+        guard phase == .recording else { return }
+        let deviceName = selectedDevice?.name ?? "Unknown microphone"
+        let recordingDuration = Date().timeIntervalSince(recordingStartedAt ?? Date())
+        isMicrophoneConnected = false
+        connectedDeviceID = nil
+        connectionLatency = nil
+        recordFailure(
+            diagnosticMessage(for: error),
+            deviceName: deviceName,
+            recordingDuration: recordingDuration,
+            transcriptionDuration: 0
+        )
     }
 
     private func startMeter() {
@@ -305,9 +344,21 @@ final class MacAppModel: ObservableObject {
                     let connectedDeviceID = self.connectedDeviceID,
                     !self.devices.contains(where: { $0.id == connectedDeviceID })
                 {
+                    let wasRecording = self.phase == .recording
+                    let deviceName = self.selectedDevice?.name ?? "Selected microphone"
+                    let recordingDuration = Date().timeIntervalSince(self.recordingStartedAt ?? Date())
                     self.recorder.disconnect()
                     self.isMicrophoneConnected = false
                     self.connectedDeviceID = nil
+                    self.connectionLatency = nil
+                    if wasRecording {
+                        self.recordFailure(
+                            "The microphone disconnected while recording.",
+                            deviceName: deviceName,
+                            recordingDuration: recordingDuration,
+                            transcriptionDuration: 0
+                        )
+                    }
                 }
             }
         }

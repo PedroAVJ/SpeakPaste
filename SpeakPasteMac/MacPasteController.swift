@@ -19,8 +19,6 @@ struct MacPasteController {
         }
 
         guard AXIsProcessTrusted() else {
-            let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
-            AXIsProcessTrustedWithOptions(options as CFDictionary)
             return .copiedNeedsAccessibility
         }
 

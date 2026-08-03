@@ -71,7 +71,9 @@ struct MacContentView: View {
         switch model.phase {
         case .connecting: .yellow
         case .recording: .red
+        case .finalizing: .orange
         case .transcribing: .blue
+        case .succeeded: .green
         case .failed: .orange
         case .ready: model.hasAPIKey && model.selectedDevice != nil ? .green : .orange
         }
@@ -80,13 +82,15 @@ struct MacContentView: View {
     private var statusText: String {
         switch model.phase {
         case .connecting: return "Connecting…"
-        case .recording: return "Recording"
+        case .recording: return "Speak now"
+        case .finalizing: return "Releasing microphone"
         case .transcribing: return "Transcribing"
+        case .succeeded: return "Done"
         case .failed: return "Failed"
         case .ready:
             if model.selectedDevice == nil { return "No microphone" }
             if !model.hasAPIKey { return "Needs API key" }
-            return model.isMicrophoneConnected ? "Linked" : "Ready"
+            return "Ready"
         }
     }
 
@@ -109,7 +113,7 @@ struct MacContentView: View {
             }
 
             if model.isMicrophoneConnected {
-                linkedMicrophoneRow
+                activeMicrophoneRow
             } else if model.devices.isEmpty {
                 Text("No microphones found. Connect one or bring your iPhone nearby, then refresh.")
                     .font(.callout)
@@ -132,7 +136,7 @@ struct MacContentView: View {
         }
     }
 
-    private var linkedMicrophoneRow: some View {
+    private var activeMicrophoneRow: some View {
         let device = model.selectedDevice
         let isContinuity = device?.isContinuityDevice == true
         return HStack(alignment: .top, spacing: 10) {
@@ -144,14 +148,14 @@ struct MacContentView: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 5) {
-                    Text(isContinuity ? "iPhone linked" : "\(device?.name ?? "Microphone") linked")
+                    Text(isContinuity ? "iPhone microphone active" : "\(device?.name ?? "Microphone") active")
                         .font(.callout.weight(.medium))
                     Image(systemName: "link")
                         .font(.caption2)
                         .foregroundStyle(.green)
                         .accessibilityHidden(true)
                 }
-                Text(linkedDetailText)
+                Text(activeMicrophoneDetailText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -163,14 +167,6 @@ struct MacContentView: View {
                 }
             }
 
-            Spacer(minLength: 8)
-
-            Button("Disconnect") {
-                model.disconnectMicrophone()
-            }
-            .controlSize(.small)
-            .disabled(model.phase.isBusy)
-            .accessibilityHint("Ends the warm microphone session. The next recording reconnects from scratch.")
         }
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 8).fill(.green.opacity(0.08)))
@@ -178,10 +174,10 @@ struct MacContentView: View {
         .accessibilityElement(children: .combine)
     }
 
-    private var linkedDetailText: String {
+    private var activeMicrophoneDetailText: String {
         model.selectedDevice?.isContinuityDevice == true
-            ? "The session stays warm, so the next recording starts instantly without another chime on your iPhone."
-            : "The session stays warm, so the next recording starts instantly."
+            ? "SpeakPaste releases the Continuity session—and your iPhone—as soon as you stop."
+            : "SpeakPaste releases the microphone as soon as you stop."
     }
 
     private func deviceRow(_ device: MacAudioInputDevice) -> some View {
@@ -272,7 +268,10 @@ struct MacContentView: View {
         }
         .buttonStyle(.plain)
         .disabled(
-            model.phase == .transcribing || model.phase == .connecting || model.selectedDevice == nil
+            model.phase == .transcribing
+                || model.phase == .finalizing
+                || model.phase == .connecting
+                || model.selectedDevice == nil
         )
         .opacity(model.selectedDevice == nil ? 0.4 : 1)
         .accessibilityLabel(recordButtonLabel)
@@ -288,14 +287,14 @@ struct MacContentView: View {
             HStack(spacing: 8) {
                 Image(systemName: "stop.fill")
                     .font(.system(size: 13, weight: .semibold))
-                Text("Transcribe")
+                Text("Stop & Transcribe  \(model.hotKeyLabel)")
                     .font(.body.weight(.semibold))
             }
             .foregroundStyle(.white)
             .padding(.horizontal, 24)
             .padding(.vertical, 11)
             .background(Capsule().fill(Color.red))
-        case .connecting, .transcribing:
+        case .connecting, .finalizing, .transcribing:
             ZStack {
                 Circle()
                     .fill(Color.red.opacity(0.06))
@@ -305,6 +304,15 @@ struct MacContentView: View {
                     .frame(width: 72, height: 72)
                 ProgressView()
                     .controlSize(.regular)
+            }
+        case .succeeded:
+            ZStack {
+                Circle()
+                    .fill(Color.green.opacity(0.12))
+                    .frame(width: 72, height: 72)
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 34))
+                    .foregroundStyle(.green)
             }
         case .ready, .failed:
             ZStack {
@@ -324,8 +332,10 @@ struct MacContentView: View {
     private var recordButtonLabel: String {
         switch model.phase {
         case .connecting: "Connecting to microphone"
-        case .recording: "Transcribe"
+        case .recording: "Stop and transcribe"
+        case .finalizing: "Releasing microphone"
         case .transcribing: "Transcribing"
+        case .succeeded: "Done"
         case .ready, .failed: "Start recording"
         }
     }
@@ -334,7 +344,9 @@ struct MacContentView: View {
         switch model.phase {
         case .connecting: "Please wait. The first connection can take several seconds."
         case .recording: "Stops recording and sends the audio to ElevenLabs for transcription."
+        case .finalizing: "The recording has stopped and SpeakPaste is releasing the microphone."
         case .transcribing: "Please wait while the transcript is prepared."
+        case .succeeded: "The transcript is ready."
         case .ready, .failed: "Starts recording from the selected microphone."
         }
     }
@@ -349,14 +361,13 @@ struct MacContentView: View {
         switch model.phase {
         case .connecting:
             model.selectedDevice?.isContinuityDevice == true
-                ? "Connecting to your iPhone — the first connection can take several seconds and plays a chime."
-                : "Connecting to the microphone — the first connection can take several seconds."
-        case .recording: "Click Transcribe or press \(model.hotKeyLabel) when you're done."
-        case .transcribing: "Transcribing with ElevenLabs…"
-        case .ready, .failed:
-            model.isMicrophoneConnected
-                ? "Microphone linked — recording starts instantly. Click record or press \(model.hotKeyLabel)."
-                : "Click record or press \(model.hotKeyLabel) from any app."
+                ? "WAIT — do not speak yet. Connecting to your iPhone can take several seconds."
+                : "WAIT — do not speak yet. Connecting to the microphone."
+        case .recording: "SPEAK NOW — press \(model.hotKeyLabel) to stop and transcribe."
+        case .finalizing: "RECORDING STOPPED — releasing the iPhone microphone…"
+        case .transcribing: "MICROPHONE RELEASED — waiting for ElevenLabs…"
+        case .succeeded: "DONE — transcript delivered."
+        case .ready, .failed: "Click record or press \(model.hotKeyLabel) from any app."
         }
     }
 
@@ -491,7 +502,7 @@ struct MacContentView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .accessibilityHidden(true)
-                Text("Global shortcut: \(model.hotKeyLabel) starts and stops recording from any app.")
+                Text("Global shortcut: Tap \(model.hotKeyLabel) by itself to start and stop recording from any app.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -558,7 +569,7 @@ struct MacContentView: View {
                     .font(.caption2)
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
-                Text(attempt.createdAt, format: .relative(presentation: .named))
+                Text(attempt.createdAt.formatted(date: .omitted, time: .shortened))
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }

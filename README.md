@@ -22,9 +22,11 @@ The Xcode project contains three targets:
 3. Build and run. The product is named **SpeakPaste.app**.
 4. Save your ElevenLabs API key when prompted.
 5. Select any available microphone. To use Continuity Microphone, keep your iPhone nearby and locked, then select its microphone from the list.
-6. Click the record control or press **Control–Option–Space**. Press it again to stop and transcribe.
+6. Click the record control or tap either **Command (⌘)** key by itself. Command-key combinations such as ⌘C, ⌘V, and ⌘Tab keep their normal behavior.
+7. Wait for the click-through floating HUD to change from **WAIT** to **SPEAK NOW**, then begin speaking.
+8. Tap Command again to stop. SpeakPaste closes the recording, fully releases the microphone, and then moves through **TRANSCRIBING** to **DONE** or **ERROR**.
 
-The microphone session stays warm between dictations to reduce subsequent Continuity startup time. Automatic paste requires macOS Accessibility permission; without it, the transcript remains on the clipboard.
+The second Command press ends the Continuity session before transcription starts, allowing macOS to dismiss its system-owned capture surface on the iPhone. Each new dictation reconnects and may briefly show **WAIT** or play the connection sound again. Automatic paste and the global shortcut require macOS Accessibility permission; without it, the transcript remains on the clipboard.
 
 You can also build the macOS target from Terminal:
 
@@ -72,7 +74,7 @@ Review [ElevenLabs' privacy policy](https://elevenlabs.io/privacy-policy) before
 
 ## Development status
 
-The macOS target builds with local ad-hoc signing and the shared sources pass Swift 6 type-checking. The core ElevenLabs multipart request and local history/session stores have XCTest coverage.
+The macOS target builds with local ad-hoc signing and the shared sources pass Swift 6 type-checking. Its floating HUD exposes **WAIT**, **SPEAK NOW**, **RECORDING STOPPED**, **TRANSCRIBING**, **DONE**, and **ERROR**, including an elapsed timer for busy states. Recording startup and WAV finalization have eight-second watchdogs, and ElevenLabs requests time out after 45 seconds. The core multipart request and local history/session stores have XCTest coverage.
 
 The iPhone app and keyboard remain experimental. Their physical-device microphone, background recording, switchback, insertion, cancellation, retry, Full Access denial, and manual fallback flows have not all been verified end to end.
 

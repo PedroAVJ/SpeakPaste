@@ -2,12 +2,20 @@ import SwiftUI
 
 @main
 struct SpeakPasteMacApp: App {
-    @StateObject private var model = MacAppModel()
+    @StateObject private var model: MacAppModel
+    @StateObject private var statusHUD: MacStatusHUDController
+
+    init() {
+        let model = MacAppModel()
+        _model = StateObject(wrappedValue: model)
+        _statusHUD = StateObject(wrappedValue: MacStatusHUDController(model: model))
+    }
 
     var body: some Scene {
         WindowGroup {
             MacContentView()
                 .environmentObject(model)
+                .onAppear { statusHUD.start() }
         }
         .defaultSize(width: 500, height: 620)
         .windowResizability(.contentSize)
@@ -25,17 +33,23 @@ struct SpeakPasteMacApp: App {
         switch model.phase {
         case .connecting: "antenna.radiowaves.left.and.right"
         case .recording: "record.circle.fill"
+        case .finalizing: "stop.circle"
         case .transcribing: "waveform.badge.magnifyingglass"
-        case .ready, .failed: "waveform"
+        case .succeeded: "checkmark.circle.fill"
+        case .failed: "exclamationmark.triangle.fill"
+        case .ready: "waveform"
         }
     }
 
     private var menuBarAccessibilityLabel: String {
         switch model.phase {
         case .connecting: "SpeakPaste, connecting to microphone"
-        case .recording: "SpeakPaste, recording"
+        case .recording: "SpeakPaste, recording. Speak now. Press Command to stop and transcribe"
+        case .finalizing: "SpeakPaste, recording stopped. Releasing microphone"
         case .transcribing: "SpeakPaste, transcribing"
-        case .ready, .failed: "SpeakPaste"
+        case .succeeded: "SpeakPaste, done"
+        case .failed: "SpeakPaste, error"
+        case .ready: "SpeakPaste, ready. Press Command to start"
         }
     }
 }
@@ -46,14 +60,26 @@ struct MacMenuBarView: View {
     var body: some View {
         switch model.phase {
         case .connecting:
-            Button("Connecting… (can take several seconds)") {}
+            Button("WAIT — connecting; do not speak yet") {}
                 .disabled(true)
         case .recording:
-            Button("Transcribe  \(model.hotKeyLabel)") { model.toggleRecording() }
-        case .transcribing:
-            Button("Transcribing…") {}
+            Button("SPEAK NOW — Stop & Transcribe  \(model.hotKeyLabel)") {
+                model.toggleRecording()
+            }
+        case .finalizing:
+            Button("RELEASING MICROPHONE…") {}
                 .disabled(true)
-        case .ready, .failed:
+        case .transcribing:
+            Button("TRANSCRIBING WITH ELEVENLABS…") {}
+                .disabled(true)
+        case let .succeeded(detail):
+            Button("DONE — \(detail)") {}
+                .disabled(true)
+        case let .failed(message):
+            Text("ERROR — \(message)")
+            Button("Try Again  \(model.hotKeyLabel)") { model.toggleRecording() }
+                .disabled(model.selectedDevice == nil)
+        case .ready:
             Button("Start Recording  \(model.hotKeyLabel)") { model.toggleRecording() }
                 .disabled(model.selectedDevice == nil)
         }
@@ -66,11 +92,9 @@ struct MacMenuBarView: View {
         if model.isMicrophoneConnected, let device = model.selectedDevice {
             Text(
                 device.isContinuityDevice
-                    ? "iPhone linked — session stays warm"
-                    : "\(device.name) linked — session stays warm"
+                    ? "iPhone microphone active — released on stop"
+                    : "\(device.name) active — released on stop"
             )
-            Button("Disconnect Microphone") { model.disconnectMicrophone() }
-                .disabled(model.phase.isBusy)
         } else if let device = model.selectedDevice {
             Text("Microphone: \(device.name)")
         } else {

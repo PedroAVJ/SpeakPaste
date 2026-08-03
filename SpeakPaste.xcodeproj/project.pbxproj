@@ -42,6 +42,7 @@
 		D1000000000000000000000A /* ElevenLabsClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000003 /* ElevenLabsClient.swift */; };
 		D1000000000000000000000B /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000005 /* KeychainStore.swift */; };
 		D1000000000000000000000C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000B /* Assets.xcassets */; };
+		D1000000000000000000000D /* MacStatusHUD.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000009 /* MacStatusHUD.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -110,6 +111,7 @@
 		D20000000000000000000006 /* MacGlobalHotKey.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacGlobalHotKey.swift; sourceTree = "<group>"; };
 		D20000000000000000000007 /* MacPasteController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacPasteController.swift; sourceTree = "<group>"; };
 		D20000000000000000000008 /* MacReliabilityStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacReliabilityStore.swift; sourceTree = "<group>"; };
+		D20000000000000000000009 /* MacStatusHUD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacStatusHUD.swift; sourceTree = "<group>"; };
 		D2000000000000000000000F /* SpeakPaste.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SpeakPaste.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -187,6 +189,7 @@
 				D20000000000000000000006 /* MacGlobalHotKey.swift */,
 				D20000000000000000000007 /* MacPasteController.swift */,
 				D20000000000000000000008 /* MacReliabilityStore.swift */,
+				D20000000000000000000009 /* MacStatusHUD.swift */,
 			);
 			path = SpeakPasteMac;
 			sourceTree = "<group>";
@@ -293,7 +296,7 @@
 		};
 		A60000000000000000000003 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A1000000000000000000000C, A1000000000000000000000D, C1000000000000000000000B, ); runOnlyForDeploymentPostprocessing = 0; };
 		C60000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (C10000000000000000000003, C10000000000000000000004, C10000000000000000000005, C10000000000000000000006, C10000000000000000000007, ); runOnlyForDeploymentPostprocessing = 0; };
-		D60000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (D10000000000000000000001, D10000000000000000000002, D10000000000000000000003, D10000000000000000000004, D10000000000000000000005, D10000000000000000000006, D10000000000000000000007, D10000000000000000000008, D10000000000000000000009, D1000000000000000000000A, D1000000000000000000000B, ); runOnlyForDeploymentPostprocessing = 0; };
+		D60000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (D10000000000000000000001, D10000000000000000000002, D10000000000000000000003, D10000000000000000000004, D10000000000000000000005, D10000000000000000000006, D10000000000000000000007, D10000000000000000000008, D10000000000000000000009, D1000000000000000000000A, D1000000000000000000000B, D1000000000000000000000D, ); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
