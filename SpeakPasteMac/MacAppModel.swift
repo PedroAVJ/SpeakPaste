@@ -14,6 +14,20 @@ private struct MacFinishedDictation {
     let interruption: String?
 }
 
+/// A dictation whose transcription failed, with its audio kept so the user can
+/// try again. Deleting the recording on any failure meant a rate limit, an
+/// expired key, or a dropped connection destroyed speech that was perfectly
+/// good.
+struct MacRetryableDictation: Identifiable {
+    let id = UUID()
+    let audioURL: URL
+    let target: MacDeliveryTarget?
+    let deviceName: String
+    let recordingDuration: TimeInterval
+    let reason: String
+    let createdAt: Date
+}
+
 /// A finished transcript waiting for its destination to regain focus.
 struct MacHeldTranscript: Identifiable {
     let id = UUID()
@@ -57,9 +71,15 @@ final class MacAppModel: ObservableObject {
     /// Explains why no microphone is selected. Non-nil means SpeakPaste
     /// declined to guess rather than quietly dictating through the wrong mic.
     @Published private(set) var deviceSelectionNotice: String?
-    @Published var language: TranscriptionLanguage = .automatic
-    @Published var cleanSpeech = true
-    @Published var autoPaste = true
+    @Published var language: TranscriptionLanguage = .automatic {
+        didSet { UserDefaults.standard.set(language.rawValue, forKey: Self.languageKey) }
+    }
+    @Published var cleanSpeech = true {
+        didSet { UserDefaults.standard.set(cleanSpeech, forKey: Self.cleanSpeechKey) }
+    }
+    @Published var autoPaste = true {
+        didSet { UserDefaults.standard.set(autoPaste, forKey: Self.autoPasteKey) }
+    }
     @Published private(set) var elapsed: TimeInterval = 0
     @Published private(set) var inputLevel: Double = 0
     @Published var transcript = ""
@@ -75,6 +95,8 @@ final class MacAppModel: ObservableObject {
     /// Dictations that have been spoken and are still being transcribed. The
     /// microphone is already free; these only await text.
     @Published private(set) var inFlightCount = 0
+    /// Failed dictations whose audio is still on disk and can be resent.
+    @Published private(set) var retryableFailures: [MacRetryableDictation] = []
 
     private let recorder: MacAudioRecorder
     private let client: ElevenLabsClientProtocol
@@ -82,19 +104,31 @@ final class MacAppModel: ObservableObject {
     private let pasteController: MacPasteController
     private let reliabilityStore: MacReliabilityStore
     private let globalHotKey: MacGlobalHotKey
+    let vocabulary = MacVocabularyStore()
+    let replacements = MacReplacementStore()
+    let history = MacHistoryStore()
+    let sounds = MacSoundEffects()
+    let permissions = MacPermissionsModel()
     private var meterTimer: Timer?
     private var recordingStartedAt: Date?
     private var deliveryTarget: MacDeliveryTarget?
     private var connectedDeviceID: String?
     private var pendingWatchTimer: Timer?
+    /// Delivery is asynchronous now, so the 0.4 s watcher must not start a
+    /// second paste on top of one already in progress.
+    private var isDeliveringHeldTranscripts = false
     /// Dictations deliver in the order they were spoken even when a later,
     /// shorter one finishes transcribing first. `nextDeliverySequence` is the
     /// ticket now being served; results that arrive early wait in `completed`.
     private var nextSpeakSequence = 0
     private var nextDeliverySequence = 0
     private var completedDictations: [Int: MacFinishedDictation] = [:]
+    private var childStoreSubscriptions: [AnyCancellable] = []
 
     private static let chosenDeviceKey = "mac-chosen-device-id"
+    private static let languageKey = "mac-language"
+    private static let cleanSpeechKey = "mac-clean-speech"
+    private static let autoPasteKey = "mac-auto-paste"
     /// Earlier builds auto-persisted whatever microphone they fell back to, so
     /// a single iPhone-absent launch pinned the built-in mic permanently.
     private static let autoPersistedDeviceKey = "mac-selected-device-id"
@@ -115,6 +149,40 @@ final class MacAppModel: ObservableObject {
         self.globalHotKey = globalHotKey
         attempts = reliabilityStore.load()
         hasSavedAPIKey = keychain.load()?.isEmpty == false
+        // Settings were rebuilt at their defaults on every launch, so a chosen
+        // language or a disabled auto-paste never survived a restart.
+        let defaults = UserDefaults.standard
+        if let stored = defaults.string(forKey: Self.languageKey),
+           let restored = TranscriptionLanguage(rawValue: stored) {
+            language = restored
+        }
+        if defaults.object(forKey: Self.cleanSpeechKey) != nil {
+            cleanSpeech = defaults.bool(forKey: Self.cleanSpeechKey)
+        }
+        if defaults.object(forKey: Self.autoPasteKey) != nil {
+            autoPaste = defaults.bool(forKey: Self.autoPasteKey)
+        }
+        MacKeyboardLayout.startObservingLayoutChanges()
+        // A grant can be given or revoked in System Settings while the user
+        // never returns to SpeakPaste, which used to leave the shortcut dead
+        // with no explanation.
+        // The stores are separate observable objects, so SwiftUI views bound to
+        // this model would otherwise never redraw when their contents change.
+        for publisher in [
+            vocabulary.objectWillChange.eraseToAnyPublisher(),
+            replacements.objectWillChange.eraseToAnyPublisher(),
+            history.objectWillChange.eraseToAnyPublisher(),
+            sounds.objectWillChange.eraseToAnyPublisher(),
+            permissions.objectWillChange.eraseToAnyPublisher(),
+        ] {
+            publisher
+                .sink { [weak self] _ in self?.objectWillChange.send() }
+                .store(in: &childStoreSubscriptions)
+        }
+        permissions.startObserving { [weak self] in
+            self?.globalHotKey.refreshMonitor()
+            self?.objectWillChange.send()
+        }
         UserDefaults.standard.removeObject(forKey: Self.autoPersistedDeviceKey)
         refreshDevices()
         observeDeviceChanges()
@@ -142,6 +210,8 @@ final class MacAppModel: ObservableObject {
     var hasAPIKey: Bool {
         hasSavedAPIKey || environmentAPIKey?.isEmpty == false
     }
+
+    var isShortcutGlobal: Bool { globalHotKey.isGlobal }
 
     var hotKeyLabel: String { MacGlobalHotKey.toggleLabel }
     var releaseHotKeyLabel: String { MacGlobalHotKey.releaseLabel }
@@ -216,6 +286,7 @@ final class MacAppModel: ObservableObject {
         switch phase {
         case .recording:
             stopMeter()
+            sounds.playRecordingStopped()
             phase = .finalizing
             Task { await stopAndTranscribe() }
         case .ready, .succeeded, .failed:
@@ -268,6 +339,7 @@ final class MacAppModel: ObservableObject {
             elapsed = 0
             inputLevel = 0
             phase = .recording
+            sounds.playRecordingStarted()
             startMeter()
         } catch {
             isMicrophoneConnected = false
@@ -351,10 +423,7 @@ final class MacAppModel: ObservableObject {
         recordingDuration: TimeInterval,
         interruption: String?
     ) async {
-        defer {
-            try? FileManager.default.removeItem(at: audioURL)
-            inFlightCount = max(0, inFlightCount - 1)
-        }
+        defer { inFlightCount = max(0, inFlightCount - 1) }
         do {
             guard let apiKey = resolvedAPIKey else {
                 throw ElevenLabsClientError.api(statusCode: 401, message: "ElevenLabs API key is missing.")
@@ -365,8 +434,11 @@ final class MacAppModel: ObservableObject {
                 audioURL: audioURL,
                 apiKey: apiKey,
                 language: language,
-                cleanSpeech: cleanSpeech
+                cleanSpeech: cleanSpeech,
+                keyterms: vocabulary.keytermsForRequest
             )
+            // Only a transcript that exists makes the audio disposable.
+            try? FileManager.default.removeItem(at: audioURL)
             completedDictations[sequence] = MacFinishedDictation(
                 text: result.text,
                 target: target,
@@ -377,6 +449,21 @@ final class MacAppModel: ObservableObject {
             )
             await drainCompletedDictations()
         } catch {
+            let reason = diagnosticMessage(for: error)
+            if isRetryable(error) {
+                retryableFailures.append(
+                    MacRetryableDictation(
+                        audioURL: audioURL,
+                        target: target,
+                        deviceName: deviceName,
+                        recordingDuration: recordingDuration,
+                        reason: reason,
+                        createdAt: Date()
+                    )
+                )
+            } else {
+                try? FileManager.default.removeItem(at: audioURL)
+            }
             // A failed dictation must not stall the ones spoken after it.
             completedDictations[sequence] = MacFinishedDictation(
                 text: "",
@@ -384,10 +471,56 @@ final class MacAppModel: ObservableObject {
                 deviceName: deviceName,
                 recordingDuration: recordingDuration,
                 transcriptionDuration: 0,
-                interruption: diagnosticMessage(for: error)
+                interruption: reason
             )
             await drainCompletedDictations()
         }
+    }
+
+    /// Speech that was captured fine and failed in transport or at the service
+    /// is worth keeping. Speech the service heard as empty is not.
+    private func isRetryable(_ error: Error) -> Bool {
+        if let clientError = error as? ElevenLabsClientError {
+            switch clientError {
+            case .emptyTranscript: return false
+            case .invalidResponse: return true
+            case let .api(statusCode, _): return statusCode != 400 && statusCode != 422
+            }
+        }
+        return true
+    }
+
+    func retry(_ failure: MacRetryableDictation) {
+        retryableFailures.removeAll { $0.id == failure.id }
+        startTranscription(
+            audioURL: failure.audioURL,
+            target: failure.target,
+            deviceName: failure.deviceName,
+            recordingDuration: failure.recordingDuration,
+            interruption: nil
+        )
+    }
+
+    func retryAllFailures() {
+        for failure in retryableFailures { retry(failure) }
+    }
+
+    func discardFailure(_ failure: MacRetryableDictation) {
+        try? FileManager.default.removeItem(at: failure.audioURL)
+        retryableFailures.removeAll { $0.id == failure.id }
+    }
+
+    /// Abandons a recording in progress without transcribing it. A dictation you
+    /// regret should not cost an API call and a paste you have to undo.
+    func cancelRecording() {
+        guard phase == .recording || phase == .connecting else { return }
+        stopMeter()
+        recorder.disconnect()
+        isMicrophoneConnected = false
+        connectedDeviceID = nil
+        connectionLatency = nil
+        deliveryTarget = nil
+        phase = .ready
     }
 
     /// Delivers finished dictations strictly in spoken order, so a short second
@@ -411,16 +544,32 @@ final class MacAppModel: ObservableObject {
             return
         }
 
-        transcript = finished.text
-        let delivery = await pasteController.deliver(
+        // Replacements and cursor-fitting happen before delivery so what lands
+        // in the field is what the user will keep.
+        let processed = MacTranscriptPostProcessor.apply(
             finished.text,
+            replacements: replacements.replacements,
+            precedingText: autoPaste ? MacAccessibility.focusedText() : nil
+        )
+        transcript = processed
+        history.append(
+            MacTranscriptRecord(
+                text: processed,
+                destination: finished.target?.applicationName,
+                deviceName: finished.deviceName,
+                recordingDuration: finished.recordingDuration
+            )
+        )
+        let delivery = await pasteController.deliver(
+            processed,
             to: finished.target,
             autoPaste: autoPaste
         )
         var detail = delivery.detail
-        if delivery == .held, let target = finished.target {
-            hold(finished.text, for: target)
-            detail = "Held for \(target.applicationName)"
+        if case let .held(reason) = delivery, let target = finished.target {
+            sounds.playHeld()
+            hold(processed, for: target)
+            detail = "Held for \(target.applicationName) — \(reason.explanation)"
         } else if let target = finished.target {
             // Naming the destination and the route makes the attempt log the
             // record of where each dictation actually went.
@@ -453,8 +602,17 @@ final class MacAppModel: ObservableObject {
         // Never overwrite a live recording's state with a background job's
         // result. The microphone owns the HUD while it is running.
         guard !phase.isBusy else { return }
+        if delivery.isDelivered { sounds.playDelivered() }
         phase = .succeeded(detail)
         scheduleReadyReset()
+    }
+
+    func copyText(_ text: String) {
+        pasteController.copyToPasteboard(text)
+    }
+
+    func pasteText(_ text: String) {
+        Task { _ = await pasteController.pasteAtCurrentFocus(text) }
     }
 
     // MARK: Held transcripts
@@ -489,6 +647,7 @@ final class MacAppModel: ObservableObject {
             stopPendingWatcher()
             return
         }
+        guard !isDeliveringHeldTranscripts else { return }
         let ready = heldTranscripts.filter { $0.target.canDeliverOnReturn }
         guard !ready.isEmpty else { return }
 
@@ -496,31 +655,45 @@ final class MacAppModel: ObservableObject {
         // insert. Two dictations while away should read as two sentences, not
         // arrive as a race.
         let text = ready.map(\.text).joined(separator: " ")
-        guard let target = ready.first?.target else { return }
-
         let readyIdentifiers = Set(ready.map(\.id))
-        guard pasteController.pasteAtCurrentFocus(text) != .copiedNeedsAccessibility else { return }
-        heldTranscripts.removeAll { readyIdentifiers.contains($0.id) }
-        if heldTranscripts.isEmpty { stopPendingWatcher() }
-        phase = .succeeded("Pasted where you left off")
-        scheduleReadyReset()
+        isDeliveringHeldTranscripts = true
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.isDeliveringHeldTranscripts = false }
+            let result = await self.pasteController.pasteAtCurrentFocus(text)
+            // Held text is only forgotten once it has actually gone somewhere.
+            // Anything else — secure input, a refused menu action, a swallowed
+            // keystroke — keeps it queued, because the HUD promises it is safe.
+            guard result.isDelivered else { return }
+            self.heldTranscripts.removeAll { readyIdentifiers.contains($0.id) }
+            if self.heldTranscripts.isEmpty { self.stopPendingWatcher() }
+            guard !self.phase.isBusy else { return }
+            self.phase = .succeeded("Pasted where you left off")
+            self.scheduleReadyReset()
+        }
     }
 
     /// Drops everything held at the caret's current location, wherever that is.
     /// The user is explicitly asking for this destination, so no target match is
     /// required.
     func releaseHeldTranscripts() {
-        guard !heldTranscripts.isEmpty else { return }
+        guard !heldTranscripts.isEmpty, !isDeliveringHeldTranscripts else { return }
         let text = heldTranscripts.map(\.text).joined(separator: " ")
-        let result = pasteController.pasteAtCurrentFocus(text)
-        guard result != .copiedNeedsAccessibility else {
-            phase = .failed("Enable Accessibility for SpeakPaste to insert held text.")
-            return
+        isDeliveringHeldTranscripts = true
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.isDeliveringHeldTranscripts = false }
+            let result = await self.pasteController.pasteAtCurrentFocus(text)
+            guard result.isDelivered else {
+                // The text stays queued. Saying why beats a silent no-op.
+                self.phase = .failed("Could not place the held text — \(result.detail).")
+                return
+            }
+            self.heldTranscripts.removeAll()
+            self.stopPendingWatcher()
+            self.phase = .succeeded("Pasted here")
+            self.scheduleReadyReset()
         }
-        heldTranscripts.removeAll()
-        stopPendingWatcher()
-        phase = .succeeded("Pasted here")
-        scheduleReadyReset()
     }
 
     func discardHeldTranscripts() {
@@ -549,6 +722,7 @@ final class MacAppModel: ObservableObject {
         transcriptionDuration: TimeInterval
     ) {
         stopMeter()
+        sounds.playFailed()
         attempts = reliabilityStore.prepend(
             MacReliabilityAttempt(
                 deviceName: deviceName,
