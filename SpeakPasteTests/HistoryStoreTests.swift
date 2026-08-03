@@ -41,4 +41,31 @@ final class HistoryStoreTests: XCTestCase {
         XCTAssertEqual(store.items.first?.text, "Item 54")
         XCTAssertEqual(store.items.last?.text, "Item 5")
     }
+
+    func testSeparateStoresMergeBeforeMutatingSharedDefaults() throws {
+        let suiteName = "SpeakPasteTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let foregroundStore = HistoryStore(defaults: defaults)
+        let backgroundStore = HistoryStore(defaults: defaults)
+        let backgroundItem = TranscriptItem(
+            text: "Background",
+            languageCode: "en",
+            duration: 1
+        )
+        let foregroundItem = TranscriptItem(
+            text: "Foreground",
+            languageCode: "en",
+            duration: 1
+        )
+
+        backgroundStore.add(backgroundItem)
+        foregroundStore.add(foregroundItem)
+
+        XCTAssertEqual(
+            HistoryStore(defaults: defaults).items.map(\.text),
+            ["Foreground", "Background"]
+        )
+    }
 }

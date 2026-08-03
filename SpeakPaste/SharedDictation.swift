@@ -14,12 +14,14 @@ enum SharedDictationConstants {
 enum SharedDictationPhase: String, Codable {
     case idle
     case launching
+    case starting
     case recording
     case transcribing
     case completed
     case failed
     case cancelled
     case inserted
+    case handled
 }
 
 enum SharedDictationCommand: String, Codable {
@@ -42,10 +44,8 @@ struct SharedDictationSnapshot: Codable, Equatable {
     var returnAttempts: [String]?
     var incomingURLDeliveryRoute: String?
     var incomingURLSourceApplication: String?
-    /// Whether `UIPasteboard.changeCount` moved after the completed
-    /// transcript was written from the background. Flow A's paste step rides
-    /// on that write, and whether iOS honors it headlessly is exactly the
-    /// kind of claim this store exists to settle with device evidence.
+    /// Historical diagnostic for the retired background-pasteboard experiment.
+    /// Keep it optional so sessions written by older builds still decode.
     var clipboardLanded: Bool? = nil
     var startedAt: Date
     var updatedAt: Date
@@ -114,13 +114,21 @@ struct SharedDictationStore: @unchecked Sendable {
         return snapshot
     }
 
-    /// Start a session that is already recording. Intent-driven dictation never
-    /// launches anything, so it must not pass through `launching` and make the
-    /// keyboard announce an app switch that is not happening.
+    /// Start an intent-driven session while iOS grants background capture.
+    /// Publishing `starting` keeps the keyboard truthful until the recorder
+    /// proves that the microphone is live. Never replace a completed transcript
+    /// that the keyboard has not inserted yet.
     @discardableResult
-    func beginBackgroundSession() -> SharedDictationSnapshot {
+    func beginBackgroundSession() -> SharedDictationSnapshot? {
+        let current = load()
+        let hasPendingTranscript = current.phase == .completed
+            && current.transcript?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .isEmpty == false
+        guard !hasPendingTranscript else { return nil }
+
         var snapshot = SharedDictationSnapshot.idle
-        snapshot.phase = .recording
+        snapshot.phase = .starting
         save(snapshot)
         return snapshot
     }
@@ -130,10 +138,13 @@ struct SharedDictationStore: @unchecked Sendable {
         sessionID: UUID,
         transcript: String? = nil,
         errorMessage: String? = nil,
-        clipboardLanded: Bool? = nil
+        clipboardLanded: Bool? = nil,
+        startedAt: Date? = nil
     ) {
         update(sessionID: sessionID) { snapshot in
-            if phase == .recording && snapshot.phase != .recording {
+            if let startedAt {
+                snapshot.startedAt = startedAt
+            } else if phase == .recording && snapshot.phase != .recording {
                 snapshot.startedAt = Date()
             }
             snapshot.phase = phase
@@ -209,6 +220,17 @@ struct SharedDictationStore: @unchecked Sendable {
     func markInserted(sessionID: UUID) {
         update(sessionID: sessionID) { snapshot in
             snapshot.phase = .inserted
+            snapshot.command = .none
+            snapshot.transcript = nil
+            snapshot.errorMessage = nil
+        }
+    }
+
+    /// A History copy/open/delete is an explicit fallback delivery when the
+    /// keyboard cannot insert (for example, in a secure field).
+    func markHandled(sessionID: UUID) {
+        update(sessionID: sessionID) { snapshot in
+            snapshot.phase = .handled
             snapshot.command = .none
             snapshot.transcript = nil
             snapshot.errorMessage = nil

@@ -138,7 +138,7 @@ struct SettingsView: View {
             Text("Clipboard")
         } footer: {
             Text(
-                "Puts each finished transcript on the clipboard automatically so you can paste right away."
+                "Applies only to recordings made here in the app. Back Tap dictations can't reach the clipboard from the background — the SpeakPaste keyboard types them at the cursor instead."
             )
         }
         .listRowBackground(Theme.surface)

@@ -10,17 +10,16 @@ final class HistoryStore: ObservableObject {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        guard
-            let data = defaults.data(forKey: storageKey),
-            let decoded = try? JSONDecoder().decode([TranscriptItem].self, from: data)
-        else {
-            items = []
-            return
-        }
-        items = decoded
+        items = Self.loadItems(from: defaults, key: storageKey)
+    }
+
+    func reload() {
+        items = Self.loadItems(from: defaults, key: storageKey)
     }
 
     func add(_ item: TranscriptItem) {
+        items = Self.loadItems(from: defaults, key: storageKey)
+        items.removeAll { $0.id == item.id }
         items.insert(item, at: 0)
         if items.count > limit {
             items.removeLast(items.count - limit)
@@ -29,6 +28,7 @@ final class HistoryStore: ObservableObject {
     }
 
     func delete(id: UUID) {
+        items = Self.loadItems(from: defaults, key: storageKey)
         items.removeAll { $0.id == id }
         persist()
     }
@@ -41,5 +41,21 @@ final class HistoryStore: ObservableObject {
     private func persist() {
         guard let data = try? JSONEncoder().encode(items) else { return }
         defaults.set(data, forKey: storageKey)
+    }
+
+    private static func loadItems(
+        from defaults: UserDefaults,
+        key: String
+    ) -> [TranscriptItem] {
+        guard
+            let data = defaults.data(forKey: key),
+            let decoded = try? JSONDecoder().decode(
+                [TranscriptItem].self,
+                from: data
+            )
+        else {
+            return []
+        }
+        return decoded
     }
 }

@@ -86,9 +86,11 @@ struct ContentView: View {
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
 
-                RecordControls(model: model, recorder: model.recorder)
-                    .padding(.horizontal, 28)
-                    .padding(.bottom, 16)
+                if showsManualControls {
+                    RecordControls(model: model, recorder: model.recorder)
+                        .padding(.horizontal, 28)
+                        .padding(.bottom, 16)
+                }
             }
         }
         .overlay(alignment: .top) { copiedPill }
@@ -132,13 +134,22 @@ struct ContentView: View {
         return nil
     }
 
+    /// The big record/stop button belongs to the manual in-app fallback, so it
+    /// only appears once a manual session or transcript is underway. The idle
+    /// home leads with the Back Tap flow instead.
+    private var showsManualControls: Bool {
+        model.isRecording
+            || model.isTranscribing
+            || !model.transcriptText.isEmpty
+    }
+
     private var header: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-            Text("SpeakPaste")
-                .font(.system(.title2, design: .rounded, weight: .bold))
-                .foregroundStyle(Theme.ink)
-                Text("Dictate. Copy. Paste anywhere.")
+                Text("SpeakPaste")
+                    .font(.system(.title2, design: .rounded, weight: .bold))
+                    .foregroundStyle(Theme.ink)
+                Text("Back Tap to dictate, anywhere.")
                     .font(.footnote)
                     .foregroundStyle(Theme.inkMuted)
             }
@@ -211,42 +222,130 @@ private struct IdleView: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
-        VStack(spacing: 18) {
-            ZStack {
-                Circle()
-                    .fill(Theme.surface)
-                    .frame(width: 96, height: 96)
-                    .overlay(Circle().stroke(Theme.stroke))
-                Image(systemName: "waveform")
-                    .font(.system(size: 36, weight: .medium))
-                    .foregroundStyle(Theme.accent)
-            }
-            .accessibilityHidden(true)
-
-            Text("Ready when you are")
-                .font(.system(.title3, design: .rounded, weight: .semibold))
-                .foregroundStyle(Theme.ink)
-
-            Text(
-                model.autoCopy
-                    ? "Tap record and talk. The transcript lands on your clipboard automatically."
-                    : "Tap record and talk. Copy the transcript when it's ready."
-            )
-            .font(.subheadline)
-            .foregroundStyle(Theme.inkMuted)
-            .multilineTextAlignment(.center)
-
-            if !model.hasAPIKey {
-                Button {
-                    model.showSettings = true
-                } label: {
-                    Label("Add ElevenLabs API key", systemImage: "key.fill")
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 10) {
+                        Image(systemName: "waveform")
+                            .font(.system(size: 20, weight: .medium))
+                            .foregroundStyle(Theme.accent)
+                            .frame(width: 40, height: 40)
+                            .background(Circle().fill(Theme.surface))
+                            .overlay(Circle().stroke(Theme.stroke))
+                            .accessibilityHidden(true)
+                        Text("Dictate without leaving your app")
+                            .font(.system(.title3, design: .rounded, weight: .semibold))
+                            .foregroundStyle(Theme.ink)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Text("The transcript types itself at your cursor.")
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.inkMuted)
                 }
-                .buttonStyle(QuietPillButtonStyle())
+                .accessibilityElement(children: .combine)
+
+                VStack(alignment: .leading, spacing: 16) {
+                    FlowStep(
+                        number: 1,
+                        title: "Double-tap the back of your iPhone",
+                        detail: "Recording starts wherever you are. The Live Activity shows it's live."
+                    )
+                    FlowStep(
+                        number: 2,
+                        title: "Talk",
+                        detail: "Your app keeps the screen the whole time."
+                    )
+                    FlowStep(
+                        number: 3,
+                        title: "Double-tap again to stop",
+                        detail: "No need to wait for the transcription."
+                    )
+                    FlowStep(
+                        number: 4,
+                        title: "Switch to the SpeakPaste keyboard",
+                        detail: "Hold the globe key and pick SpeakPaste. The transcript inserts at your cursor the moment it's ready — and SpeakPaste stays the last-used keyboard for next time."
+                    )
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 20).fill(Theme.surface))
+                .overlay(RoundedRectangle(cornerRadius: 20).stroke(Theme.stroke))
+
+                Text(
+                    "One-time setup: in Shortcuts, create a shortcut with the single action SpeakPaste Toggle Dictation, then assign it to Double Tap in Settings › Accessibility › Touch › Back Tap. Add the SpeakPaste keyboard in Settings › General › Keyboard and turn on Allow Full Access. SpeakPaste can't detect whether these are set up — run a test dictation to confirm."
+                )
+                .font(.footnote)
+                .foregroundStyle(Theme.inkMuted)
+                .fixedSize(horizontal: false, vertical: true)
+
+                if !model.hasAPIKey {
+                    Button {
+                        model.showSettings = true
+                    } label: {
+                        Label("Add ElevenLabs API key", systemImage: "key.fill")
+                    }
+                    .buttonStyle(QuietPillButtonStyle())
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Manual fallback")
+                        .font(.footnote.weight(.semibold))
+                        .textCase(.uppercase)
+                        .kerning(1)
+                        .foregroundStyle(Theme.inkMuted)
+
+                    Button {
+                        model.toggleRecording()
+                    } label: {
+                        Label("Record in the app", systemImage: "mic.fill")
+                    }
+                    .buttonStyle(QuietPillButtonStyle())
+                    .disabled(!model.canStartRecording)
+                    .accessibilityHint("Starts a recording here in SpeakPaste.")
+
+                    Text("Records while the app is open, with the transcript here to edit, copy, or share.")
+                        .font(.footnote)
+                        .foregroundStyle(Theme.inkMuted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 .padding(.top, 4)
             }
+            .padding(.horizontal, 24)
+            .padding(.top, 20)
+            .padding(.bottom, 24)
         }
-        .padding(.horizontal, 32)
+        .scrollIndicators(.hidden)
+    }
+}
+
+private struct FlowStep: View {
+    let number: Int
+    let title: String
+    let detail: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text("\(number)")
+                .font(.subheadline.weight(.bold))
+                .monospacedDigit()
+                .foregroundStyle(Theme.accent)
+                .frame(width: 26, height: 26)
+                .background(Circle().fill(Theme.accent.opacity(0.14)))
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Theme.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(detail)
+                    .font(.footnote)
+                    .foregroundStyle(Theme.inkMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Step \(number): \(title). \(detail)")
     }
 }
 

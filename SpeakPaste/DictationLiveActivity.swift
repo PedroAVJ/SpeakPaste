@@ -18,6 +18,7 @@ final class DictationLiveActivity {
     }
 
     private var activity: Activity<SpeakPasteActivityAttributes>?
+    private var recordingStartedAt: Date?
 
     /// `AudioRecordingIntent` requires a Live Activity for the entire capture.
     /// Without it, iOS stops recording as soon as the intent returns.
@@ -37,7 +38,10 @@ final class DictationLiveActivity {
             startedAt: startedAt
         )
         let content = ActivityContent(
-            state: SpeakPasteActivityAttributes.ContentState(phase: .recording),
+            state: SpeakPasteActivityAttributes.ContentState(
+                phase: .starting,
+                recordingStartedAt: nil
+            ),
             staleDate: nil
         )
         do {
@@ -51,11 +55,20 @@ final class DictationLiveActivity {
         }
     }
 
-    func update(_ phase: SpeakPasteActivityAttributes.Phase) async {
+    func update(
+        _ phase: SpeakPasteActivityAttributes.Phase,
+        recordingStartedAt: Date? = nil
+    ) async {
         guard let activity = currentActivity else { return }
+        if phase == .recording {
+            self.recordingStartedAt = recordingStartedAt ?? Date()
+        }
         await activity.update(
             ActivityContent(
-                state: SpeakPasteActivityAttributes.ContentState(phase: phase),
+                state: SpeakPasteActivityAttributes.ContentState(
+                    phase: phase,
+                    recordingStartedAt: self.recordingStartedAt
+                ),
                 staleDate: nil
             )
         )
@@ -64,7 +77,10 @@ final class DictationLiveActivity {
     func end(_ phase: SpeakPasteActivityAttributes.Phase) async {
         guard let activity = currentActivity else { return }
         let content = ActivityContent(
-            state: SpeakPasteActivityAttributes.ContentState(phase: phase),
+            state: SpeakPasteActivityAttributes.ContentState(
+                phase: phase,
+                recordingStartedAt: recordingStartedAt
+            ),
             staleDate: nil
         )
         let policy: ActivityUIDismissalPolicy = phase == .cancelled
@@ -72,6 +88,7 @@ final class DictationLiveActivity {
             : .after(Date().addingTimeInterval(3))
         await activity.end(content, dismissalPolicy: policy)
         self.activity = nil
+        recordingStartedAt = nil
     }
 
     private var currentActivity: Activity<SpeakPasteActivityAttributes>? {

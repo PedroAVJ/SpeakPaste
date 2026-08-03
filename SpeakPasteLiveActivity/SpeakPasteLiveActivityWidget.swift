@@ -25,15 +25,18 @@ struct SpeakPasteLiveActivityWidget: Widget {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("SpeakPaste")
                         .font(.headline)
-                    Text(context.state.phase.title)
+                    Text(lockScreenStatus(for: context.state.phase))
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
 
                 Spacer(minLength: 8)
 
-                if context.state.phase == .recording {
-                    Text(context.attributes.startedAt, style: .timer)
+                if
+                    context.state.phase == .recording,
+                    let startedAt = context.state.recordingStartedAt
+                {
+                    Text(startedAt, style: .timer)
                         .font(.headline.monospacedDigit())
                         .foregroundStyle(.orange)
                 }
@@ -51,27 +54,34 @@ struct SpeakPasteLiveActivityWidget: Widget {
                     .foregroundStyle(.orange)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
-                    if context.state.phase == .recording {
-                        Text(context.attributes.startedAt, style: .timer)
+                    if
+                        context.state.phase == .recording,
+                        let startedAt = context.state.recordingStartedAt
+                    {
+                        Text(startedAt, style: .timer)
                             .monospacedDigit()
                     }
                 }
                 DynamicIslandExpandedRegion(.bottom) {
-                    Text(
-                        context.state.phase == .recording
-                            ? "Double-tap the back of your iPhone to finish."
-                            : context.state.phase.title
-                    )
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    Text(expandedHint(for: context.state.phase))
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
             } compactLeading: {
                 Image(systemName: context.state.phase.systemImageName)
                     .foregroundStyle(.orange)
             } compactTrailing: {
-                if context.state.phase == .recording {
-                    Text(context.attributes.startedAt, style: .timer)
+                if
+                    context.state.phase == .recording,
+                    let startedAt = context.state.recordingStartedAt
+                {
+                    Text(startedAt, style: .timer)
                         .font(.caption2.monospacedDigit())
+                } else if [.transcribing, .completed].contains(
+                    context.state.phase
+                ) {
+                    Image(systemName: "keyboard")
+                        .accessibilityLabel("Switch to SpeakPaste keyboard")
                 } else {
                     Image(systemName: context.state.phase.systemImageName)
                 }
@@ -80,6 +90,36 @@ struct SpeakPasteLiveActivityWidget: Widget {
                     .foregroundStyle(.orange)
             }
             .keylineTint(.orange)
+        }
+    }
+
+    private func lockScreenStatus(
+        for phase: SpeakPasteActivityAttributes.Phase
+    ) -> String {
+        switch phase {
+        case .transcribing:
+            "Switch to SpeakPaste keyboard now"
+        case .completed:
+            "Switch keyboards to insert"
+        default:
+            phase.title
+        }
+    }
+
+    private func expandedHint(
+        for phase: SpeakPasteActivityAttributes.Phase
+    ) -> String {
+        switch phase {
+        case .starting:
+            "Getting the microphone ready…"
+        case .recording:
+            "Double-tap the back of your iPhone to finish."
+        case .transcribing:
+            "Switch to the SpeakPaste keyboard now; it will insert when ready."
+        case .completed:
+            "Switch to the SpeakPaste keyboard to insert it."
+        default:
+            phase.title
         }
     }
 }

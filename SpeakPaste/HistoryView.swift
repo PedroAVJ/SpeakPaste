@@ -1,5 +1,4 @@
 import SwiftUI
-import UIKit
 
 struct HistoryView: View {
     @EnvironmentObject private var model: AppModel
@@ -68,6 +67,7 @@ private struct HistoryList: View {
         }
         .tint(Theme.accent)
         .preferredColorScheme(.dark)
+        .onAppear { history.reload() }
     }
 
     private func row(_ item: TranscriptItem) -> some View {
@@ -133,7 +133,6 @@ private struct HistoryList: View {
     }
 
     private func copy(_ item: TranscriptItem) {
-        UIPasteboard.general.string = item.text
-        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        model.copyHistoryItem(item)
     }
 }

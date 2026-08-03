@@ -125,6 +125,7 @@ final class AppModel: ObservableObject {
     }
 
     func handleActivation() {
+        history.reload()
         let snapshot = sharedStore.load()
         guard
             snapshot.phase == .launching,
@@ -350,17 +351,63 @@ final class AppModel: ObservableObject {
     }
 
     func useHistoryItem(_ item: TranscriptItem) {
+        acknowledgePendingTranscript(for: item)
         transcriptText = item.text
         phase = .idle
         showHistory = false
     }
 
+    func copyHistoryItem(_ item: TranscriptItem) {
+        UIPasteboard.general.string = item.text
+        acknowledgePendingTranscript(for: item)
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+    }
+
     func deleteHistoryItem(_ item: TranscriptItem) {
+        acknowledgePendingTranscript(for: item)
         history.delete(id: item.id)
     }
 
     func clearHistory() {
+        let pending = sharedStore.load()
+        if pending.phase == .completed {
+            sharedStore.markHandled(sessionID: pending.sessionID)
+        }
         history.clear()
+    }
+
+    private func acknowledgePendingTranscript(for item: TranscriptItem) {
+        let pending = sharedStore.load()
+        guard pending.phase == .completed else { return }
+
+        let matchesPendingSession: Bool
+        if let sourceSessionID = item.sourceSessionID {
+            matchesPendingSession = sourceSessionID == pending.sessionID
+        } else {
+            // Compatibility for on-device history written before session IDs
+            // were stored with background transcripts. If a tagged row exists,
+            // an older duplicate must never acknowledge it. For a genuinely
+            // legacy pending session, only its newest time-correlated row wins.
+            let hasTaggedPendingItem = history.items.contains {
+                $0.sourceSessionID == pending.sessionID
+            }
+            let pendingText = pending.transcript?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let legacyPendingItem = history.items
+                .filter {
+                    $0.sourceSessionID == nil
+                        && $0.createdAt
+                            >= pending.startedAt.addingTimeInterval(-1)
+                        && $0.text.trimmingCharacters(
+                            in: .whitespacesAndNewlines
+                        ) == pendingText
+                }
+                .max { $0.createdAt < $1.createdAt }
+            matchesPendingSession = !hasTaggedPendingItem
+                && legacyPendingItem?.id == item.id
+        }
+        guard matchesPendingSession else { return }
+        sharedStore.markHandled(sessionID: pending.sessionID)
     }
 
     func dismissError() {
@@ -400,7 +447,8 @@ final class AppModel: ObservableObject {
                     TranscriptItem(
                         text: result.text,
                         languageCode: result.languageCode,
-                        duration: duration
+                        duration: duration,
+                        sourceSessionID: activeSharedSessionID
                     )
                 )
                 if let activeSharedSessionID {

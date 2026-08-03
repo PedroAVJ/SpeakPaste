@@ -107,6 +107,46 @@ final class SharedDictationStoreTests: XCTestCase {
         XCTAssertNil(store.load().errorMessage)
     }
 
+    func testBackgroundSessionStaysStartingUntilCaptureIsLive() throws {
+        let suiteName = "SharedDictationStoreTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = SharedDictationStore(suiteName: suiteName)
+
+        let session = try XCTUnwrap(store.beginBackgroundSession())
+        XCTAssertEqual(store.load().phase, .starting)
+
+        store.setPhase(.recording, sessionID: session.sessionID)
+        XCTAssertEqual(store.load().phase, .recording)
+        XCTAssertGreaterThanOrEqual(store.load().startedAt, session.startedAt)
+    }
+
+    func testBackgroundSessionPreservesTranscriptUntilInsertion() throws {
+        let suiteName = "SharedDictationStoreTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = SharedDictationStore(suiteName: suiteName)
+
+        let pending = try XCTUnwrap(store.beginBackgroundSession())
+        store.setPhase(
+            .completed,
+            sessionID: pending.sessionID,
+            transcript: "Do not lose me"
+        )
+
+        XCTAssertNil(store.beginBackgroundSession())
+        XCTAssertEqual(store.load().sessionID, pending.sessionID)
+        XCTAssertEqual(store.load().transcript, "Do not lose me")
+
+        store.markHandled(sessionID: pending.sessionID)
+        XCTAssertEqual(store.load().phase, .handled)
+        XCTAssertNil(store.load().transcript)
+
+        let next = try XCTUnwrap(store.beginBackgroundSession())
+        XCTAssertNotEqual(next.sessionID, pending.sessionID)
+        XCTAssertEqual(next.phase, .starting)
+    }
+
     func testSourceApplicationCanRepairMissingReturnTarget() throws {
         let suiteName = "SharedDictationStoreTests-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -126,7 +166,10 @@ final class SharedDictationStoreTests: XCTestCase {
     }
 
     func testLiveActivityStateRoundTripsBetweenAppAndWidget() throws {
-        let state = SpeakPasteActivityAttributes.ContentState(phase: .recording)
+        let state = SpeakPasteActivityAttributes.ContentState(
+            phase: .recording,
+            recordingStartedAt: Date(timeIntervalSince1970: 1_234)
+        )
         let encoded = try JSONEncoder().encode(state)
         let decoded = try JSONDecoder().decode(
             SpeakPasteActivityAttributes.ContentState.self,

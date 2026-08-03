@@ -8,16 +8,16 @@ import AppIntents
 /// invisible; a banner announcing "Listening" every time is worse than
 /// silence, and haptics already confirm the state.
 ///
-/// Toggle and Stop return the transcript as an optional value: the app's own
-/// background pasteboard write is the shipping delivery, and the output lets
-/// a wrapper shortcut take over copying if that write ever proves unreliable.
-/// The start tap returns nil — a genuine no-value, never empty text, so a
-/// "has any value" gate in a shortcut cannot fire on it and wipe the
-/// clipboard. The current one-action wrapper ignores the output entirely.
+/// They also return no value. `ReturnsValue<String?>` serializes into the
+/// actions database as an unresolvable output type (`typeIdentifier: 0`),
+/// and Shortcuts then fails the whole action with "could not be found" —
+/// proven on device 2026-08-03. If a wrapper shortcut ever needs the
+/// transcript, the output must be a non-optional type, and the start tap
+/// then needs a gate that empty text cannot satisfy.
 struct ToggleDictationIntent: AppIntent, AudioRecordingIntent, LiveActivityIntent {
     static let title: LocalizedStringResource = "Toggle Dictation"
     static let description = IntentDescription(
-        "Start dictating, or finish and insert the transcript, without leaving the app you are in."
+        "Start dictating, or stop and hand the transcript to the SpeakPaste keyboard, without leaving the app you are in."
     )
     static let openAppWhenRun = false
 
@@ -27,9 +27,9 @@ struct ToggleDictationIntent: AppIntent, AudioRecordingIntent, LiveActivityInten
     }
 
     @MainActor
-    func perform() async throws -> some IntentResult & ReturnsValue<String?> {
-        let transcript = try await DictationEngine.shared.toggle()
-        return .result(value: transcript)
+    func perform() async throws -> some IntentResult {
+        try await DictationEngine.shared.toggle()
+        return .result()
     }
 }
 
@@ -55,7 +55,7 @@ struct StartDictationIntent: AppIntent, AudioRecordingIntent, LiveActivityIntent
 struct StopDictationIntent: AppIntent, AudioRecordingIntent, LiveActivityIntent {
     static let title: LocalizedStringResource = "Stop Dictation"
     static let description = IntentDescription(
-        "Finish recording, transcribe, and hand the text to the keyboard and clipboard."
+        "Finish recording, transcribe, and hand the text to the SpeakPaste keyboard."
     )
     static let openAppWhenRun = false
 
@@ -63,9 +63,9 @@ struct StopDictationIntent: AppIntent, AudioRecordingIntent, LiveActivityIntent 
     static var supportedModes: IntentModes { .background }
 
     @MainActor
-    func perform() async throws -> some IntentResult & ReturnsValue<String?> {
-        let transcript = try await DictationEngine.shared.stop()
-        return .result(value: transcript)
+    func perform() async throws -> some IntentResult {
+        try await DictationEngine.shared.stop()
+        return .result()
     }
 }
 

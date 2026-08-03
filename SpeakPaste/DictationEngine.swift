@@ -16,6 +16,7 @@ final class DictationEngine {
         case missingAPIKey
         case microphoneDenied
         case backgroundCaptureUnavailable
+        case pendingTranscript
 
         var errorDescription: String? {
             switch self {
@@ -25,6 +26,8 @@ final class DictationEngine {
                 "Microphone access is off. Enable it for SpeakPaste in Settings."
             case .backgroundCaptureUnavailable:
                 "iOS refused the microphone in the background. If another app or a screen recording is using audio, stop it and tap again."
+            case .pendingTranscript:
+                "Switch to the SpeakPaste keyboard to insert the previous transcript before starting another dictation."
             }
         }
     }
@@ -56,18 +59,17 @@ final class DictationEngine {
 
     /// One gesture for the whole round trip, so a single Back Tap binding both
     /// starts and finishes a dictation.
-    @discardableResult
-    func toggle() async throws -> String? {
+    func toggle() async throws {
         if isRecording {
-            return try await stop()
+            try await stop()
+            return
         }
         // Ignore another gesture while startup, transcription, or teardown is
         // already in flight. Those awaits are MainActor-reentrant, so checking
         // only AVAudioRecorder would let a fast extra Back Tap replace the
         // current session.
-        guard sessionID == nil, !isStarting else { return nil }
+        guard sessionID == nil, !isStarting else { return }
         try await start()
-        return nil
     }
 
     func start() async throws {
@@ -75,19 +77,37 @@ final class DictationEngine {
         isStarting = true
         defer { isStarting = false }
 
+        guard let snapshot = store.beginBackgroundSession() else {
+            throw EngineError.pendingTranscript
+        }
+        sessionID = snapshot.sessionID
+        // Startup can include permission and Live Activity work. Keep the
+        // keyboard from declaring that still-owned session abandoned.
+        startHeartbeat(sessionID: snapshot.sessionID)
+
         guard
             let key = keychain.load()?
                 .trimmingCharacters(in: .whitespacesAndNewlines),
             !key.isEmpty
         else {
+            store.setPhase(
+                .failed,
+                sessionID: snapshot.sessionID,
+                errorMessage: EngineError.missingAPIKey.localizedDescription
+            )
+            finish()
             throw EngineError.missingAPIKey
         }
         guard await recorder.requestPermission() else {
+            store.setPhase(
+                .failed,
+                sessionID: snapshot.sessionID,
+                errorMessage: EngineError.microphoneDenied.localizedDescription
+            )
+            finish()
             throw EngineError.microphoneDenied
         }
 
-        let snapshot = store.beginBackgroundSession()
-        sessionID = snapshot.sessionID
         do {
             // Apple requires the Live Activity for an AudioRecordingIntent and
             // stops capture when it is missing. Start it before touching the
@@ -102,40 +122,51 @@ final class DictationEngine {
                 sessionID: snapshot.sessionID,
                 errorMessage: error.localizedDescription
             )
-            sessionID = nil
+            finish()
             throw error
         }
 
         do {
             recordingURL = try await recorder.start()
+            let recordingStartedAt = Date()
+            store.setPhase(
+                .recording,
+                sessionID: snapshot.sessionID,
+                startedAt: recordingStartedAt
+            )
+            await liveActivity.update(
+                .recording,
+                recordingStartedAt: recordingStartedAt
+            )
         } catch {
             let audioURL = recorder.stop() ?? recordingURL
             if let audioURL { cleanUpRecording(at: audioURL) }
             recordingURL = nil
-            await liveActivity.end(.failed)
-            store.setPhase(
-                .failed,
-                sessionID: snapshot.sessionID,
-                errorMessage: error.localizedDescription
-            )
-            sessionID = nil
+            let surfacedError: any Error
             if
                 case let AudioRecorderError.configurationFailed(stage, _) = error,
                 stage == "activation",
                 UIApplication.shared.applicationState != .active
             {
-                throw EngineError.backgroundCaptureUnavailable
+                surfacedError = EngineError.backgroundCaptureUnavailable
+            } else {
+                surfacedError = error
             }
-            throw error
+            await liveActivity.end(.failed)
+            store.setPhase(
+                .failed,
+                sessionID: snapshot.sessionID,
+                errorMessage: surfacedError.localizedDescription
+            )
+            finish()
+            throw surfacedError
         }
 
-        startHeartbeat(sessionID: snapshot.sessionID)
         UINotificationFeedbackGenerator().notificationOccurred(.success)
     }
 
-    @discardableResult
-    func stop() async throws -> String? {
-        guard let sessionID, !isStarting, !isStopping else { return nil }
+    func stop() async throws {
+        guard let sessionID, !isStarting, !isStopping else { return }
         isStopping = true
         defer { isStopping = false }
         // Recording itself owns background execution through the audio session
@@ -144,7 +175,9 @@ final class DictationEngine {
         beginBackgroundExecution()
         let audioURL = recorder.stop() ?? recordingURL
         let duration = recorder.duration
-        stopHeartbeat()
+        // Keep the App Group heartbeat alive through the network request. The
+        // keyboard treats a silent owner as abandoned after 15 seconds; ending
+        // the heartbeat here could erase a legitimate slow transcription.
         await liveActivity.update(.transcribing)
 
         guard
@@ -154,6 +187,7 @@ final class DictationEngine {
             !key.isEmpty
         else {
             if let audioURL { cleanUpRecording(at: audioURL) }
+            stopHeartbeat()
             store.setPhase(
                 .failed,
                 sessionID: sessionID,
@@ -176,31 +210,28 @@ final class DictationEngine {
                 TranscriptItem(
                     text: result.text,
                     languageCode: result.languageCode,
-                    duration: duration
+                    duration: duration,
+                    sourceSessionID: sessionID
                 )
             )
-            // The keyboard inserts at the cursor when it is on screen. The
-            // clipboard is the fallback for every other host. Whether iOS
-            // honors this write from a headless background process is
-            // contested, so record the changeCount verdict where devicectl
-            // can read it instead of arguing from blog posts.
-            let clipboardBefore = UIPasteboard.general.changeCount
-            UIPasteboard.general.string = result.text
-            let clipboardLanded =
-                UIPasteboard.general.changeCount != clipboardBefore
+            // No more heartbeats may race the keyboard's terminal
+            // `.completed -> .inserted` transition in the other process.
+            stopHeartbeat()
+            // The active keyboard inserts at the cursor on the system's clock.
+            // A background pasteboard write was proven to silently no-op on
+            // device, so history remains the explicit manual fallback.
             store.setPhase(
                 .completed,
                 sessionID: sessionID,
-                transcript: result.text,
-                clipboardLanded: clipboardLanded
+                transcript: result.text
             )
             UINotificationFeedbackGenerator().notificationOccurred(.success)
             cleanUpRecording(at: audioURL)
             await liveActivity.end(.completed)
             finish()
-            return result.text
         } catch {
             cleanUpRecording(at: audioURL)
+            stopHeartbeat()
             store.setPhase(
                 .failed,
                 sessionID: sessionID,
@@ -238,8 +269,18 @@ final class DictationEngine {
         heartbeatTask?.cancel()
         heartbeatTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(3))
-                guard let self, self.sessionID == sessionID else { return }
+                do {
+                    try await Task.sleep(for: .seconds(3))
+                } catch {
+                    return
+                }
+                guard
+                    !Task.isCancelled,
+                    let self,
+                    self.sessionID == sessionID
+                else {
+                    return
+                }
                 // Without this the keyboard treats the session as abandoned.
                 self.store.touch(sessionID: sessionID)
             }

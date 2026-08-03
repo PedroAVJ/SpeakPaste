@@ -11,8 +11,8 @@ The Xcode project contains four product targets:
   paste.
 - **SpeakPaste** — an iPhone containing app with record, edit, copy, share, and
   local transcript history.
-- **SpeakPasteKeyboard** — an experimental custom keyboard that hands microphone
-  capture to the containing app and inserts the result at the cursor.
+- **SpeakPasteKeyboard** — a custom typing keyboard that inserts queued
+  background dictations at the cursor.
 - **SpeakPasteLiveActivity** — the Lock Screen and Dynamic Island recording
   indicator required by iOS for background `AudioRecordingIntent` capture.
 
@@ -108,29 +108,39 @@ Then:
    Settings.
 3. In iOS Settings, open **General → Keyboard → Keyboards → Add New Keyboard**,
    add SpeakPaste, and enable **Allow Full Access**.
-4. Open Notes or another text field, switch to SpeakPaste with the globe key,
-   and tap **Start Dictation**.
-5. The containing app opens to own the microphone. Accept microphone permission
-   if needed. On the first keyboard dictation, tap **OK** on the one-time
-   switchback explanation.
-6. SpeakPaste returns to the previous app while recording continues. Tap
-   **Stop & Insert** in the keyboard to transcribe and insert the result at the
-   original cursor.
+4. In Shortcuts, create a shortcut containing the single **SpeakPaste → Toggle
+   Dictation** action.
+5. In iOS Settings, open **Accessibility → Touch → Back Tap → Double Tap** and
+   assign that saved shortcut.
+6. Open Notes or another text field and double-tap the back of the phone. Talk,
+   then double-tap again to stop.
+7. Switch to SpeakPaste with the globe key immediately; you do not need to wait
+   for transcription. The keyboard inserts the queued transcript at the cursor
+   as soon as Scribe returns.
 
 The keyboard renders its own QWERTY, number, and symbol planes because iOS does
-not place Apple's keyboard beneath a third-party keyboard extension. If the
-automatic return is unavailable, recording continues and the app explains how
-to swipe back manually.
+not place Apple's keyboard beneath a third-party keyboard extension. It remains
+usable while its passive status bar shows **Listening**, **Transcribing**, or
+the insertion result. It never starts dictation or navigates away from the host
+app; Back Tap owns invocation and the keyboard owns delivery.
 
-The recording-grounded acceptance criteria and source media live in
-[the iPhone keyboard round-trip specification](docs/ios-keyboard-roundtrip-spec.md).
+The current UX, device evidence, and acceptance criteria live in
+[the iPhone dictation UX specification](docs/ios-dictation-ux.md).
 
-## Keyboard handoff implementation
+## Background dictation and keyboard delivery
 
-Apple does not provide microphone access to custom keyboards, so the containing
-app must briefly foreground and start capture. SpeakPaste uses typed
-`UIScene.open` or `UIApplication.open` calls for this launch and persists the
-real asynchronous result of every attempted route.
+Apple does not provide microphone access to custom keyboards. SpeakPaste avoids
+the old foreground-app bounce by invoking an `AudioRecordingIntent` from Back
+Tap, keeping a Live Activity visible for the full capture, and transcribing in
+the background. The App Group carries the completed text to the active keyboard,
+which inserts it through `textDocumentProxy` and marks the session inserted.
+
+### Deprecated keyboard handoff fallback
+
+The earlier keyboard-initiated round trip remains in the code temporarily for
+diagnostics while the Back Tap delivery path finishes physical-device
+acceptance. It uses typed `UIScene.open` or `UIApplication.open` calls to launch
+the containing app and persists the real asynchronous result of each route.
 
 For the return, the personal sideload checks the live
 `UISystemNavigationAction` that backs the iOS status-bar breadcrumb. Runtime
@@ -160,9 +170,10 @@ and [Apple's extension URL-opening contract](https://developer.apple.com/documen
 - Audio is sent directly to ElevenLabs at
   `POST https://api.elevenlabs.io/v1/speech-to-text` using the `scribe_v2`
   model.
-- Finished recordings are deleted after transcription on macOS. On iPhone they
-  are deleted after success or cancellation and retained after an API failure
-  so Retry can reuse them.
+- Finished recordings are deleted after transcription on macOS. On iPhone,
+  manual in-app recordings are retained after an API failure so Retry can reuse
+  them. Back Tap recordings are deleted after success, cancellation, or failure;
+  its passive keyboard does not expose Retry.
 - Transcript history stays on-device and is capped at 50 entries.
 - Full Access lets the keyboard share dictation state with the containing app.
   SpeakPaste does not collect general keystrokes.
@@ -199,11 +210,12 @@ For iPhone:
   and microphone permission, keyboard installation, and Full Access were
   exercised.
 
-The current system-navigation switchback still requires one fresh direct-phone
-Notes run. Keep that run's shared session intact until its host-resolution and
-return diagnostics have been copied. Insertion, cancellation, retry, Full Access
-denial, and the manual fallback must also be exercised before calling every
-iPhone path end-to-end verified.
+The settled delivery path still requires one fresh direct-phone Notes run:
+Back Tap to start, speak, Back Tap to stop, immediately switch to SpeakPaste,
+and confirm exactly one insertion with the shared phase ending as `inserted`.
+Cold launch, music ducking, Full Access denial, failure recovery, and the manual
+in-app fallback must also be exercised before calling every iPhone path
+end-to-end verified.
 
 ## License
 

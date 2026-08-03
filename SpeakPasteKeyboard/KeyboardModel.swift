@@ -31,6 +31,7 @@ final class KeyboardModel: ObservableObject {
     @Published private(set) var snapshot: SharedDictationSnapshot
     @Published var hasFullAccess = false
     @Published private(set) var localError: String?
+    @Published private(set) var recentlyInserted = false
 
     private let store: SharedDictationStore
     private let resolveHostApplication: () -> HostApplicationResolution
@@ -40,6 +41,7 @@ final class KeyboardModel: ObservableObject {
     private let deleteBackward: () -> Void
     private let advanceToNextKeyboard: () -> Void
     private var pollTask: Task<Void, Never>?
+    private var insertedConfirmationTask: Task<Void, Never>?
     private var insertedSessionIDs: Set<UUID> = []
 
     init(
@@ -62,10 +64,12 @@ final class KeyboardModel: ObservableObject {
     }
 
     var isIdle: Bool {
-        [.idle, .inserted, .cancelled].contains(snapshot.phase)
+        [.idle, .inserted, .handled, .cancelled].contains(snapshot.phase)
     }
 
-    var isLaunching: Bool { snapshot.phase == .launching }
+    var isStarting: Bool {
+        snapshot.phase == .starting || snapshot.phase == .launching
+    }
     var isRecording: Bool { snapshot.phase == .recording }
     var isTranscribing: Bool { snapshot.phase == .transcribing }
     var didFail: Bool { snapshot.phase == .failed }
@@ -184,14 +188,13 @@ final class KeyboardModel: ObservableObject {
     /// Well past that interval means the app is gone and the session will never
     /// finish on its own.
     private static let abandonedSessionTimeout: TimeInterval = 15
-
     private static func isOwnedByContainingApp(
         _ phase: SharedDictationPhase
     ) -> Bool {
         switch phase {
-        case .launching, .recording, .transcribing:
+        case .launching, .starting, .recording, .transcribing:
             return true
-        case .idle, .completed, .failed, .cancelled, .inserted:
+        case .idle, .completed, .failed, .cancelled, .inserted, .handled:
             return false
         }
     }
@@ -224,5 +227,16 @@ final class KeyboardModel: ObservableObject {
         insertTranscript(transcript)
         store.markInserted(sessionID: latest.sessionID)
         snapshot = store.load()
+        showInsertedConfirmation()
+    }
+
+    private func showInsertedConfirmation() {
+        insertedConfirmationTask?.cancel()
+        recentlyInserted = true
+        insertedConfirmationTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled else { return }
+            self?.recentlyInserted = false
+        }
     }
 }

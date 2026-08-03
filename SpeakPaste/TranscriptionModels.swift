@@ -42,18 +42,23 @@ struct TranscriptItem: Codable, Identifiable, Equatable {
     let createdAt: Date
     let languageCode: String?
     let duration: TimeInterval
+    /// Links background history to the App Group delivery it can acknowledge.
+    /// Optional so history written by older builds still decodes.
+    let sourceSessionID: UUID?
 
     init(
         id: UUID = UUID(),
         text: String,
         createdAt: Date = Date(),
         languageCode: String?,
-        duration: TimeInterval
+        duration: TimeInterval,
+        sourceSessionID: UUID? = nil
     ) {
         self.id = id
         self.text = text
         self.createdAt = createdAt
         self.languageCode = languageCode
         self.duration = duration
+        self.sourceSessionID = sourceSessionID
     }
 }
