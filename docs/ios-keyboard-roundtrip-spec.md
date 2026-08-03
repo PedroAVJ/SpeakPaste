@@ -1,16 +1,18 @@
 # iPhone keyboard dictation round-trip specification
 
-This specification is grounded in two screen recordings and one validation
-screenshot captured on Pedro's iPhone 15 running iOS 26.5.2. The media and its
-matching diagnostic state are versioned beside this document so later
-implementation work can be compared with the original behavior rather than
-relying on a prose recollection.
+This specification is grounded in screen recordings and validation screenshots
+captured on an iPhone 15 running iOS 26.5.2. The media is hosted outside the
+repository and linked below; the SHA-256 of each file is recorded here so a
+download can be checked against the artifact this document was written from.
+Only the reference recording defines acceptance — the rest are reproductions of
+defects that have since been fixed, kept for comparison rather than as
+requirements.
 
 ## Evidence
 
 ### Reference: Wispr Flow 1.67 in Notes
 
-[Watch the reference recording](spec-evidence/wispr-flow-notes-roundtrip-2026-08-02.mp4)
+[Watch the reference recording](https://storage.googleapis.com/pedro-app-storage-20260801-public/speakpaste-spec-evidence/wispr-flow-notes-roundtrip-2026-08-02.mp4)
 
 - File: `wispr-flow-notes-roundtrip-2026-08-02.mp4`
 - Duration: 13.113 seconds
@@ -40,7 +42,7 @@ specific URL-opening API it calls.
 
 ### Regression: SpeakPaste does not leave Notes
 
-[Watch the failing SpeakPaste recording](spec-evidence/speakpaste-launch-failure-2026-08-02.mp4)
+[Watch the failing SpeakPaste recording](https://storage.googleapis.com/pedro-app-storage-20260801-public/speakpaste-spec-evidence/speakpaste-launch-failure-2026-08-02.mp4)
 
 - File: `speakpaste-launch-failure-2026-08-02.mp4`
 - Duration: 11.648 seconds
@@ -60,8 +62,8 @@ the keyboard-to-containing-app launch, before microphone setup or switchback.
 
 ### Regression: app opens, then audio setup fails
 
-[View the resulting keyboard error](spec-evidence/speakpaste-audio-session-error-2026-08-02.png)
-and [inspect the matching App Group state](spec-evidence/speakpaste-audio-session-error-2026-08-02.json).
+[View the resulting keyboard error](https://storage.googleapis.com/pedro-app-storage-20260801-public/speakpaste-spec-evidence/speakpaste-audio-session-error-2026-08-02.png)
+and [inspect the matching App Group state](https://storage.googleapis.com/pedro-app-storage-20260801-public/speakpaste-spec-evidence/speakpaste-audio-session-error-2026-08-02.json).
 
 - Screenshot: `speakpaste-audio-session-error-2026-08-02.png`
 - Resolution: 1179 × 2556
@@ -86,7 +88,7 @@ the containing app's failure state through the App Group.
 
 ### Regression: the system-navigation response also lands on the Home Screen
 
-[Watch the failing return recording](spec-evidence/speakpaste-return-landed-home-2026-08-02.mp4)
+[Watch the failing return recording](https://storage.googleapis.com/pedro-app-storage-20260801-public/speakpaste-spec-evidence/speakpaste-return-landed-home-2026-08-02.mp4)
 
 - File: `speakpaste-return-landed-home-2026-08-02.mp4`
 - Duration: 6.755 seconds
@@ -134,7 +136,7 @@ carries the return instead.
 
 ### Regression: generic suspension returns to the Home Screen
 
-[View the Home Screen result](spec-evidence/speakpaste-suspend-returned-home-2026-08-02.png).
+[View the Home Screen result](https://storage.googleapis.com/pedro-app-storage-20260801-public/speakpaste-spec-evidence/speakpaste-suspend-returned-home-2026-08-02.png).
 
 - Screenshot: `speakpaste-suspend-returned-home-2026-08-02.png`
 - Resolution: 1179 × 2556

@@ -4,3 +4,7 @@ build/
 *.xcuserstate
 xcuserdata/
 .DS_Store
+scripts/local-identity.env
+
+# Spec evidence media lives in Pedro App Storage, not in Git history.
+docs/spec-evidence/
