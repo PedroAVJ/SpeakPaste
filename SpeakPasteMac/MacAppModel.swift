@@ -104,6 +104,11 @@ final class MacAppModel: ObservableObject {
     private let pasteController: MacPasteController
     private let reliabilityStore: MacReliabilityStore
     private let globalHotKey: MacGlobalHotKey
+    let vocabulary = MacVocabularyStore()
+    let replacements = MacReplacementStore()
+    let history = MacHistoryStore()
+    let sounds = MacSoundEffects()
+    let permissions = MacPermissionsModel()
     private var meterTimer: Timer?
     private var recordingStartedAt: Date?
     private var deliveryTarget: MacDeliveryTarget?
@@ -118,6 +123,7 @@ final class MacAppModel: ObservableObject {
     private var nextSpeakSequence = 0
     private var nextDeliverySequence = 0
     private var completedDictations: [Int: MacFinishedDictation] = [:]
+    private var childStoreSubscriptions: [AnyCancellable] = []
 
     private static let chosenDeviceKey = "mac-chosen-device-id"
     private static let languageKey = "mac-language"
@@ -157,6 +163,26 @@ final class MacAppModel: ObservableObject {
             autoPaste = defaults.bool(forKey: Self.autoPasteKey)
         }
         MacKeyboardLayout.startObservingLayoutChanges()
+        // A grant can be given or revoked in System Settings while the user
+        // never returns to SpeakPaste, which used to leave the shortcut dead
+        // with no explanation.
+        // The stores are separate observable objects, so SwiftUI views bound to
+        // this model would otherwise never redraw when their contents change.
+        for publisher in [
+            vocabulary.objectWillChange.eraseToAnyPublisher(),
+            replacements.objectWillChange.eraseToAnyPublisher(),
+            history.objectWillChange.eraseToAnyPublisher(),
+            sounds.objectWillChange.eraseToAnyPublisher(),
+            permissions.objectWillChange.eraseToAnyPublisher(),
+        ] {
+            publisher
+                .sink { [weak self] _ in self?.objectWillChange.send() }
+                .store(in: &childStoreSubscriptions)
+        }
+        permissions.startObserving { [weak self] in
+            self?.globalHotKey.refreshMonitor()
+            self?.objectWillChange.send()
+        }
         UserDefaults.standard.removeObject(forKey: Self.autoPersistedDeviceKey)
         refreshDevices()
         observeDeviceChanges()
@@ -184,6 +210,8 @@ final class MacAppModel: ObservableObject {
     var hasAPIKey: Bool {
         hasSavedAPIKey || environmentAPIKey?.isEmpty == false
     }
+
+    var isShortcutGlobal: Bool { globalHotKey.isGlobal }
 
     var hotKeyLabel: String { MacGlobalHotKey.toggleLabel }
     var releaseHotKeyLabel: String { MacGlobalHotKey.releaseLabel }
@@ -258,6 +286,7 @@ final class MacAppModel: ObservableObject {
         switch phase {
         case .recording:
             stopMeter()
+            sounds.playRecordingStopped()
             phase = .finalizing
             Task { await stopAndTranscribe() }
         case .ready, .succeeded, .failed:
@@ -310,6 +339,7 @@ final class MacAppModel: ObservableObject {
             elapsed = 0
             inputLevel = 0
             phase = .recording
+            sounds.playRecordingStarted()
             startMeter()
         } catch {
             isMicrophoneConnected = false
@@ -404,7 +434,8 @@ final class MacAppModel: ObservableObject {
                 audioURL: audioURL,
                 apiKey: apiKey,
                 language: language,
-                cleanSpeech: cleanSpeech
+                cleanSpeech: cleanSpeech,
+                keyterms: vocabulary.keytermsForRequest
             )
             // Only a transcript that exists makes the audio disposable.
             try? FileManager.default.removeItem(at: audioURL)
@@ -513,15 +544,31 @@ final class MacAppModel: ObservableObject {
             return
         }
 
-        transcript = finished.text
-        let delivery = await pasteController.deliver(
+        // Replacements and cursor-fitting happen before delivery so what lands
+        // in the field is what the user will keep.
+        let processed = MacTranscriptPostProcessor.apply(
             finished.text,
+            replacements: replacements.replacements,
+            precedingText: autoPaste ? MacAccessibility.focusedText() : nil
+        )
+        transcript = processed
+        history.append(
+            MacTranscriptRecord(
+                text: processed,
+                destination: finished.target?.applicationName,
+                deviceName: finished.deviceName,
+                recordingDuration: finished.recordingDuration
+            )
+        )
+        let delivery = await pasteController.deliver(
+            processed,
             to: finished.target,
             autoPaste: autoPaste
         )
         var detail = delivery.detail
         if case let .held(reason) = delivery, let target = finished.target {
-            hold(finished.text, for: target)
+            sounds.playHeld()
+            hold(processed, for: target)
             detail = "Held for \(target.applicationName) — \(reason.explanation)"
         } else if let target = finished.target {
             // Naming the destination and the route makes the attempt log the
@@ -555,8 +602,17 @@ final class MacAppModel: ObservableObject {
         // Never overwrite a live recording's state with a background job's
         // result. The microphone owns the HUD while it is running.
         guard !phase.isBusy else { return }
+        if delivery.isDelivered { sounds.playDelivered() }
         phase = .succeeded(detail)
         scheduleReadyReset()
+    }
+
+    func copyText(_ text: String) {
+        pasteController.copyToPasteboard(text)
+    }
+
+    func pasteText(_ text: String) {
+        Task { _ = await pasteController.pasteAtCurrentFocus(text) }
     }
 
     // MARK: Held transcripts
@@ -666,6 +722,7 @@ final class MacAppModel: ObservableObject {
         transcriptionDuration: TimeInterval
     ) {
         stopMeter()
+        sounds.playFailed()
         attempts = reliabilityStore.prepend(
             MacReliabilityAttempt(
                 deviceName: deviceName,

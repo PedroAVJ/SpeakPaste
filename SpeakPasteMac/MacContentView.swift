@@ -18,6 +18,9 @@ struct MacContentView: View {
                     if !model.heldTranscripts.isEmpty {
                         heldBanner
                     }
+                    if !model.retryableFailures.isEmpty {
+                        retryBanner
+                    }
                     microphoneSection
                     captureSection
                     if case let .failed(message) = model.phase {
@@ -136,6 +139,38 @@ struct MacContentView: View {
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 8).fill(.blue.opacity(0.08)))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(.blue.opacity(0.3)))
+    }
+
+    private var retryBanner: some View {
+        let count = model.retryableFailures.count
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "arrow.clockwise.circle.fill")
+                    .foregroundStyle(.orange)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(count == 1 ? "1 dictation did not transcribe" : "\(count) dictations did not transcribe")
+                        .font(.callout.weight(.medium))
+                    Text("The audio is still here. \(model.retryableFailures.first?.reason ?? "")")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+            }
+            HStack(spacing: 8) {
+                Button("Try Again") { model.retryAllFailures() }
+                    .controlSize(.small)
+                Button("Discard") {
+                    for failure in model.retryableFailures { model.discardFailure(failure) }
+                }
+                .controlSize(.small)
+                Spacer()
+            }
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(.orange.opacity(0.08)))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.orange.opacity(0.3)))
     }
 
     // MARK: Microphone
@@ -314,6 +349,11 @@ struct MacContentView: View {
                 .accessibilityLabel(elapsedAccessibilityLabel)
 
             InputLevelMeter(level: model.inputLevel, isActive: model.phase == .recording)
+
+            if model.phase == .recording || model.phase == .connecting {
+                Button("Cancel", role: .destructive) { model.cancelRecording() }
+                    .controlSize(.small)
+            }
 
             Text(captureHint)
                 .font(.caption)

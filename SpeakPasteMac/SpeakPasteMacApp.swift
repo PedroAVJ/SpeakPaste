@@ -42,6 +42,11 @@ struct SpeakPasteMacApp: App {
         .defaultSize(width: 500, height: 620)
         .windowResizability(.contentSize)
 
+        Settings {
+            MacSettingsView()
+                .environmentObject(model)
+        }
+
         MenuBarExtra {
             MacMenuBarView()
                 .environmentObject(model)
@@ -109,6 +114,17 @@ struct MacMenuBarView: View {
                 model.releaseHeldTranscripts()
             }
         }
+
+        if !model.retryableFailures.isEmpty {
+            Button("Retry \(model.retryableFailures.count) Failed") { model.retryAllFailures() }
+        }
+        if model.phase == .recording {
+            Button("Cancel Recording") { model.cancelRecording() }
+        }
+
+        Divider()
+
+        SettingsLink { Text("Settings…") }
 
         Button("Copy Last Transcript") { model.copyTranscript() }
             .disabled(model.transcript.isEmpty)

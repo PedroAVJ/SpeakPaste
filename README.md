@@ -60,6 +60,20 @@ xcodebuild \
   build
 ```
 
+Settings live behind **⌘,** and cover transcription language, delivery, sounds,
+launch at login, the API key, custom vocabulary, text replacements, transcript
+history, and a live view of the permissions the app depends on.
+
+**Vocabulary** is the main quality control. Names, jargon, and product spellings
+added there are sent with every dictation as ElevenLabs keyterms, biasing
+recognition toward them without forcing a substitution — an unused term costs
+nothing. **Replacements** are the blunt instrument for the cases Scribe gets
+wrong every time; they always fire.
+
+Transcripts are kept on this Mac in Application Support, searchable, with a
+retention window and a real one-click purge. Failed transcriptions keep their
+audio so they can be retried rather than lost.
+
 For local development, `SpeakPasteMac` also accepts the API key through the
 `ELEVENLABS_API_KEY` environment variable. Never commit an API key.
 
