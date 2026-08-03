@@ -52,24 +52,33 @@ struct MacDeliveryTarget {
         return CFEqual(element, current)
     }
 
-    /// Whether it is safe to deliver *right now*, immediately after
-    /// transcription. With no element to match, being the frontmost app is
-    /// accepted — the user has not gone anywhere, and refusing here would make
-    /// every Electron dictation require a manual release. That allowance is
-    /// deliberately not extended to unattended delivery later on, where "same
-    /// app" is far weaker evidence of "same field".
+    /// Whether it is safe to deliver *right now*, seconds after the user
+    /// stopped speaking. Still being the frontmost application is the bar here:
+    /// the user never went anywhere, and that is exactly the case that must
+    /// paste instantly. Requiring element identity instead is too strict to be
+    /// usable — Chromium rebuilds its accessibility nodes across renders, so a
+    /// composer that never lost focus can still fail an identity check.
+    ///
+    /// This allowance is deliberately not extended to unattended delivery
+    /// later on, where "same app" is far weaker evidence of "same field".
     @MainActor
     var canDeliverImmediately: Bool {
-        if hasElement { return holdsFocus }
-        return NSWorkspace.shared.frontmostApplication?.processIdentifier == processIdentifier
+        NSWorkspace.shared.frontmostApplication?.processIdentifier == processIdentifier
     }
 
-    /// Writes into the captured element without activating the app or moving
-    /// focus. Returns false when the element is gone or refuses the write, in
-    /// which case the caller must fall back rather than assume success.
-    func insertWithoutFocusing(_ text: String) -> Bool {
-        guard let element else { return false }
-        return MacAccessibility.insert(text, into: element)
+    /// Whether a transcript held earlier may now be delivered unattended.
+    /// Strict element identity is the strongest signal, but Chromium rebuilds
+    /// its nodes across renders, so identity alone would leave text stranded in
+    /// exactly the apps that matter most. Failing that, the destination must be
+    /// frontmost *and* focus must sit on something that takes typed text and is
+    /// not a password field.
+    @MainActor
+    var canDeliverOnReturn: Bool {
+        if holdsFocus { return true }
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == processIdentifier else {
+            return false
+        }
+        return MacAccessibility.focusedElementAcceptsText()
     }
 }
 
@@ -92,23 +101,31 @@ enum MacAccessibility {
         return (value as! AXUIElement)
     }
 
-    /// Replaces the element's selected text, which inserts at the caret when
-    /// nothing is selected. Checked for settability first: several toolkits —
-    /// Electron among them — expose the attribute read-only and would otherwise
-    /// report success while dropping the text.
-    static func insert(_ text: String, into element: AXUIElement) -> Bool {
-        var isSettable: DarwinBoolean = false
-        let settableStatus = AXUIElementIsAttributeSettable(
-            element,
-            kAXSelectedTextAttribute as CFString,
-            &isSettable
-        )
-        guard settableStatus == .success, isSettable.boolValue else { return false }
+    /// Whether whatever holds focus right now is somewhere a paste belongs.
+    /// Secure fields are excluded outright — a dictation must never be pushed
+    /// into a password box.
+    static func focusedElementAcceptsText() -> Bool {
+        guard let element = systemFocusedElement() else { return false }
+        guard let role = stringAttribute(kAXRoleAttribute, of: element) else { return false }
+        guard role != (kAXSecureTextFieldSubrole as String) else { return false }
+        if let subrole = stringAttribute(kAXSubroleAttribute, of: element),
+           subrole == (kAXSecureTextFieldSubrole as String) {
+            return false
+        }
+        return role == (kAXTextFieldRole as String)
+            || role == (kAXTextAreaRole as String)
+            || role == (kAXComboBoxRole as String)
+    }
 
-        return AXUIElementSetAttributeValue(
-            element,
-            kAXSelectedTextAttribute as CFString,
-            text as CFTypeRef
-        ) == .success
+    private static func stringAttribute(_ attribute: String, of element: AXUIElement) -> String? {
+        var value: CFTypeRef?
+        guard
+            AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
+            let value,
+            CFGetTypeID(value) == CFStringGetTypeID()
+        else {
+            return nil
+        }
+        return (value as! CFString) as String
     }
 }

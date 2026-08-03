@@ -3,6 +3,17 @@ import AVFoundation
 import Combine
 import Foundation
 
+/// A transcription that finished and is waiting its turn to be delivered, so
+/// that dictations land in the order they were spoken.
+private struct MacFinishedDictation {
+    let text: String
+    let target: MacDeliveryTarget?
+    let deviceName: String
+    let recordingDuration: TimeInterval
+    let transcriptionDuration: TimeInterval
+    let interruption: String?
+}
+
 /// A finished transcript waiting for its destination to regain focus.
 struct MacHeldTranscript: Identifiable {
     let id = UUID()
@@ -11,18 +22,20 @@ struct MacHeldTranscript: Identifiable {
     let createdAt: Date
 }
 
+/// The microphone's state only. Transcription deliberately lives outside this
+/// machine: a dictation that has been spoken no longer needs the microphone, so
+/// waiting for its text must never block the next one.
 enum MacCapturePhase: Equatable {
     case ready
     case connecting
     case recording
     case finalizing
-    case transcribing
     case succeeded(String)
     case failed(String)
 
     var isBusy: Bool {
         switch self {
-        case .connecting, .recording, .finalizing, .transcribing: true
+        case .connecting, .recording, .finalizing: true
         case .ready, .succeeded, .failed: false
         }
     }
@@ -59,6 +72,9 @@ final class MacAppModel: ObservableObject {
     /// are never dropped and never guessed at: each waits for its own field to
     /// come back, or for the release shortcut.
     @Published private(set) var heldTranscripts: [MacHeldTranscript] = []
+    /// Dictations that have been spoken and are still being transcribed. The
+    /// microphone is already free; these only await text.
+    @Published private(set) var inFlightCount = 0
 
     private let recorder: MacAudioRecorder
     private let client: ElevenLabsClientProtocol
@@ -71,6 +87,12 @@ final class MacAppModel: ObservableObject {
     private var deliveryTarget: MacDeliveryTarget?
     private var connectedDeviceID: String?
     private var pendingWatchTimer: Timer?
+    /// Dictations deliver in the order they were spoken even when a later,
+    /// shorter one finishes transcribing first. `nextDeliverySequence` is the
+    /// ticket now being served; results that arrive early wait in `completed`.
+    private var nextSpeakSequence = 0
+    private var nextDeliverySequence = 0
+    private var completedDictations: [Int: MacFinishedDictation] = [:]
 
     private static let chosenDeviceKey = "mac-chosen-device-id"
     /// Earlier builds auto-persisted whatever microphone they fell back to, so
@@ -199,7 +221,7 @@ final class MacAppModel: ObservableObject {
         case .ready, .succeeded, .failed:
             phase = .connecting
             Task { await startRecording() }
-        case .connecting, .finalizing, .transcribing:
+        case .connecting, .finalizing:
             break
         }
     }
@@ -277,31 +299,67 @@ final class MacAppModel: ObservableObject {
         isMicrophoneConnected = false
         connectedDeviceID = nil
         connectionLatency = nil
-        await transcribeAndDeliver(
+
+        // The microphone is released and the audio is on disk, so this dictation
+        // no longer needs anything the next one wants. Hand it to a background
+        // job and return to ready immediately: the user can start speaking again
+        // right now instead of watching a spinner.
+        phase = .ready
+        let target = deliveryTarget
+        deliveryTarget = nil
+        startTranscription(
             audioURL: segment.url,
+            target: target,
             deviceName: deviceName,
             recordingDuration: recordingDuration,
             interruption: nil
         )
     }
 
-    /// Transcribes a finished recording and delivers the text. When
+    private func startTranscription(
+        audioURL: URL,
+        target: MacDeliveryTarget?,
+        deviceName: String,
+        recordingDuration: TimeInterval,
+        interruption: String?
+    ) {
+        let sequence = nextSpeakSequence
+        nextSpeakSequence += 1
+        inFlightCount += 1
+        Task { [weak self] in
+            await self?.transcribe(
+                sequence: sequence,
+                audioURL: audioURL,
+                target: target,
+                deviceName: deviceName,
+                recordingDuration: recordingDuration,
+                interruption: interruption
+            )
+        }
+    }
+
+    /// Transcribes one dictation. Several of these can be in flight at once;
+    /// each takes a ticket so delivery still happens in spoken order. When
     /// `interruption` is set, the audio is a partial dictation salvaged from a
     /// stream that died mid-recording; the attempt is logged as a failure but
     /// the text the user already spoke is still delivered.
-    private func transcribeAndDeliver(
+    private func transcribe(
+        sequence: Int,
         audioURL: URL,
+        target: MacDeliveryTarget?,
         deviceName: String,
         recordingDuration: TimeInterval,
         interruption: String?
     ) async {
-        defer { try? FileManager.default.removeItem(at: audioURL) }
+        defer {
+            try? FileManager.default.removeItem(at: audioURL)
+            inFlightCount = max(0, inFlightCount - 1)
+        }
         do {
             guard let apiKey = resolvedAPIKey else {
                 throw ElevenLabsClientError.api(statusCode: 401, message: "ElevenLabs API key is missing.")
             }
 
-            phase = .transcribing
             let transcriptionStartedAt = Date()
             let result = try await client.transcribe(
                 audioURL: audioURL,
@@ -309,61 +367,94 @@ final class MacAppModel: ObservableObject {
                 language: language,
                 cleanSpeech: cleanSpeech
             )
-            let transcriptionDuration = Date().timeIntervalSince(transcriptionStartedAt)
-            transcript = result.text
-            let target = deliveryTarget
-            let delivery = await pasteController.deliver(
-                result.text,
-                to: target,
-                autoPaste: autoPaste
-            )
-            var detail = delivery.detail
-            if delivery == .held, let target {
-                hold(result.text, for: target)
-                detail = "Held for \(target.applicationName)"
-            } else if let target {
-                // Naming the destination and the route makes the attempt log
-                // the record of which apps accept a precise insert and which
-                // fall back to a keystroke.
-                detail = "\(delivery.detail) → \(target.applicationName)"
-            }
-            if let interruption {
-                attempts = reliabilityStore.prepend(
-                    MacReliabilityAttempt(
-                        deviceName: deviceName,
-                        recordingDuration: recordingDuration,
-                        transcriptionDuration: transcriptionDuration,
-                        outcome: .failure,
-                        detail: "Stream dropped mid-dictation; partial audio recovered. \(detail). \(interruption)"
-                    )
-                )
-                phase = .failed("Recording stopped early — the dictation captured so far was still transcribed. \(detail).")
-                return
-            }
-            attempts = reliabilityStore.prepend(
-                MacReliabilityAttempt(
-                    deviceName: deviceName,
-                    recordingDuration: recordingDuration,
-                    transcriptionDuration: transcriptionDuration,
-                    outcome: .success,
-                    detail: detail
-                )
-            )
-            let successPhase = MacCapturePhase.succeeded(detail)
-            phase = successPhase
-            Task { [weak self] in
-                try? await Task.sleep(for: .seconds(1.5))
-                guard let self, self.phase == successPhase else { return }
-                self.phase = .ready
-            }
-        } catch {
-            recordFailure(
-                diagnosticMessage(for: error),
+            completedDictations[sequence] = MacFinishedDictation(
+                text: result.text,
+                target: target,
                 deviceName: deviceName,
                 recordingDuration: recordingDuration,
+                transcriptionDuration: Date().timeIntervalSince(transcriptionStartedAt),
+                interruption: interruption
+            )
+            await drainCompletedDictations()
+        } catch {
+            // A failed dictation must not stall the ones spoken after it.
+            completedDictations[sequence] = MacFinishedDictation(
+                text: "",
+                target: target,
+                deviceName: deviceName,
+                recordingDuration: recordingDuration,
+                transcriptionDuration: 0,
+                interruption: diagnosticMessage(for: error)
+            )
+            await drainCompletedDictations()
+        }
+    }
+
+    /// Delivers finished dictations strictly in spoken order, so a short second
+    /// thought cannot overtake the sentence it belongs after.
+    private func drainCompletedDictations() async {
+        while let finished = completedDictations[nextDeliverySequence] {
+            completedDictations[nextDeliverySequence] = nil
+            nextDeliverySequence += 1
+            await deliver(finished)
+        }
+    }
+
+    private func deliver(_ finished: MacFinishedDictation) async {
+        guard !finished.text.isEmpty else {
+            recordFailure(
+                finished.interruption ?? "Transcription failed.",
+                deviceName: finished.deviceName,
+                recordingDuration: finished.recordingDuration,
                 transcriptionDuration: 0
             )
+            return
         }
+
+        transcript = finished.text
+        let delivery = await pasteController.deliver(
+            finished.text,
+            to: finished.target,
+            autoPaste: autoPaste
+        )
+        var detail = delivery.detail
+        if delivery == .held, let target = finished.target {
+            hold(finished.text, for: target)
+            detail = "Held for \(target.applicationName)"
+        } else if let target = finished.target {
+            // Naming the destination and the route makes the attempt log the
+            // record of where each dictation actually went.
+            detail = "\(delivery.detail) → \(target.applicationName)"
+        }
+
+        if let interruption = finished.interruption {
+            attempts = reliabilityStore.prepend(
+                MacReliabilityAttempt(
+                    deviceName: finished.deviceName,
+                    recordingDuration: finished.recordingDuration,
+                    transcriptionDuration: finished.transcriptionDuration,
+                    outcome: .failure,
+                    detail: "Stream dropped mid-dictation; partial audio recovered. \(detail). \(interruption)"
+                )
+            )
+            phase = .failed("Recording stopped early — the dictation captured so far was still transcribed. \(detail).")
+            return
+        }
+
+        attempts = reliabilityStore.prepend(
+            MacReliabilityAttempt(
+                deviceName: finished.deviceName,
+                recordingDuration: finished.recordingDuration,
+                transcriptionDuration: finished.transcriptionDuration,
+                outcome: .success,
+                detail: detail
+            )
+        )
+        // Never overwrite a live recording's state with a background job's
+        // result. The microphone owns the HUD while it is running.
+        guard !phase.isBusy else { return }
+        phase = .succeeded(detail)
+        scheduleReadyReset()
     }
 
     // MARK: Held transcripts
@@ -398,7 +489,7 @@ final class MacAppModel: ObservableObject {
             stopPendingWatcher()
             return
         }
-        let ready = heldTranscripts.filter { $0.target.holdsFocus }
+        let ready = heldTranscripts.filter { $0.target.canDeliverOnReturn }
         guard !ready.isEmpty else { return }
 
         // Everything spoken for this field, in the order it was spoken, as one
@@ -408,16 +499,10 @@ final class MacAppModel: ObservableObject {
         guard let target = ready.first?.target else { return }
 
         let readyIdentifiers = Set(ready.map(\.id))
-        var delivered = target.insertWithoutFocusing(text)
-        if !delivered {
-            // The captured field holds focus, so a plain paste lands in exactly
-            // the right place even when the element refuses a direct write.
-            guard pasteController.insertAtCurrentFocus(text) != .copiedNeedsAccessibility else { return }
-            delivered = false
-        }
+        guard pasteController.pasteAtCurrentFocus(text) != .copiedNeedsAccessibility else { return }
         heldTranscripts.removeAll { readyIdentifiers.contains($0.id) }
         if heldTranscripts.isEmpty { stopPendingWatcher() }
-        phase = .succeeded(delivered ? "Inserted where you left off" : "Pasted where you left off")
+        phase = .succeeded("Pasted where you left off")
         scheduleReadyReset()
     }
 
@@ -427,14 +512,14 @@ final class MacAppModel: ObservableObject {
     func releaseHeldTranscripts() {
         guard !heldTranscripts.isEmpty else { return }
         let text = heldTranscripts.map(\.text).joined(separator: " ")
-        let result = pasteController.insertAtCurrentFocus(text)
+        let result = pasteController.pasteAtCurrentFocus(text)
         guard result != .copiedNeedsAccessibility else {
             phase = .failed("Enable Accessibility for SpeakPaste to insert held text.")
             return
         }
         heldTranscripts.removeAll()
         stopPendingWatcher()
-        phase = .succeeded(result == .inserted ? "Inserted here" : "Pasted here")
+        phase = .succeeded("Pasted here")
         scheduleReadyReset()
     }
 
@@ -504,15 +589,16 @@ final class MacAppModel: ObservableObject {
         // AVFoundation finalized the file before the stream died, so the words
         // already spoken are recoverable instead of lost.
         let interruption = diagnosticMessage(for: error)
-        phase = .transcribing
-        Task {
-            await transcribeAndDeliver(
-                audioURL: salvagedAudioURL,
-                deviceName: deviceName,
-                recordingDuration: recordingDuration,
-                interruption: interruption
-            )
-        }
+        let target = deliveryTarget
+        deliveryTarget = nil
+        phase = .ready
+        startTranscription(
+            audioURL: salvagedAudioURL,
+            target: target,
+            deviceName: deviceName,
+            recordingDuration: recordingDuration,
+            interruption: interruption
+        )
     }
 
     private func startMeter() {
