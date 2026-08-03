@@ -78,7 +78,16 @@ Two failure modes proven on device on 2026-08-03, both surfacing as
   session must be mixable: `.playAndRecord` with `.duckOthers` records while
   other audio ducks instead of fighting it.
 
-### 5. Back Tap lists shortcuts, not App Shortcuts
+### 5. A backgrounded app cannot write the pasteboard
+
+Proven on device 2026-08-03 by instrumentation, after theory said both yes
+and no: `UIPasteboard.general.string =` from the intent-driven background
+process silently no-ops — `changeCount` does not move. Every completed
+background session logged `clipboardLanded: false`. The write still works
+foregrounded, so it stays for in-app dictation, but background delivery has
+exactly one door: the keyboard.
+
+### 6. Back Tap lists shortcuts, not App Shortcuts
 
 `AppShortcutsProvider` entries appear in the Shortcuts app and to Siri, but the
 Back Tap picker only offers shortcuts that exist in the user's library. A
@@ -95,7 +104,7 @@ shortcuts sign --mode anyone --input Toggle.shortcut --output Toggle-signed.shor
 The action identifier is `<app-bundle-id>.<IntentStructName>`, e.g.
 `com.pedro.SpeakPaste.ToggleDictationIntent`.
 
-### 6. Foreground continuation is not the recording path
+### 7. Foreground continuation is not the recording path
 
 Throwing `needsToContinueInForegroundError()` from the Back Tap path trapped
 inside AppIntents (`EXC_BREAKPOINT`, Swift assertion, no frames outside the
@@ -103,12 +112,12 @@ framework) and killed the app on the second tap. The supported path declares a
 background `AudioRecordingIntent`, starts its Live Activity, and never requests
 foreground continuation.
 
-### 7. Intents must not narrate
+### 8. Intents must not narrate
 
 `ProvidesDialog` results surface a banner on every trigger. A dictation trigger
 should be invisible; haptics already confirm state.
 
-### 8. A keyboard extension cannot identify its host app
+### 9. A keyboard extension cannot identify its host app
 
 On iOS 26.5 every strategy returned nil in Notes: the scene-identity probe
 yields an opaque UUID, `_FBSScene` is unavailable, the legacy selector returns
@@ -119,7 +128,7 @@ The host **process identifier** is available. Resolving its executable path
 through `libproc` and reading the enclosing `.app` bundle's `Info.plist` is
 authoritative and works where the rest do not.
 
-### 9. `UISystemNavigationAction` destination `0` is not a destination
+### 10. `UISystemNavigationAction` destination `0` is not a destination
 
 A launch originating in a keyboard extension has no previous *application*
 scene, so SpringBoard's primary destination resolves to the Home Screen — while
@@ -141,7 +150,8 @@ Back Tap
             └─ DictationEngine
                  ├─ capture ──> ElevenLabs Scribe
                  └─ App Group ──> keyboard inserts at cursor
-                              └─> clipboard as universal fallback
+                              └─> History tab as the manual fallback
+                                  (pasteboard writes only work foregrounded)
 ```
 
 Two rules follow from the constraints:
@@ -154,51 +164,57 @@ Two rules follow from the constraints:
   no reliable knowledge of its host, so it should never start a dictation or
   try to navigate anywhere.
 
-### Delivery: the two real flows
+### Delivery: the keyboard, on the system's clock
 
 Only the currently active keyboard extension can type into another app's text
 field — no background process, intent, shortcut, or accessibility API can, and
-nothing can synthesize a paste into another app either. So the last inch into
-the text field has exactly two doors: the user's finger pastes, or the active
-keyboard inserts. Every flow below is a different way of paying that toll.
+nothing can synthesize a paste into another app either.
 
-**Flow A — Back Tap + paste (being tested in the real world, 2026-08-03):**
+Clipboard-paste was field-tested as the delivery mode on 2026-08-03 and died
+twice over, independently:
+
+- **Mechanically:** background pasteboard writes silently no-op (constraint
+  5). The transcript never reached the clipboard at all.
+- **As UX, even if the write had worked:** paste is *user-timed* delivery.
+  The user absorbs the 2–3 s Scribe round trip on every dictation — hold
+  attention, wait for the completion haptic, only then dare to paste.
+  Keyboard insertion is *system-timed*: the wait disappears into the UI, and
+  only system-timed delivery can ever become progressive (streaming text into
+  the field mid-dictation).
+
+**The UX this settles on (the superwhisper pattern):**
 
 1. Double-tap the back of the phone. Recording starts, wherever you are.
-2. Talk. Your app keeps the screen; Apple's keyboard stays your keyboard.
-3. Double-tap again. The transcript lands on the clipboard.
-4. Single-tap the cursor and hit Paste in the edit-menu callout. No long
-   press needed — a plain tap at the cursor offers Paste since iOS 16.
+2. Talk. Your app keeps the screen the whole time.
+3. Double-tap again, and globe-flip to the SpeakPaste keyboard right away —
+   no waiting for transcription. The queued transcript inserts itself at the
+   cursor the moment Scribe returns.
+4. The flip amortizes: SpeakPaste is now the last-used keyboard, so
+   consecutive dictations insert with zero flips.
 
-Invocation is zero-touch from anywhere; delivery costs one tap plus the
-callout. The flow depends on the background clipboard write landing reliably,
-which is still unverified on this phone.
+Why Back Tap and not a button in the keyboard (Wispr Flow's shipping flow,
+documented from the 2026-08-02 19:04 recording: globe-flip, tap its dictate
+button, a per-new-app confirmation bounce through their app, then stranded in
+their keyboard): a keyboard button is gated behind UI state you must assemble
+first — text field focused, that keyboard active. Back Tap has no
+preconditions; it is the iPhone's global hotkey, the same reason the macOS
+flow works. Back Tap's jank is setup-time and amortizes to zero; button-flow
+jank is paid on every dictation. On this codebase the button flow is also the
+deprecated round trip of constraint 10, which the 2026-08-02 23:15 recording
+shows dumping to the Home Screen.
 
-**Flow B — the keyboard-button round trip (Wispr Flow's shipping flow,
-documented from the 2026-08-02 19:04 screen recording):**
+Double-tap-to-stop cannot re-trigger itself: the engine ignores gestures
+while a session is starting, stopping, or transcribing, and the 2–3 s
+transcription window blankets any accidental double-fire. The residual risk
+is Back Tap false positives (pocket, set-down) — visible via the Live
+Activity; auto-cancel on sustained silence is the countermeasure if it ever
+bites in practice.
 
-1. Globe-flip to the dictation keyboard.
-2. Tap its dictate button. The first time in each app, iOS bounces to the
-   dictation app and asks for confirmation before returning.
-3. Talk, with a "Listening" panel in the keyboard area; tap done.
-4. Text inserts at the cursor automatically — and you are now stranded in
-   the dictation keyboard until you flip back.
-
-Rejected as SpeakPaste's default: invocation costs two to three touches plus
-a per-new-app confirmation, the exit costs another flip, and on this codebase
-it is the deprecated keyboard-initiated round trip (constraint 9) that the
-2026-08-02 23:15 recording shows dumping to the Home Screen.
-
-**The queue variant, free with flow A:** completed transcripts wait in the App
-Group store and auto-insert the moment the SpeakPaste keyboard comes on
-screen, so "Back Tap → talk → Back Tap → one globe flip" delivers without a
-paste whenever that feels cheaper.
-
-**The endgame:** if the SpeakPaste keyboard ever becomes livable enough to be
-the daily keyboard (exact Apple layout, English + Spanish, credible
-autocorrect), flow A's paste step simply disappears — invocation is already
-right. Keyboard quality is the only thing standing between flow A and zero
-friction, which is why it is core scope rather than a demo shell.
+**The endgame:** once the SpeakPaste keyboard is livable enough to be the
+daily keyboard (exact Apple layout metrics, English + Spanish, credible
+autocorrect), the flip in step 3 disappears and the flow collapses into the
+MacBook experience — double-tap, talk, double-tap, text appears. Keyboard
+livability is the critical path, not polish; it is the only wall left.
 
 ## Status
 
@@ -218,15 +234,24 @@ Verified on device (2026-08-03, `dictation-sessions.jsonl`):
 - The complete `AudioRecordingIntent` + Live Activity path cold-starts capture
   on this phone while backgrounded, through Scribe to a delivered transcript.
   Constraint 4 is why the first tap used to fail: the activation retry and the
-  mixable session are the fixes.
+  mixable session are the fixes. With both in place, the afternoon sessions
+  activated the microphone on the first attempt, no retry consumed.
+- Background pasteboard writes do not land (constraint 5): every completed
+  background session logged `clipboardLanded: false`.
+- An intent output of `ReturnsValue<String?>` compiles but serializes into
+  `Metadata.appintents/extract.actionsdata` as an unresolvable output type
+  (`typeIdentifier: 0`), and Shortcuts then fails the entire action with
+  "could not be found". Non-optional outputs register fine. Check the
+  actions database before installing (see below).
 
 Unverified:
 
-- First-tap reliability of the retry + mixable-session build across cold
-  launches, and behavior while music is playing (it should duck, record, and
-  come back).
-- Whether the background clipboard write lands reliably; flow A's paste step
-  depends on it. The keyboard auto-insert path does not touch the clipboard.
+- The delivery half of the settled UX: flip to the SpeakPaste keyboard after
+  the stop tap and watch the queued transcript insert itself (the session's
+  phase should end as `inserted`, not `completed`). Every session so far
+  ended under Apple's keyboard, so the queue insert has not run on device.
+- First-tap reliability across cold launches over multiple days, and
+  behavior while music is playing (it should duck, record, and come back).
 
 Deprecated but still present:
 
@@ -253,6 +278,16 @@ done
 - Crash reports: `--domain-type systemCrashLogs`
 
 `devicectl` renders timestamps in **local** time.
+
+Before installing a build that touched any intent, confirm every action
+survived metadata extraction — a schema the compiler accepts can still be
+one Shortcuts cannot resolve:
+
+```sh
+plutil -convert json -o - \
+  <Products>/SpeakPaste.app/Metadata.appintents/extract.actionsdata \
+  | python3 -c "import json,sys; print(list(json.load(sys.stdin)['actions']))"
+```
 
 Install with `./scripts/install-iphone.sh`; see the header of that script for
 why a plain `xcodebuild -scheme` invocation does not work on this Mac.
