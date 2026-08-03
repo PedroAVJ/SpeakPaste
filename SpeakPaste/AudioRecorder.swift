@@ -36,32 +36,26 @@ final class AudioRecorder: ObservableObject {
         }
     }
 
-    /// - Parameter configuresSession: false when a keep-alive already owns an
-    ///   active session. Reconfiguring it would tear down the very thing that
-    ///   makes a background start legal.
-    func start(configuresSession: Bool = true) throws -> URL {
+    func start() throws -> URL {
         let session = AVAudioSession.sharedInstance()
-        if configuresSession {
-            do {
-                // This app only captures speech. `spokenAudio` is a playback
-                // mode, and `duckOthers` is not valid with the record-only
-                // category; that invalid combination returns OSStatus -50 on
-                // the iPhone.
-                try session.setCategory(.record, mode: .measurement, options: [])
-            } catch {
-                throw AudioRecorderError.configurationFailed(
-                    stage: "configuration",
-                    underlying: error
-                )
-            }
-            do {
-                try session.setActive(true)
-            } catch {
-                throw AudioRecorderError.configurationFailed(
-                    stage: "activation",
-                    underlying: error
-                )
-            }
+        do {
+            // `AudioRecordingIntent` plus its required Live Activity authorizes
+            // this user-invoked background capture. Keep the recording category
+            // honest instead of holding a fake resident playback session.
+            try session.setCategory(.record, mode: .measurement, options: [])
+        } catch {
+            throw AudioRecorderError.configurationFailed(
+                stage: "configuration",
+                underlying: error
+            )
+        }
+        do {
+            try session.setActive(true)
+        } catch {
+            throw AudioRecorderError.configurationFailed(
+                stage: "activation",
+                underlying: error
+            )
         }
 
         let directory = FileManager.default.temporaryDirectory

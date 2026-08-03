@@ -21,9 +21,9 @@ One gesture, no context switch:
 
 The gesture is Back Tap because Pedro's iPhone 15 has no Action Button. The
 reference for "this is achievable" is superwhisper: on his phone it dictates
-without switching apps while backgrounded, and only opens when it has been
-force quit. That single observation is what proves the design is possible —
-see [Constraint 2](#2-a-recording-session-cannot-be-started-cold-from-the-background).
+without switching apps while backgrounded. Apple's recording-intent contract
+confirms that this is a supported system experience when its Live Activity is
+kept alive for the whole capture.
 
 ### What "friction" means here
 
@@ -40,28 +40,25 @@ architecture: because the keyboard cannot record, SpeakPaste had to foreground
 itself mid-dictation, and everything brittle in that path existed only to undo
 the app switch it forced.
 
-### 2. A recording session cannot be started cold from the background
+### 2. Generic background work cannot cold-start the microphone
 
-Proven on device. An App Intent with `openAppWhenRun = false` ran correctly in
-the background and died at `AVAudioSession.setActive(true)` with
-`Session activation failed`.
+Proven on device. A plain background App Intent died at
+`AVAudioSession.setActive(true)`. The screenshot's decimal `560557684` is
+`AVAudioSessionErrorCodeCannotInterruptOthers` (`!int`): a nonmixable session
+tried to activate while the app was backgrounded.
 
-Apple is explicit that an audio recording cannot be started from scratch by an
-intent while the app is inactive. Only the call-management frameworks —
-CallKit, LiveCommunicationKit, PushToTalk — may open the microphone from a cold
-background launch.
+This does not rule out Apple's purpose-built recording-intent path. A
+user-invoked `AudioRecordingIntent` tells the system that the background work is
+recording, while `LiveActivityIntent` permits its required indicator to start
+without opening the app. Generic background launches, timers, notifications,
+and Bluetooth wakeups do not receive that treatment.
 
-The restriction is on **activating** a session cold, not on recording in the
-background. An app that already has a live session never crosses that line.
-This is exactly why superwhisper works while backgrounded and has to open after
-a force quit.
+### 3. `AudioRecordingIntent` requires a Live Activity
 
-### 3. `AudioRecordingIntent` does not grant a cold start
-
-The protocol exists (`AppIntents`, iOS 18+) and is the correct one to adopt,
-but it governs a session that was **already started in the foreground** — it is
-what lets a Live Activity pause and resume a recording. Adopting it does not
-lift Constraint 2.
+Apple's contract is explicit: the intent must start a Live Activity when capture
+begins and keep it active for the whole recording. If it does not, iOS stops the
+recording. The activity needs a WidgetKit extension and
+`NSSupportsLiveActivities`; adopting the protocol alone is incomplete.
 
 ### 4. Back Tap lists shortcuts, not App Shortcuts
 
@@ -80,12 +77,13 @@ shortcuts sign --mode anyone --input Toggle.shortcut --output Toggle-signed.shor
 The action identifier is `<app-bundle-id>.<IntentStructName>`, e.g.
 `com.pedro.SpeakPaste.ToggleDictationIntent`.
 
-### 5. `ForegroundContinuableIntent` crashes this flow
+### 5. Foreground continuation is not the recording path
 
 Throwing `needsToContinueInForegroundError()` from the Back Tap path trapped
 inside AppIntents (`EXC_BREAKPOINT`, Swift assertion, no frames outside the
-framework) and killed the app on the second tap. It is also, by definition, the
-app switch this design exists to remove. Do not reintroduce it.
+framework) and killed the app on the second tap. The supported path declares a
+background `AudioRecordingIntent`, starts its Live Activity, and never requests
+foreground continuation.
 
 ### 6. Intents must not narrate
 
@@ -120,8 +118,9 @@ going to the Home Screen.
 ```
 Back Tap
   └─ wrapper Shortcut
-       └─ ToggleDictationIntent   (openAppWhenRun = false, AudioRecordingIntent)
-            └─ DictationEngine    (resident, session already active)
+       └─ ToggleDictationIntent   (AudioRecordingIntent + LiveActivityIntent)
+            ├─ Live Activity      (visible for the full recording)
+            └─ DictationEngine
                  ├─ capture ──> ElevenLabs Scribe
                  └─ App Group ──> keyboard inserts at cursor
                               └─> clipboard as universal fallback
@@ -129,13 +128,10 @@ Back Tap
 
 Two rules follow from the constraints:
 
-- **The app stays resident.** Arming holds an active audio session and loops
-  inaudible silence so iOS leaves the app running. Arming must happen on
-  `didFinishLaunching`, not only on scene activation — an intent launch has no
-  scene attached. Arming prefers a `.playback` category, which keeps the
-  microphone and its indicator free while idle, and escalates to
-  `.playAndRecord` only if playback-only refuses to take input from the
-  background.
+- **The Live Activity brackets capture.** It starts before the audio session is
+  activated, stays active while recording, changes to transcribing after stop,
+  and ends on completion, failure, or cancellation. The app does not loop fake
+  silent audio to keep itself resident.
 - **The keyboard is an inserter, never an initiator.** It has no microphone and
   no reliable knowledge of its host, so it should never start a dictation or
   try to navigate anywhere.
@@ -154,25 +150,19 @@ Only a keyboard can insert at the cursor. So either:
 
 Built and on the device:
 
-- `ToggleDictationIntent` / `Start` / `Stop` / `Cancel`, conforming to
-  `AudioRecordingIntent`
+- `ToggleDictationIntent` / `Start` / `Stop` / `Cancel`, using the recording and
+  Live Activity intent contracts
 - `DictationEngine` — session ownership independent of any scene, heartbeat,
   background task across transcription
-- `BackgroundAudioKeepAlive` — resident session with mode escalation
+- Lock Screen and Dynamic Island Live Activity
 - Signed wrapper shortcut
 - Keyboard insertion at the cursor via the App Group
 - Dark mode following the host appearance
 
-Not built:
-
-- **Live Activity.** Needs its own widget extension target. Worth doing once
-  background start is confirmed — it also gives a stop control in the Dynamic
-  Island as an alternative to the second tap.
-
 Unverified:
 
-- Whether background capture succeeds now that arming runs on launch. This is
-  the single open question the whole design rests on.
+- Whether the complete `AudioRecordingIntent` + Live Activity path cold-starts
+  capture on this phone. This is the direct-phone test requested after install.
 
 Deprecated but still present:
 
@@ -187,14 +177,13 @@ mirrors state into its own container. Device-only failures are inspectable:
 
 ```sh
 DEVICE=96439FB7-AC71-570E-A40B-2624711B3E84
-for f in keepalive-state.json last-dictation-session.json dictation-sessions.jsonl; do
+for f in last-dictation-session.json dictation-sessions.jsonl; do
   xcrun devicectl device copy from --device "$DEVICE" \
     --domain-type appDataContainer --domain-identifier com.pedro.SpeakPaste \
     --source "Documents/$f" --destination .
 done
 ```
 
-- `keepalive-state.json` — whether arming succeeded, in which mode, and why not
 - `dictation-sessions.jsonl` — bounded session history; survives the reset that
   overwrites the latest snapshot exactly when its failure diagnostics matter
 - Crash reports: `--domain-type systemCrashLogs`

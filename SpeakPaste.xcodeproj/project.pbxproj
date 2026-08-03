@@ -15,7 +15,6 @@
 		A10000000000000000000006 /* HistoryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000006 /* HistoryStore.swift */; };
 		A10000000000000000000090 /* DictationEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000090 /* DictationEngine.swift */; };
 		A10000000000000000000091 /* DictationIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000091 /* DictationIntents.swift */; };
-		A10000000000000000000092 /* BackgroundAudioKeepAlive.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000092 /* BackgroundAudioKeepAlive.swift */; };
 		A10000000000000000000007 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000007 /* AppModel.swift */; };
 		A10000000000000000000008 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000008 /* ContentView.swift */; };
 		A10000000000000000000009 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000009 /* SettingsView.swift */; };
@@ -47,6 +46,11 @@
 		D1000000000000000000000B /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000005 /* KeychainStore.swift */; };
 		D1000000000000000000000C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000B /* Assets.xcassets */; };
 		D1000000000000000000000D /* MacStatusHUD.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000009 /* MacStatusHUD.swift */; };
+		E10000000000000000000001 /* DictationActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000001 /* DictationActivityAttributes.swift */; };
+		E10000000000000000000002 /* DictationLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000002 /* DictationLiveActivity.swift */; };
+		E10000000000000000000003 /* DictationActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000001 /* DictationActivityAttributes.swift */; };
+		E10000000000000000000004 /* SpeakPasteLiveActivityWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000003 /* SpeakPasteLiveActivityWidget.swift */; };
+		E10000000000000000000005 /* SpeakPasteLiveActivity.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = E20000000000000000000005 /* SpeakPasteLiveActivity.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -64,6 +68,13 @@
 			remoteGlobalIDString = C70000000000000000000001;
 			remoteInfo = SpeakPasteKeyboard;
 		};
+		E30000000000000000000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A90000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = E70000000000000000000001;
+			remoteInfo = SpeakPasteLiveActivity;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -72,7 +83,7 @@
 			buildActionMask = 2147483647;
 			dstPath = "";
 			dstSubfolderSpec = 13;
-			files = (C10000000000000000000008 /* SpeakPasteKeyboard.appex in Embed App Extensions */, );
+			files = (C10000000000000000000008 /* SpeakPasteKeyboard.appex in Embed App Extensions */, E10000000000000000000005 /* SpeakPasteLiveActivity.appex in Embed App Extensions */, );
 			name = "Embed App Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -87,7 +98,6 @@
 		A20000000000000000000006 /* HistoryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryStore.swift; sourceTree = "<group>"; };
 		A20000000000000000000090 /* DictationEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictationEngine.swift; sourceTree = "<group>"; };
 		A20000000000000000000091 /* DictationIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictationIntents.swift; sourceTree = "<group>"; };
-		A20000000000000000000092 /* BackgroundAudioKeepAlive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundAudioKeepAlive.swift; sourceTree = "<group>"; };
 		A20000000000000000000007 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		A20000000000000000000008 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		A20000000000000000000009 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
@@ -121,6 +131,11 @@
 		D20000000000000000000008 /* MacReliabilityStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacReliabilityStore.swift; sourceTree = "<group>"; };
 		D20000000000000000000009 /* MacStatusHUD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacStatusHUD.swift; sourceTree = "<group>"; };
 		D2000000000000000000000F /* SpeakPaste.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SpeakPaste.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		E20000000000000000000001 /* DictationActivityAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictationActivityAttributes.swift; sourceTree = "<group>"; };
+		E20000000000000000000002 /* DictationLiveActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictationLiveActivity.swift; sourceTree = "<group>"; };
+		E20000000000000000000003 /* SpeakPasteLiveActivityWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeakPasteLiveActivityWidget.swift; sourceTree = "<group>"; };
+		E20000000000000000000004 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		E20000000000000000000005 /* SpeakPasteLiveActivity.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = SpeakPasteLiveActivity.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -128,6 +143,7 @@
 		A40000000000000000000002 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (A1000000000000000000000E /* XCTest.framework in Frameworks */, ); runOnlyForDeploymentPostprocessing = 0; };
 		C40000000000000000000002 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = ( ); runOnlyForDeploymentPostprocessing = 0; };
 		D40000000000000000000001 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = ( ); runOnlyForDeploymentPostprocessing = 0; };
+		E40000000000000000000001 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = ( ); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -138,6 +154,7 @@
 				D50000000000000000000001 /* SpeakPasteMac */,
 				A50000000000000000000003 /* SpeakPasteTests */,
 				C50000000000000000000001 /* SpeakPasteKeyboard */,
+				E50000000000000000000001 /* SpeakPasteLiveActivity */,
 				A50000000000000000000004 /* Frameworks */,
 				A50000000000000000000005 /* Products */,
 			);
@@ -152,7 +169,8 @@
 				A2000000000000000000000A /* HistoryView.swift */,
 				A20000000000000000000090 /* DictationEngine.swift */,
 				A20000000000000000000091 /* DictationIntents.swift */,
-				A20000000000000000000092 /* BackgroundAudioKeepAlive.swift */,
+				E20000000000000000000001 /* DictationActivityAttributes.swift */,
+				E20000000000000000000002 /* DictationLiveActivity.swift */,
 				A20000000000000000000007 /* AppModel.swift */,
 				C20000000000000000000001 /* SharedDictation.swift */,
 				C20000000000000000000002 /* HostAppSwitcher.swift */,
@@ -175,7 +193,7 @@
 			sourceTree = "<group>";
 		};
 		A50000000000000000000004 /* Frameworks */ = {isa = PBXGroup; children = (A20000000000000000000010, ); name = Frameworks; sourceTree = "<group>"; };
-		A50000000000000000000005 /* Products */ = {isa = PBXGroup; children = (A2000000000000000000000F, D2000000000000000000000F, C2000000000000000000000A, A20000000000000000000011, ); name = Products; sourceTree = "<group>"; };
+		A50000000000000000000005 /* Products */ = {isa = PBXGroup; children = (A2000000000000000000000F, D2000000000000000000000F, C2000000000000000000000A, E20000000000000000000005, A20000000000000000000011, ); name = Products; sourceTree = "<group>"; };
 		C50000000000000000000001 /* SpeakPasteKeyboard */ = {
 			isa = PBXGroup;
 			children = (
@@ -206,6 +224,15 @@
 			path = SpeakPasteMac;
 			sourceTree = "<group>";
 		};
+		E50000000000000000000001 /* SpeakPasteLiveActivity */ = {
+			isa = PBXGroup;
+			children = (
+				E20000000000000000000003 /* SpeakPasteLiveActivityWidget.swift */,
+				E20000000000000000000004 /* Info.plist */,
+			);
+			path = SpeakPasteLiveActivity;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -214,7 +241,7 @@
 			buildConfigurationList = A80000000000000000000002;
 			buildPhases = (A60000000000000000000001, A40000000000000000000001, A60000000000000000000002, C40000000000000000000001, );
 			buildRules = ( );
-			dependencies = (C30000000000000000000002, );
+			dependencies = (C30000000000000000000002, E30000000000000000000002, );
 			name = SpeakPaste;
 			productName = SpeakPaste;
 			productReference = A2000000000000000000000F;
@@ -253,6 +280,17 @@
 			productReference = D2000000000000000000000F /* SpeakPaste.app */;
 			productType = "com.apple.product-type.application";
 		};
+		E70000000000000000000001 /* SpeakPasteLiveActivity */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E80000000000000000000001;
+			buildPhases = (E60000000000000000000001, E40000000000000000000001, E60000000000000000000002, );
+			buildRules = ( );
+			dependencies = ( );
+			name = SpeakPasteLiveActivity;
+			productName = SpeakPasteLiveActivity;
+			productReference = E20000000000000000000005 /* SpeakPasteLiveActivity.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -278,6 +316,7 @@
 						};
 					};
 					D70000000000000000000001 = {CreatedOnToolsVersion = 26.0; };
+					E70000000000000000000001 = {CreatedOnToolsVersion = 26.0; };
 				};
 			};
 			buildConfigurationList = A80000000000000000000001;
@@ -290,30 +329,33 @@
 			productRefGroup = A50000000000000000000005;
 			projectDirPath = "";
 			projectRoot = "";
-			targets = (A70000000000000000000001, D70000000000000000000001, C70000000000000000000001, A70000000000000000000002, );
+			targets = (A70000000000000000000001, D70000000000000000000001, C70000000000000000000001, E70000000000000000000001, A70000000000000000000002, );
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		A60000000000000000000002 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A1000000000000000000000B, ); runOnlyForDeploymentPostprocessing = 0; };
 		D60000000000000000000002 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (D1000000000000000000000C, ); runOnlyForDeploymentPostprocessing = 0; };
+		E60000000000000000000002 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = ( ); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		A60000000000000000000001 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
-			files = (A10000000000000000000001, A10000000000000000000002, A10000000000000000000003, A10000000000000000000004, A10000000000000000000005, A10000000000000000000006, A10000000000000000000007, A10000000000000000000092, A10000000000000000000090, A10000000000000000000091, C10000000000000000000001, C10000000000000000000002, A10000000000000000000008, A10000000000000000000009, A1000000000000000000000A, );
+			files = (A10000000000000000000001, A10000000000000000000002, A10000000000000000000003, A10000000000000000000004, A10000000000000000000005, A10000000000000000000006, A10000000000000000000007, E10000000000000000000001, E10000000000000000000002, A10000000000000000000090, A10000000000000000000091, C10000000000000000000001, C10000000000000000000002, A10000000000000000000008, A10000000000000000000009, A1000000000000000000000A, );
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		A60000000000000000000003 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A1000000000000000000000C, A1000000000000000000000D, C1000000000000000000000B, ); runOnlyForDeploymentPostprocessing = 0; };
 		C60000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (C10000000000000000000003, C10000000000000000000004, C10000000000000000000005, C10000000000000000000006, C10000000000000000000007, ); runOnlyForDeploymentPostprocessing = 0; };
 		D60000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (D10000000000000000000001, D10000000000000000000002, D10000000000000000000003, D10000000000000000000004, D10000000000000000000005, D10000000000000000000006, D10000000000000000000007, D1000000000000000000000E, D10000000000000000000008, D10000000000000000000009, D1000000000000000000000A, D1000000000000000000000B, D1000000000000000000000D, ); runOnlyForDeploymentPostprocessing = 0; };
+		E60000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (E10000000000000000000003, E10000000000000000000004, ); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
 		A30000000000000000000002 /* PBXTargetDependency */ = {isa = PBXTargetDependency; target = A70000000000000000000001 /* SpeakPaste */; targetProxy = A30000000000000000000001 /* PBXContainerItemProxy */; };
 		C30000000000000000000002 /* PBXTargetDependency */ = {isa = PBXTargetDependency; target = C70000000000000000000001 /* SpeakPasteKeyboard */; targetProxy = C30000000000000000000001 /* PBXContainerItemProxy */; };
+		E30000000000000000000002 /* PBXTargetDependency */ = {isa = PBXTargetDependency; target = E70000000000000000000001 /* SpeakPasteLiveActivity */; targetProxy = E30000000000000000000001 /* PBXContainerItemProxy */; };
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
@@ -327,6 +369,8 @@
 		C1000000000000000000000A /* Release */ = {isa = XCBuildConfiguration; buildSettings = {APPLICATION_EXTENSION_API_ONLY = YES; CODE_SIGN_ENTITLEMENTS = SpeakPasteKeyboard/SpeakPasteKeyboard.entitlements; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = ""; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = SpeakPasteKeyboard/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 17.0; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @executable_path/../../Frameworks"; MARKETING_VERSION = 1.0; PRODUCT_BUNDLE_IDENTIFIER = com.example.SpeakPaste.Keyboard; PRODUCT_NAME = "$(TARGET_NAME)"; SKIP_INSTALL = YES; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_VERSION = 6.0; TARGETED_DEVICE_FAMILY = 1; }; name = Release; };
 		D90000000000000000000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; ENABLE_APP_SANDBOX = NO; ENABLE_HARDENED_RUNTIME = NO; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity"; INFOPLIST_KEY_NSMicrophoneUsageDescription = "SpeakPaste records from the microphone you select so ElevenLabs can transcribe your speech."; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; MACOSX_DEPLOYMENT_TARGET = 14.0; MARKETING_VERSION = 1.0; PRODUCT_BUNDLE_IDENTIFIER = com.example.SpeakPasteMac; PRODUCT_NAME = SpeakPaste; SDKROOT = macosx; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_VERSION = 6.0; }; name = Debug; };
 		D90000000000000000000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; ENABLE_APP_SANDBOX = NO; ENABLE_HARDENED_RUNTIME = NO; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity"; INFOPLIST_KEY_NSMicrophoneUsageDescription = "SpeakPaste records from the microphone you select so ElevenLabs can transcribe your speech."; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; MACOSX_DEPLOYMENT_TARGET = 14.0; MARKETING_VERSION = 1.0; PRODUCT_BUNDLE_IDENTIFIER = com.example.SpeakPasteMac; PRODUCT_NAME = SpeakPaste; SDKROOT = macosx; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_VERSION = 6.0; }; name = Release; };
+		E90000000000000000000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {APPLICATION_EXTENSION_API_ONLY = YES; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = ""; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = SpeakPasteLiveActivity/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 17.0; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @executable_path/../../Frameworks"; MARKETING_VERSION = 1.0; PRODUCT_BUNDLE_IDENTIFIER = com.example.SpeakPaste.LiveActivity; PRODUCT_NAME = "$(TARGET_NAME)"; SKIP_INSTALL = YES; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_VERSION = 6.0; TARGETED_DEVICE_FAMILY = 1; }; name = Debug; };
+		E90000000000000000000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {APPLICATION_EXTENSION_API_ONLY = YES; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = ""; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = SpeakPasteLiveActivity/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 17.0; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @executable_path/../../Frameworks"; MARKETING_VERSION = 1.0; PRODUCT_BUNDLE_IDENTIFIER = com.example.SpeakPaste.LiveActivity; PRODUCT_NAME = "$(TARGET_NAME)"; SKIP_INSTALL = YES; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_VERSION = 6.0; TARGETED_DEVICE_FAMILY = 1; }; name = Release; };
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -335,6 +379,7 @@
 		A80000000000000000000003 = {isa = XCConfigurationList; buildConfigurations = (B10000000000000000000005, B10000000000000000000006, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 		C80000000000000000000001 = {isa = XCConfigurationList; buildConfigurations = (C10000000000000000000009, C1000000000000000000000A, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 		D80000000000000000000001 = {isa = XCConfigurationList; buildConfigurations = (D90000000000000000000001, D90000000000000000000002, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		E80000000000000000000001 = {isa = XCConfigurationList; buildConfigurations = (E90000000000000000000001, E90000000000000000000002, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 /* End XCConfigurationList section */
 	};
 	rootObject = A90000000000000000000001 /* Project object */;

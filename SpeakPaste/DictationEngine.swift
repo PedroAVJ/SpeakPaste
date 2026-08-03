@@ -15,10 +15,6 @@ final class DictationEngine {
     enum EngineError: LocalizedError {
         case missingAPIKey
         case microphoneDenied
-        /// iOS refuses to activate a recording session for an app that is not
-        /// already running one. Only the call-management frameworks (CallKit,
-        /// LiveCommunicationKit, PushToTalk) may start capture from a cold
-        /// background launch, so the intent has to continue in the foreground.
         case backgroundCaptureUnavailable
 
         var errorDescription: String? {
@@ -28,7 +24,7 @@ final class DictationEngine {
             case .microphoneDenied:
                 "Microphone access is off. Enable it for SpeakPaste in Settings."
             case .backgroundCaptureUnavailable:
-                "iOS will not start the microphone while SpeakPaste is in the background."
+                "iOS refused to start background recording. Make sure Live Activities are enabled for SpeakPaste."
             }
         }
     }
@@ -42,81 +38,11 @@ final class DictationEngine {
 
     private var sessionID: UUID?
     private var recordingURL: URL?
+    private var isStarting = false
+    private var isStopping = false
     private var heartbeatTask: Task<Void, Never>?
     private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
-    private let keepAlive = BackgroundAudioKeepAlive()
-
-    private enum KeepAliveKeys {
-        static let enabled = "keep-alive-enabled"
-        static let mode = "keep-alive-mode"
-    }
-
-    var isArmed: Bool { keepAlive.isArmed }
-
-    var keepAliveEnabled: Bool {
-        get { defaults.object(forKey: KeepAliveKeys.enabled) as? Bool ?? true }
-        set {
-            defaults.set(newValue, forKey: KeepAliveKeys.enabled)
-            if newValue {
-                arm()
-            } else {
-                keepAlive.disarm()
-            }
-        }
-    }
-
-    /// Arm from the foreground. Every later Back Tap then starts capture on a
-    /// session that is already live, which is the only way iOS permits it.
-    func arm() {
-        guard keepAliveEnabled, !isRecording else { return }
-        let stored = defaults.string(forKey: KeepAliveKeys.mode)
-            .flatMap(BackgroundAudioKeepAlive.Mode.init(rawValue:))
-        let mode = stored ?? .playbackOnly
-        var failure: String?
-        do {
-            try keepAlive.arm(mode: mode)
-        } catch {
-            failure = error.localizedDescription
-        }
-        recordKeepAliveState(mode: mode, failure: failure)
-    }
-
-    /// Arming decides whether Back Tap works at all, and it happens with no UI
-    /// on screen. Persist the outcome so it can be inspected afterwards rather
-    /// than inferred from a failed gesture.
-    private func recordKeepAliveState(
-        mode: BackgroundAudioKeepAlive.Mode,
-        failure: String?
-    ) {
-        guard
-            let directory = FileManager.default.urls(
-                for: .documentDirectory,
-                in: .userDomainMask
-            ).first
-        else {
-            return
-        }
-        let report: [String: Any] = [
-            "armed": keepAlive.isArmed,
-            "requestedMode": mode.rawValue,
-            "activeMode": keepAlive.mode?.rawValue ?? "none",
-            "applicationState": UIApplication.shared.applicationState.rawValue,
-            "failure": failure ?? "none",
-            "at": ISO8601DateFormatter().string(from: Date()),
-        ]
-        guard
-            let data = try? JSONSerialization.data(
-                withJSONObject: report,
-                options: [.prettyPrinted, .sortedKeys]
-            )
-        else {
-            return
-        }
-        try? data.write(
-            to: directory.appendingPathComponent("keepalive-state.json"),
-            options: .atomic
-        )
-    }
+    private let liveActivity = DictationLiveActivity()
 
     init(
         client: ElevenLabsClientProtocol = ElevenLabsClient(),
@@ -135,12 +61,19 @@ final class DictationEngine {
         if isRecording {
             return try await stop()
         }
+        // Ignore another gesture while startup, transcription, or teardown is
+        // already in flight. Those awaits are MainActor-reentrant, so checking
+        // only AVAudioRecorder would let a fast extra Back Tap replace the
+        // current session.
+        guard sessionID == nil, !isStarting else { return nil }
         try await start()
         return nil
     }
 
     func start() async throws {
-        guard !isRecording else { return }
+        guard sessionID == nil, !isStarting else { return }
+        isStarting = true
+        defer { isStarting = false }
 
         guard
             let key = keychain.load()?
@@ -156,8 +89,30 @@ final class DictationEngine {
         let snapshot = store.beginBackgroundSession()
         sessionID = snapshot.sessionID
         do {
-            recordingURL = try beginCapture()
+            // Apple requires the Live Activity for an AudioRecordingIntent and
+            // stops capture when it is missing. Start it before touching the
+            // audio session so this is a supported cold background launch.
+            try await liveActivity.start(
+                sessionID: snapshot.sessionID,
+                startedAt: snapshot.startedAt
+            )
         } catch {
+            store.setPhase(
+                .failed,
+                sessionID: snapshot.sessionID,
+                errorMessage: error.localizedDescription
+            )
+            sessionID = nil
+            throw error
+        }
+
+        do {
+            recordingURL = try recorder.start()
+        } catch {
+            let audioURL = recorder.stop() ?? recordingURL
+            if let audioURL { cleanUpRecording(at: audioURL) }
+            recordingURL = nil
+            await liveActivity.end(.failed)
             store.setPhase(
                 .failed,
                 sessionID: snapshot.sessionID,
@@ -174,20 +129,23 @@ final class DictationEngine {
             throw error
         }
 
-        // iOS suspends the app the moment the intent returns unless the audio
-        // session keeps it alive; the background task covers the transcription
-        // request that follows.
-        beginBackgroundExecution()
         startHeartbeat(sessionID: snapshot.sessionID)
         UINotificationFeedbackGenerator().notificationOccurred(.success)
     }
 
     @discardableResult
     func stop() async throws -> String? {
-        guard let sessionID else { return nil }
-        let audioURL = recorder.stop(deactivatesSession: !keepAlive.isArmed) ?? recordingURL
+        guard let sessionID, !isStarting, !isStopping else { return nil }
+        isStopping = true
+        defer { isStopping = false }
+        // Recording itself owns background execution through the audio session
+        // and Live Activity. Start a fresh finite task at stop so a long
+        // dictation cannot consume the transcription window before it begins.
+        beginBackgroundExecution()
+        let audioURL = recorder.stop() ?? recordingURL
         let duration = recorder.duration
         stopHeartbeat()
+        await liveActivity.update(.transcribing)
 
         guard
             let audioURL,
@@ -195,11 +153,13 @@ final class DictationEngine {
                 .trimmingCharacters(in: .whitespacesAndNewlines),
             !key.isEmpty
         else {
+            if let audioURL { cleanUpRecording(at: audioURL) }
             store.setPhase(
                 .failed,
                 sessionID: sessionID,
                 errorMessage: EngineError.missingAPIKey.localizedDescription
             )
+            await liveActivity.end(.failed)
             finish()
             throw EngineError.missingAPIKey
         }
@@ -229,49 +189,33 @@ final class DictationEngine {
             )
             UINotificationFeedbackGenerator().notificationOccurred(.success)
             cleanUpRecording(at: audioURL)
+            await liveActivity.end(.completed)
             finish()
             return result.text
         } catch {
+            cleanUpRecording(at: audioURL)
             store.setPhase(
                 .failed,
                 sessionID: sessionID,
                 errorMessage: error.localizedDescription
             )
             UINotificationFeedbackGenerator().notificationOccurred(.error)
+            await liveActivity.end(.failed)
             finish()
             throw error
         }
     }
 
-    func cancel() {
-        guard let sessionID else { return }
-        recorder.stop(deactivatesSession: !keepAlive.isArmed)
+    func cancel() async {
+        guard let sessionID, !isStarting, !isStopping else { return }
+        isStopping = true
+        defer { isStopping = false }
+        recorder.stop()
         stopHeartbeat()
         store.setPhase(.cancelled, sessionID: sessionID)
         if let recordingURL { cleanUpRecording(at: recordingURL) }
+        await liveActivity.end(.cancelled)
         finish()
-    }
-
-    /// Prefer recording on the keep-alive's live session. If the lighter
-    /// playback-only mode will not take input from the background, escalate to
-    /// holding input outright and remember that for next time.
-    private func beginCapture() throws -> URL {
-        guard keepAlive.isArmed else {
-            return try recorder.start()
-        }
-
-        do {
-            try keepAlive.prepareForRecording()
-            return try recorder.start(configuresSession: false)
-        } catch {
-            guard keepAlive.mode == .playbackOnly else { throw error }
-            try keepAlive.arm(mode: .holdsInput)
-            defaults.set(
-                BackgroundAudioKeepAlive.Mode.holdsInput.rawValue,
-                forKey: KeepAliveKeys.mode
-            )
-            return try recorder.start(configuresSession: false)
-        }
     }
 
     private var language: TranscriptionLanguage {
@@ -305,11 +249,6 @@ final class DictationEngine {
         recordingURL = nil
         stopHeartbeat()
         endBackgroundExecution()
-        // Recording ended, so re-establish the resident session that lets the
-        // next Back Tap start without a cold activation.
-        if keepAliveEnabled, let mode = keepAlive.mode {
-            try? keepAlive.arm(mode: mode)
-        }
     }
 
     private func cleanUpRecording(at url: URL) {

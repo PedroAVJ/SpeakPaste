@@ -124,4 +124,15 @@ final class SharedDictationStoreTests: XCTestCase {
             "com.apple.mobilenotes"
         )
     }
+
+    func testLiveActivityStateRoundTripsBetweenAppAndWidget() throws {
+        let state = SpeakPasteActivityAttributes.ContentState(phase: .recording)
+        let encoded = try JSONEncoder().encode(state)
+        let decoded = try JSONDecoder().decode(
+            SpeakPasteActivityAttributes.ContentState.self,
+            from: encoded
+        )
+
+        XCTAssertEqual(decoded, state)
+    }
 }

@@ -20,10 +20,6 @@ final class SpeakPasteAppDelegate: UIResponder, UIApplicationDelegate {
 #if DEBUG
         seedAPIKeyFromEnvironmentIfNeeded()
 #endif
-        // An intent launches the app with no scene attached, so scene
-        // activation is not enough. Arm here too, or a background launch never
-        // gets the live session it needs and every Back Tap starts cold.
-        DictationEngine.shared.arm()
         return true
     }
 
@@ -155,8 +151,6 @@ final class SpeakPasteSceneDelegate: UIResponder, UIWindowSceneDelegate {
 
     func sceneDidBecomeActive(_ scene: UIScene) {
         HostAppSwitcher.probeSystemNavigationAction(route: "scene-did-become-active")
-        // Arming has to happen from the foreground; that is the whole point.
-        DictationEngine.shared.arm()
         model.handleActivation()
     }
 

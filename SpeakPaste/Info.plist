@@ -35,6 +35,8 @@
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>SpeakPaste records your voice so ElevenLabs can turn it into text.</string>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UIApplicationSceneManifest</key>

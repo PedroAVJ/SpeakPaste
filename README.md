@@ -4,7 +4,7 @@ SpeakPaste is a native Swift dictation project for macOS and iPhone. It sends
 recorded audio directly to [ElevenLabs Scribe](https://elevenlabs.io/speech-to-text),
 then lets you edit, copy, or paste the transcript.
 
-The Xcode project contains three targets:
+The Xcode project contains four product targets:
 
 - **SpeakPasteMac** — the primary macOS target, producing the **SpeakPaste** app
   with Continuity Microphone support, a global dictation shortcut, and automatic
@@ -13,6 +13,8 @@ The Xcode project contains three targets:
   local transcript history.
 - **SpeakPasteKeyboard** — an experimental custom keyboard that hands microphone
   capture to the containing app and inserts the result at the cursor.
+- **SpeakPasteLiveActivity** — the Lock Screen and Dynamic Island recording
+  indicator required by iOS for background `AudioRecordingIntent` capture.
 
 ## Requirements
 
@@ -170,6 +172,9 @@ For iPhone:
 
 - Both app and keyboard sources pass focused Swift 6 type-checking against the
   installed iOS SDK.
+- Back Tap recording uses the paired `AudioRecordingIntent` and
+  `LiveActivityIntent` contracts, with a WidgetKit Live Activity spanning the
+  full capture.
 - Launch, host-resolution, audio-stage, shared-session, and return-route
   diagnostics are persisted in the App Group.
 - Recorded regressions cover a failed containing-app launch, the invalid

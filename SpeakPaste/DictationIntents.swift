@@ -7,12 +7,17 @@ import AppIntents
 /// These intents return no dialog on purpose. A dictation trigger should be
 /// invisible; a banner announcing "Listening" every time is worse than
 /// silence, and haptics already confirm the state.
-struct ToggleDictationIntent: AppIntent, AudioRecordingIntent {
+struct ToggleDictationIntent: AppIntent, AudioRecordingIntent, LiveActivityIntent {
     static let title: LocalizedStringResource = "Toggle Dictation"
     static let description = IntentDescription(
         "Start dictating, or finish and insert the transcript, without leaving the app you are in."
     )
     static let openAppWhenRun = false
+
+    @available(iOS 26.0, *)
+    static var supportedModes: IntentModes {
+        .background
+    }
 
     @MainActor
     func perform() async throws -> some IntentResult {
@@ -21,12 +26,17 @@ struct ToggleDictationIntent: AppIntent, AudioRecordingIntent {
     }
 }
 
-struct StartDictationIntent: AppIntent, AudioRecordingIntent {
+struct StartDictationIntent: AppIntent, AudioRecordingIntent, LiveActivityIntent {
     static let title: LocalizedStringResource = "Start Dictation"
     static let description = IntentDescription(
         "Begin recording in the background without switching apps."
     )
     static let openAppWhenRun = false
+
+    @available(iOS 26.0, *)
+    static var supportedModes: IntentModes {
+        .background
+    }
 
     @MainActor
     func perform() async throws -> some IntentResult {
@@ -35,12 +45,15 @@ struct StartDictationIntent: AppIntent, AudioRecordingIntent {
     }
 }
 
-struct StopDictationIntent: AppIntent, AudioRecordingIntent {
+struct StopDictationIntent: AppIntent, AudioRecordingIntent, LiveActivityIntent {
     static let title: LocalizedStringResource = "Stop Dictation"
     static let description = IntentDescription(
         "Finish recording, transcribe, and hand the text to the keyboard and clipboard."
     )
     static let openAppWhenRun = false
+
+    @available(iOS 26.0, *)
+    static var supportedModes: IntentModes { .background }
 
     @MainActor
     func perform() async throws -> some IntentResult {
@@ -49,14 +62,17 @@ struct StopDictationIntent: AppIntent, AudioRecordingIntent {
     }
 }
 
-struct CancelDictationIntent: AppIntent {
+struct CancelDictationIntent: AppIntent, LiveActivityIntent {
     static let title: LocalizedStringResource = "Cancel Dictation"
     static let description = IntentDescription("Discard the dictation in progress.")
     static let openAppWhenRun = false
 
+    @available(iOS 26.0, *)
+    static var supportedModes: IntentModes { .background }
+
     @MainActor
     func perform() async throws -> some IntentResult {
-        DictationEngine.shared.cancel()
+        await DictationEngine.shared.cancel()
         return .result()
     }
 }

@@ -5,7 +5,8 @@
 # needs identifiers owned by a developer account, so this script applies local
 # values to the tracked files, builds, and restores the originals afterward --
 # including on failure. Put your own values in scripts/local-identity.env,
-# which is untracked:
+# which is untracked. When running from a Git worktree, point
+# SPEAKPASTE_IDENTITY_ENV at the main checkout's copy:
 #
 #   APP_BUNDLE_ID=com.you.SpeakPaste
 #   APP_GROUP=group.com.you.SpeakPaste
@@ -27,13 +28,17 @@ set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 
-env_file="scripts/local-identity.env"
+env_file=${SPEAKPASTE_IDENTITY_ENV:-scripts/local-identity.env}
 if [ ! -f "$env_file" ]; then
     echo "error: $env_file not found. See the header of $0 for its contents." >&2
     exit 1
 fi
+case "$env_file" in
+    /*) ;;
+    *) env_file="./$env_file" ;;
+esac
 # shellcheck disable=SC1090
-. "./$env_file"
+. "$env_file"
 
 for required in APP_BUNDLE_ID APP_GROUP DEVELOPMENT_TEAM SIGNING_IDENTITY DEVICE; do
     eval "value=\${$required:-}"
