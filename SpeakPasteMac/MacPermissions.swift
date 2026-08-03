@@ -52,11 +52,21 @@ final class MacPermissionsModel: ObservableObject {
     private static let pollInterval: TimeInterval = 2
 
     private var onChange: (@MainActor () -> Void)?
-    private var accessibilityObserver: NSObjectProtocol?
-    private var pollTimer: Timer?
+    /// The observer and timer live in a Sendable box so `deinit`, which is
+    /// nonisolated, can still shut them down. A main-actor stored property of
+    /// non-Sendable type is unreachable from there under Swift 6.
+    private let watchers = MacPermissionWatchers()
 
     init() {
         granted = Self.currentGrants()
+    }
+
+    /// The run loop and the notification center own the timer and the observer,
+    /// not this object, so neither stops on its own when the model goes away —
+    /// the poll would keep waking the CPU every two seconds for a model nobody
+    /// holds. Callers that can are still expected to call `stopObserving()`.
+    deinit {
+        watchers.stop()
     }
 
     /// Re-reads every grant. Deliberately silent: this runs on window
@@ -79,7 +89,7 @@ final class MacPermissionsModel: ObservableObject {
         stopObserving()
         self.onChange = onChange
 
-        accessibilityObserver = DistributedNotificationCenter.default().addObserver(
+        let observer = DistributedNotificationCenter.default().addObserver(
             forName: Self.accessibilityChangedNotification,
             object: nil,
             queue: .main
@@ -89,20 +99,21 @@ final class MacPermissionsModel: ObservableObject {
             }
         }
 
-        pollTimer = Timer.scheduledTimer(withTimeInterval: Self.pollInterval, repeats: true) { [weak self] _ in
+        // Added in `.common` rather than scheduled: the default run-loop mode
+        // stalls while a menu is tracking, and this app's primary surface is a
+        // MenuBarExtra. A user who opens the menu to see why the shortcut is
+        // dead is exactly the user whose poll must keep running.
+        let timer = Timer(timeInterval: Self.pollInterval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.syncGrants()
             }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        watchers.store(observer: observer, timer: timer)
     }
 
     func stopObserving() {
-        if let accessibilityObserver {
-            DistributedNotificationCenter.default().removeObserver(accessibilityObserver)
-        }
-        accessibilityObserver = nil
-        pollTimer?.invalidate()
-        pollTimer = nil
+        watchers.stop()
         onChange = nil
     }
 
@@ -203,5 +214,37 @@ private extension MacPermission {
         case .inputMonitoring: "Privacy_ListenEvent"
         case .launchAtLogin: nil
         }
+    }
+}
+
+
+/// Holds the run-loop timer and the distributed-notification observer that
+/// outlive their owner unless something explicitly tears them down. Marked
+/// `@unchecked Sendable` behind a lock so a nonisolated `deinit` can reach it.
+private final class MacPermissionWatchers: @unchecked Sendable {
+    private let lock = NSLock()
+    private var observer: NSObjectProtocol?
+    private var timer: Timer?
+
+    func store(observer: NSObjectProtocol, timer: Timer) {
+        stop()
+        lock.lock()
+        self.observer = observer
+        self.timer = timer
+        lock.unlock()
+    }
+
+    func stop() {
+        lock.lock()
+        let staleObserver = observer
+        let staleTimer = timer
+        observer = nil
+        timer = nil
+        lock.unlock()
+
+        if let staleObserver {
+            DistributedNotificationCenter.default().removeObserver(staleObserver)
+        }
+        staleTimer?.invalidate()
     }
 }

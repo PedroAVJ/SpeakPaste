@@ -48,9 +48,11 @@ final class MacHistoryStore: ObservableObject {
     @Published var retentionDays: Int {
         didSet {
             guard retentionDays != oldValue else { return }
-            guard retentionDays >= 0 else {
+            // Assigning here does not re-enter `didSet`, so the clamped value
+            // has to be written through on this pass or a negative setting
+            // would show as "Forever" while the old number stayed on disk.
+            if retentionDays < 0 {
                 retentionDays = 0
-                return
             }
             defaults.set(retentionDays, forKey: Self.retentionDaysKey)
             sweepExpired()
@@ -92,6 +94,10 @@ final class MacHistoryStore: ObservableObject {
         if records.count > Self.maximumRecords {
             records.removeLast(records.count - Self.maximumRecords)
         }
+        // SpeakPaste is meant to stay running for weeks, so sweeping only at
+        // launch would quietly stretch a 30-day promise to however long the Mac
+        // has been awake.
+        dropExpired()
         persist()
     }
 
@@ -132,14 +138,22 @@ final class MacHistoryStore: ObservableObject {
     /// Day arithmetic goes through Calendar rather than a multiple of 86 400 so
     /// that a daylight-saving shift cannot expire a record an hour early.
     private func sweepExpired() {
-        guard retentionDays > 0 else { return }
+        guard dropExpired() else { return }
+        persist()
+    }
+
+    /// Returns whether anything was dropped, so a caller that is about to write
+    /// anyway does not write twice.
+    @discardableResult
+    private func dropExpired() -> Bool {
+        guard retentionDays > 0 else { return false }
         guard let cutoff = Calendar.current.date(byAdding: .day, value: -retentionDays, to: Date()) else {
-            return
+            return false
         }
         let kept = records.filter { $0.createdAt >= cutoff }
-        guard kept.count != records.count else { return }
+        guard kept.count != records.count else { return false }
         records = kept
-        persist()
+        return true
     }
 
     /// Best effort by design, matching the reliability log: a history write
