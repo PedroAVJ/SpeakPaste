@@ -1,7 +1,29 @@
+import AppKit
 import SwiftUI
+
+/// Refuses a second copy of the app.
+///
+/// Two instances means two event taps on the same bare right-Command tap, so
+/// every press starts two recordings and two capture sessions contend for the
+/// same iPhone. The loser fails with a Continuity error — which reads exactly
+/// like the microphone bug this app exists to fix.
+@MainActor
+final class MacSingleInstanceGuard: NSObject, NSApplicationDelegate {
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        guard let identifier = Bundle.main.bundleIdentifier else { return }
+        let mine = ProcessInfo.processInfo.processIdentifier
+        let others = NSRunningApplication
+            .runningApplications(withBundleIdentifier: identifier)
+            .filter { $0.processIdentifier != mine }
+        guard let existing = others.first else { return }
+        existing.activate(options: [])
+        NSApp.terminate(nil)
+    }
+}
 
 @main
 struct SpeakPasteMacApp: App {
+    @NSApplicationDelegateAdaptor(MacSingleInstanceGuard.self) private var singleInstance
     @StateObject private var model: MacAppModel
     @StateObject private var statusHUD: MacStatusHUDController
 

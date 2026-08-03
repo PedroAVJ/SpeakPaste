@@ -5,8 +5,26 @@ protocol ElevenLabsClientProtocol: Sendable {
         audioURL: URL,
         apiKey: String,
         language: TranscriptionLanguage,
-        cleanSpeech: Bool
+        cleanSpeech: Bool,
+        keyterms: [String]
     ) async throws -> TranscriptionResult
+}
+
+extension ElevenLabsClientProtocol {
+    func transcribe(
+        audioURL: URL,
+        apiKey: String,
+        language: TranscriptionLanguage,
+        cleanSpeech: Bool
+    ) async throws -> TranscriptionResult {
+        try await transcribe(
+            audioURL: audioURL,
+            apiKey: apiKey,
+            language: language,
+            cleanSpeech: cleanSpeech,
+            keyterms: []
+        )
+    }
 }
 
 enum ElevenLabsClientError: LocalizedError, Equatable {
@@ -42,7 +60,8 @@ final class ElevenLabsClient: ElevenLabsClientProtocol, @unchecked Sendable {
         audioURL: URL,
         apiKey: String,
         language: TranscriptionLanguage,
-        cleanSpeech: Bool
+        cleanSpeech: Bool,
+        keyterms: [String]
     ) async throws -> TranscriptionResult {
         let boundary = "SpeakPaste-\(UUID().uuidString)"
         let audioData = try Data(contentsOf: audioURL)
@@ -58,7 +77,8 @@ final class ElevenLabsClient: ElevenLabsClientProtocol, @unchecked Sendable {
             filename: audioURL.lastPathComponent,
             audioContentType: Self.audioContentType(for: audioURL),
             languageCode: language.apiCode,
-            cleanSpeech: cleanSpeech
+            cleanSpeech: cleanSpeech,
+            keyterms: keyterms
         )
 
         let (data, response) = try await session.data(for: request)
@@ -92,7 +112,8 @@ final class ElevenLabsClient: ElevenLabsClientProtocol, @unchecked Sendable {
         filename: String,
         audioContentType: String,
         languageCode: String?,
-        cleanSpeech: Bool
+        cleanSpeech: Bool,
+        keyterms: [String]
     ) -> Data {
         var body = Data()
 
@@ -111,6 +132,13 @@ final class ElevenLabsClient: ElevenLabsClientProtocol, @unchecked Sendable {
         appendField(name: "tag_audio_events", value: "false")
         if let languageCode {
             appendField(name: "language_code", value: languageCode)
+        }
+        // Repeated `keyterms[]` fields bias recognition toward the user's own
+        // names and jargon. This is the only lever the batch endpoint gives for
+        // vocabulary, and it is context-aware rather than a forced substitution,
+        // so an always-on list does not distort ordinary speech.
+        for keyterm in keyterms {
+            appendField(name: "keyterms[]", value: keyterm)
         }
 
         append("--\(boundary)\r\n")
