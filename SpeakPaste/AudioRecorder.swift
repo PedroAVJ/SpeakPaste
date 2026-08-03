@@ -36,13 +36,23 @@ final class AudioRecorder: ObservableObject {
         }
     }
 
-    func start() throws -> URL {
+    func start() async throws -> URL {
         let session = AVAudioSession.sharedInstance()
         do {
             // `AudioRecordingIntent` plus its required Live Activity authorizes
-            // this user-invoked background capture. Keep the recording category
-            // honest instead of holding a fake resident playback session.
-            try session.setCategory(.record, mode: .measurement, options: [])
+            // this user-invoked background capture.
+            //
+            // The session must be mixable. A non-mixable one needs permission
+            // to interrupt whoever currently holds audio, and iOS refuses that
+            // for background activations ('!int', OSStatus 560557684) — a bare
+            // `.record` session failed on device the moment a screen recording
+            // was running. Ducking keeps other audio alive and quiet instead
+            // of fighting it.
+            try session.setCategory(
+                .playAndRecord,
+                mode: .default,
+                options: [.duckOthers, .allowBluetoothHFP]
+            )
         } catch {
             throw AudioRecorderError.configurationFailed(
                 stage: "configuration",
@@ -50,7 +60,7 @@ final class AudioRecorder: ObservableObject {
             )
         }
         do {
-            try session.setActive(true)
+            try await activate(session)
         } catch {
             throw AudioRecorderError.configurationFailed(
                 stage: "activation",
@@ -96,6 +106,29 @@ final class AudioRecorder: ObservableObject {
         level = 0
         startMetering()
         return url
+    }
+
+    /// On a cold background launch, the recording grant tied to the Live
+    /// Activity the intent just started propagates asynchronously, so an
+    /// immediate `setActive` can lose the race. On device the same tap
+    /// repeated 2–3 seconds later succeeded every time, so retry inside one
+    /// gesture instead of making the user tap twice.
+    private func activate(_ session: AVAudioSession) async throws {
+        let delays: [Duration] = [
+            .milliseconds(250), .milliseconds(500), .milliseconds(750),
+            .seconds(1), .milliseconds(1500),
+        ]
+        var attempt = 0
+        while true {
+            do {
+                try session.setActive(true)
+                return
+            } catch {
+                guard attempt < delays.count else { throw error }
+                try? await Task.sleep(for: delays[attempt])
+                attempt += 1
+            }
+        }
     }
 
     @discardableResult

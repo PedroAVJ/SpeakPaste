@@ -24,7 +24,7 @@ final class DictationEngine {
             case .microphoneDenied:
                 "Microphone access is off. Enable it for SpeakPaste in Settings."
             case .backgroundCaptureUnavailable:
-                "iOS refused to start background recording. Make sure Live Activities are enabled for SpeakPaste."
+                "iOS refused the microphone in the background. If another app or a screen recording is using audio, stop it and tap again."
             }
         }
     }
@@ -107,7 +107,7 @@ final class DictationEngine {
         }
 
         do {
-            recordingURL = try recorder.start()
+            recordingURL = try await recorder.start()
         } catch {
             let audioURL = recorder.stop() ?? recordingURL
             if let audioURL { cleanUpRecording(at: audioURL) }

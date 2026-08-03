@@ -60,7 +60,25 @@ begins and keep it active for the whole recording. If it does not, iOS stops the
 recording. The activity needs a WidgetKit extension and
 `NSSupportsLiveActivities`; adopting the protocol alone is incomplete.
 
-### 4. Back Tap lists shortcuts, not App Shortcuts
+### 4. Background activation is granted, but not instantly, and never by force
+
+Two failure modes proven on device on 2026-08-03, both surfacing as
+`AVAudioSession.setActive` errors under a correctly started Live Activity:
+
+- **The grant races the activation.** On a cold background launch the
+  recording grant tied to the intent's Live Activity propagates
+  asynchronously. An immediate `setActive` failed with "Session activation
+  failed"; the same tap repeated 2–3 seconds later succeeded end-to-end,
+  every time. The fix is retrying activation with short delays inside one
+  gesture, not asking the user to tap twice.
+- **A non-mixable session cannot interrupt from the background.** With a
+  screen recording running, a bare `.record` session failed with `!int`
+  (OSStatus 560557684) on every attempt, retries included. Background
+  sessions are never allowed to interrupt whoever holds audio, so the
+  session must be mixable: `.playAndRecord` with `.duckOthers` records while
+  other audio ducks instead of fighting it.
+
+### 5. Back Tap lists shortcuts, not App Shortcuts
 
 `AppShortcutsProvider` entries appear in the Shortcuts app and to Siri, but the
 Back Tap picker only offers shortcuts that exist in the user's library. A
@@ -77,7 +95,7 @@ shortcuts sign --mode anyone --input Toggle.shortcut --output Toggle-signed.shor
 The action identifier is `<app-bundle-id>.<IntentStructName>`, e.g.
 `com.pedro.SpeakPaste.ToggleDictationIntent`.
 
-### 5. Foreground continuation is not the recording path
+### 6. Foreground continuation is not the recording path
 
 Throwing `needsToContinueInForegroundError()` from the Back Tap path trapped
 inside AppIntents (`EXC_BREAKPOINT`, Swift assertion, no frames outside the
@@ -85,12 +103,12 @@ framework) and killed the app on the second tap. The supported path declares a
 background `AudioRecordingIntent`, starts its Live Activity, and never requests
 foreground continuation.
 
-### 6. Intents must not narrate
+### 7. Intents must not narrate
 
 `ProvidesDialog` results surface a banner on every trigger. A dictation trigger
 should be invisible; haptics already confirm state.
 
-### 7. A keyboard extension cannot identify its host app
+### 8. A keyboard extension cannot identify its host app
 
 On iOS 26.5 every strategy returned nil in Notes: the scene-identity probe
 yields an opaque UUID, `_FBSScene` is unavailable, the legacy selector returns
@@ -101,7 +119,7 @@ The host **process identifier** is available. Resolving its executable path
 through `libproc` and reading the enclosing `.app` bundle's `Info.plist` is
 authoritative and works where the rest do not.
 
-### 8. `UISystemNavigationAction` destination `0` is not a destination
+### 9. `UISystemNavigationAction` destination `0` is not a destination
 
 A launch originating in a keyboard extension has no previous *application*
 scene, so SpringBoard's primary destination resolves to the Home Screen — while
@@ -159,10 +177,18 @@ Built and on the device:
 - Keyboard insertion at the cursor via the App Group
 - Dark mode following the host appearance
 
+Verified on device (2026-08-03, `dictation-sessions.jsonl`):
+
+- The complete `AudioRecordingIntent` + Live Activity path cold-starts capture
+  on this phone while backgrounded, through Scribe to a delivered transcript.
+  Constraint 4 is why the first tap used to fail: the activation retry and the
+  mixable session are the fixes.
+
 Unverified:
 
-- Whether the complete `AudioRecordingIntent` + Live Activity path cold-starts
-  capture on this phone. This is the direct-phone test requested after install.
+- First-tap reliability of the retry + mixable-session build across cold
+  launches, and behavior while music is playing (it should duck, record, and
+  come back).
 
 Deprecated but still present:
 

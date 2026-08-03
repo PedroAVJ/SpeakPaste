@@ -215,7 +215,7 @@ final class AppModel: ObservableObject {
 
         deleteActiveRecording()
         do {
-            activeRecordingURL = try recorder.start()
+            activeRecordingURL = try await recorder.start()
             phase = .recording
             if let sharedSnapshot {
                 activeSharedSessionID = sharedSnapshot.sessionID
