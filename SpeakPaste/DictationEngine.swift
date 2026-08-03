@@ -71,7 +71,51 @@ final class DictationEngine {
         guard keepAliveEnabled, !isRecording else { return }
         let stored = defaults.string(forKey: KeepAliveKeys.mode)
             .flatMap(BackgroundAudioKeepAlive.Mode.init(rawValue:))
-        try? keepAlive.arm(mode: stored ?? .playbackOnly)
+        let mode = stored ?? .playbackOnly
+        var failure: String?
+        do {
+            try keepAlive.arm(mode: mode)
+        } catch {
+            failure = error.localizedDescription
+        }
+        recordKeepAliveState(mode: mode, failure: failure)
+    }
+
+    /// Arming decides whether Back Tap works at all, and it happens with no UI
+    /// on screen. Persist the outcome so it can be inspected afterwards rather
+    /// than inferred from a failed gesture.
+    private func recordKeepAliveState(
+        mode: BackgroundAudioKeepAlive.Mode,
+        failure: String?
+    ) {
+        guard
+            let directory = FileManager.default.urls(
+                for: .documentDirectory,
+                in: .userDomainMask
+            ).first
+        else {
+            return
+        }
+        let report: [String: Any] = [
+            "armed": keepAlive.isArmed,
+            "requestedMode": mode.rawValue,
+            "activeMode": keepAlive.mode?.rawValue ?? "none",
+            "applicationState": UIApplication.shared.applicationState.rawValue,
+            "failure": failure ?? "none",
+            "at": ISO8601DateFormatter().string(from: Date()),
+        ]
+        guard
+            let data = try? JSONSerialization.data(
+                withJSONObject: report,
+                options: [.prettyPrinted, .sortedKeys]
+            )
+        else {
+            return
+        }
+        try? data.write(
+            to: directory.appendingPathComponent("keepalive-state.json"),
+            options: .atomic
+        )
     }
 
     init(

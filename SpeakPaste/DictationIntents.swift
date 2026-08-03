@@ -3,7 +3,11 @@ import AppIntents
 /// Bind this to Back Tap (Settings → Accessibility → Touch → Back Tap) through
 /// a one-action Shortcut. `openAppWhenRun` stays false so the app you are
 /// typing in never loses the screen.
-struct ToggleDictationIntent: AppIntent, AudioRecordingIntent, ForegroundContinuableIntent {
+///
+/// These intents return no dialog on purpose. A dictation trigger should be
+/// invisible; a banner announcing "Listening" every time is worse than
+/// silence, and haptics already confirm the state.
+struct ToggleDictationIntent: AppIntent, AudioRecordingIntent {
     static let title: LocalizedStringResource = "Toggle Dictation"
     static let description = IntentDescription(
         "Start dictating, or finish and insert the transcript, without leaving the app you are in."
@@ -11,23 +15,9 @@ struct ToggleDictationIntent: AppIntent, AudioRecordingIntent, ForegroundContinu
     static let openAppWhenRun = false
 
     @MainActor
-    func perform() async throws -> some IntentResult & ProvidesDialog {
-        do {
-            if let transcript = try await DictationEngine.shared.toggle() {
-                return .result(
-                    dialog: IntentDialog("Inserted \(transcript.count) characters")
-                )
-            }
-            return .result(dialog: IntentDialog("Listening"))
-        } catch DictationEngine.EngineError.backgroundCaptureUnavailable {
-            // Stopping never needs the foreground, so only a cold start lands
-            // here. Hand off rather than failing silently.
-            throw needsToContinueInForegroundError(
-                IntentDialog("Opening SpeakPaste to start the microphone")
-            ) {
-                try await DictationEngine.shared.start()
-            }
-        }
+    func perform() async throws -> some IntentResult {
+        try await DictationEngine.shared.toggle()
+        return .result()
     }
 }
 
@@ -53,9 +43,9 @@ struct StopDictationIntent: AppIntent, AudioRecordingIntent {
     static let openAppWhenRun = false
 
     @MainActor
-    func perform() async throws -> some IntentResult & ReturnsValue<String> {
-        let transcript = try await DictationEngine.shared.stop() ?? ""
-        return .result(value: transcript)
+    func perform() async throws -> some IntentResult {
+        _ = try await DictationEngine.shared.stop()
+        return .result()
     }
 }
 

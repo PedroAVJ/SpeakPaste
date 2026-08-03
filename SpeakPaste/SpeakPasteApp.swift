@@ -20,6 +20,10 @@ final class SpeakPasteAppDelegate: UIResponder, UIApplicationDelegate {
 #if DEBUG
         seedAPIKeyFromEnvironmentIfNeeded()
 #endif
+        // An intent launches the app with no scene attached, so scene
+        // activation is not enough. Arm here too, or a background launch never
+        // gets the live session it needs and every Back Tap starts cold.
+        DictationEngine.shared.arm()
         return true
     }
 
