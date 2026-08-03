@@ -34,7 +34,6 @@ struct SpeakPasteMacApp: App {
         case .connecting: "antenna.radiowaves.left.and.right"
         case .recording: "record.circle.fill"
         case .finalizing: "stop.circle"
-        case .transcribing: "waveform.badge.magnifyingglass"
         case .succeeded: "checkmark.circle.fill"
         case .failed: "exclamationmark.triangle.fill"
         case .ready: "waveform"
@@ -46,7 +45,6 @@ struct SpeakPasteMacApp: App {
         case .connecting: "SpeakPaste, connecting to microphone"
         case .recording: "SpeakPaste, recording. Speak now. Press Command to stop and transcribe"
         case .finalizing: "SpeakPaste, recording stopped. Releasing microphone"
-        case .transcribing: "SpeakPaste, transcribing"
         case .succeeded: "SpeakPaste, done"
         case .failed: "SpeakPaste, error"
         case .ready: "SpeakPaste, ready. Press Command to start"
@@ -69,9 +67,6 @@ struct MacMenuBarView: View {
         case .finalizing:
             Button("RELEASING MICROPHONE…") {}
                 .disabled(true)
-        case .transcribing:
-            Button("TRANSCRIBING WITH ELEVENLABS…") {}
-                .disabled(true)
         case let .succeeded(detail):
             Button("DONE — \(detail)") {}
                 .disabled(true)
@@ -80,8 +75,17 @@ struct MacMenuBarView: View {
             Button("Try Again  \(model.hotKeyLabel)") { model.toggleRecording() }
                 .disabled(model.selectedDevice == nil)
         case .ready:
+            if model.inFlightCount > 0 {
+                Text("TRANSCRIBING \(model.inFlightCount) — microphone is free")
+            }
             Button("Start Recording  \(model.hotKeyLabel)") { model.toggleRecording() }
                 .disabled(model.selectedDevice == nil)
+        }
+
+        if !model.heldTranscripts.isEmpty {
+            Button("Paste \(model.heldTranscripts.count) Held Here  \(model.releaseHotKeyLabel)") {
+                model.releaseHeldTranscripts()
+            }
         }
 
         Button("Copy Last Transcript") { model.copyTranscript() }

@@ -75,7 +75,6 @@ struct MacContentView: View {
         case .connecting: .yellow
         case .recording: .red
         case .finalizing: .orange
-        case .transcribing: .blue
         case .succeeded: .green
         case .failed: .orange
         case .ready: model.hasAPIKey && model.selectedDevice != nil ? .green : .orange
@@ -87,10 +86,10 @@ struct MacContentView: View {
         case .connecting: return "Connecting…"
         case .recording: return "Speak now"
         case .finalizing: return "Releasing microphone"
-        case .transcribing: return "Transcribing"
         case .succeeded: return "Done"
         case .failed: return "Failed"
         case .ready:
+            if model.inFlightCount > 0 { return "Transcribing \(model.inFlightCount)" }
             if model.selectedDevice == nil { return "No microphone" }
             if !model.hasAPIKey { return "Needs API key" }
             return "Ready"
@@ -334,8 +333,7 @@ struct MacContentView: View {
         }
         .buttonStyle(.plain)
         .disabled(
-            model.phase == .transcribing
-                || model.phase == .finalizing
+            model.phase == .finalizing
                 || model.phase == .connecting
                 || model.selectedDevice == nil
         )
@@ -360,7 +358,7 @@ struct MacContentView: View {
             .padding(.horizontal, 24)
             .padding(.vertical, 11)
             .background(Capsule().fill(Color.red))
-        case .connecting, .finalizing, .transcribing:
+        case .connecting, .finalizing:
             ZStack {
                 Circle()
                     .fill(Color.red.opacity(0.06))
@@ -400,7 +398,6 @@ struct MacContentView: View {
         case .connecting: "Connecting to microphone"
         case .recording: "Stop and transcribe"
         case .finalizing: "Releasing microphone"
-        case .transcribing: "Transcribing"
         case .succeeded: "Done"
         case .ready, .failed: "Start recording"
         }
@@ -411,7 +408,6 @@ struct MacContentView: View {
         case .connecting: "Please wait. The first connection can take several seconds."
         case .recording: "Stops recording and sends the audio to ElevenLabs for transcription."
         case .finalizing: "The recording has stopped and SpeakPaste is releasing the microphone."
-        case .transcribing: "Please wait while the transcript is prepared."
         case .succeeded: "The transcript is ready."
         case .ready, .failed: "Starts recording from the selected microphone."
         }
@@ -431,9 +427,11 @@ struct MacContentView: View {
                 : "WAIT — do not speak yet. Connecting to the microphone."
         case .recording: "SPEAK NOW — press \(model.hotKeyLabel) to stop and transcribe."
         case .finalizing: "RECORDING STOPPED — releasing the iPhone microphone…"
-        case .transcribing: "MICROPHONE RELEASED — waiting for ElevenLabs…"
         case .succeeded: "DONE — transcript delivered."
-        case .ready, .failed: "Click record or press \(model.hotKeyLabel) from any app."
+        case .ready, .failed:
+            model.inFlightCount > 0
+                ? "MIC IS FREE — \(model.inFlightCount) transcribing. Start the next one whenever you want."
+                : "Click record or press \(model.hotKeyLabel) from any app."
         }
     }
 

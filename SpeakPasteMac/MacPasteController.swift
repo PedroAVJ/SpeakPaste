@@ -3,9 +3,7 @@ import AppKit
 import Foundation
 
 enum MacPasteResult: Equatable {
-    /// Written straight into the captured element. No focus change, no keystroke.
-    case inserted
-    /// The target held focus but refused a direct write, so ⌘V was sent to it.
+    /// ⌘V was delivered to the destination.
     case pasted
     /// On the clipboard only, because there was no target to deliver to.
     case copied
@@ -15,7 +13,6 @@ enum MacPasteResult: Equatable {
 
     var detail: String {
         switch self {
-        case .inserted: "Transcribed and inserted"
         case .pasted: "Transcribed and pasted"
         case .copied: "Transcribed and copied"
         case .copiedNeedsAccessibility: "Copied; enable Accessibility for automatic paste"
@@ -26,9 +23,15 @@ enum MacPasteResult: Equatable {
 
 @MainActor
 struct MacPasteController {
-    /// Delivers text to `target` only when that exact element still holds
-    /// focus. Anything else returns `.held`: guessing at a destination is how
-    /// dictation ends up in the wrong channel or a password field.
+    /// Delivers text to `target` when it is safe to do so, and returns `.held`
+    /// otherwise. Guessing at a destination is how dictation ends up in the
+    /// wrong channel or a password field, so the caller holds instead.
+    ///
+    /// Delivery is always a real ⌘V. Writing `kAXSelectedText` directly looked
+    /// tidier — no activation, no synthetic keystroke — but toolkits that own
+    /// their text state ignore it: a React-controlled composer never sees the
+    /// input event, so the write reports success and the text never lands. The
+    /// paste pipeline is the one path every app honors.
     func deliver(
         _ text: String,
         to target: MacDeliveryTarget?,
@@ -40,24 +43,28 @@ struct MacPasteController {
         guard AXIsProcessTrusted() else { return .copiedNeedsAccessibility }
         guard target.canDeliverImmediately else { return .held }
 
-        if target.insertWithoutFocusing(text) { return .inserted }
+        return await activateAndPaste(target) ? .pasted : .copied
+    }
+
+    /// Pastes wherever the caret is right now, for the explicit "give it to me
+    /// here" shortcut. The user is asking for this destination, so no target
+    /// match is required and nothing is activated.
+    func pasteAtCurrentFocus(_ text: String) -> MacPasteResult {
+        copyToPasteboard(text)
+        guard AXIsProcessTrusted() else { return .copiedNeedsAccessibility }
         return sendPasteKeystroke() ? .pasted : .copied
     }
 
-    /// Inserts wherever the caret is right now, for the explicit "give it to me
-    /// here" shortcut. The user is asking for this destination, so no target
-    /// match is required.
-    func insertAtCurrentFocus(_ text: String) -> MacPasteResult {
-        copyToPasteboard(text)
-
-        guard AXIsProcessTrusted() else { return .copiedNeedsAccessibility }
-        if
-            let element = MacAccessibility.systemFocusedElement(),
-            MacAccessibility.insert(text, into: element)
-        {
-            return .inserted
+    /// Brings the destination forward before pasting. The delay lets the
+    /// activation settle; posting ⌘V into an app that is still coming forward
+    /// drops the keystroke.
+    private func activateAndPaste(_ target: MacDeliveryTarget) async -> Bool {
+        if let application = NSRunningApplication(processIdentifier: target.processIdentifier),
+           !application.isActive {
+            application.activate(options: [])
+            try? await Task.sleep(for: .milliseconds(140))
         }
-        return sendPasteKeystroke() ? .pasted : .copied
+        return sendPasteKeystroke()
     }
 
     func copyToPasteboard(_ text: String) {

@@ -55,12 +55,13 @@ final class MacStatusHUDController: ObservableObject {
             return
         }
 
-        // A held transcript keeps the HUD up on its own, so the panel has to
-        // react to both. Otherwise "your text is waiting" would vanish the
-        // moment the phase settled back to ready.
-        phaseCancellable = Publishers.Merge(
+        // A held transcript or an in-flight transcription keeps the HUD up on
+        // its own, so the panel reacts to all three. Otherwise "your text is
+        // waiting" would vanish the moment the phase settled back to ready.
+        phaseCancellable = Publishers.Merge3(
             model.$phase.map { _ in () },
-            model.$heldTranscripts.map { _ in () }
+            model.$heldTranscripts.map { _ in () },
+            model.$inFlightCount.map { _ in () }
         )
         .sink { [weak self] _ in
             // Combine publishers are not actor-annotated. Hop explicitly to
@@ -79,19 +80,19 @@ final class MacStatusHUDController: ObservableObject {
 
         switch phase {
         case .ready:
-            if model.heldTranscripts.isEmpty {
+            if model.heldTranscripts.isEmpty, model.inFlightCount == 0 {
                 panel.orderOut(nil)
             } else {
                 showPanel()
             }
-        case .connecting, .recording, .finalizing, .transcribing:
+        case .connecting, .recording, .finalizing:
             showPanel()
         case .succeeded:
             showPanel()
-            if model.heldTranscripts.isEmpty { scheduleHide(after: 1.5) }
+            if model.heldTranscripts.isEmpty, model.inFlightCount == 0 { scheduleHide(after: 1.5) }
         case .failed:
             showPanel()
-            if model.heldTranscripts.isEmpty { scheduleHide(after: 4) }
+            if model.heldTranscripts.isEmpty, model.inFlightCount == 0 { scheduleHide(after: 4) }
         }
     }
 
@@ -212,7 +213,19 @@ private struct MacStatusHUDView: View {
     private var displayState: MacStatusHUDDisplayState {
         switch model.phase {
         case .ready:
-            if model.heldTranscripts.isEmpty {
+            if model.heldTranscripts.isEmpty, model.inFlightCount > 0 {
+                // The microphone is already free. Say so, so the wait never
+                // reads as "you have to stand still until this finishes".
+                MacStatusHUDDisplayState(
+                    symbol: "waveform.badge.magnifyingglass",
+                    title: model.inFlightCount == 1
+                        ? "TRANSCRIBING"
+                        : "TRANSCRIBING ×\(model.inFlightCount)",
+                    detail: "Mic is free — tap \(model.hotKeyLabel) to keep going",
+                    color: .blue,
+                    showsElapsedTime: false
+                )
+            } else if model.heldTranscripts.isEmpty {
                 MacStatusHUDDisplayState(
                     symbol: "waveform",
                     title: "READY",
@@ -241,7 +254,7 @@ private struct MacStatusHUDView: View {
             MacStatusHUDDisplayState(
                 symbol: "mic.fill",
                 title: "SPEAK NOW",
-                detail: "⌘ to stop and transcribe",
+                detail: "\(model.hotKeyLabel) to stop and transcribe",
                 color: .red,
                 showsElapsedTime: true
             )
@@ -251,14 +264,6 @@ private struct MacStatusHUDView: View {
                 title: "RECORDING STOPPED",
                 detail: "Releasing microphone",
                 color: .orange,
-                showsElapsedTime: true
-            )
-        case .transcribing:
-            MacStatusHUDDisplayState(
-                symbol: "waveform.badge.magnifyingglass",
-                title: "TRANSCRIBING",
-                detail: "Waiting for ElevenLabs",
-                color: .blue,
                 showsElapsedTime: true
             )
         case let .succeeded(detail):
