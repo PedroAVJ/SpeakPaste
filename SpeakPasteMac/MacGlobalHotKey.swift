@@ -2,6 +2,22 @@ import AppKit
 @preconcurrency import ApplicationServices
 import Foundation
 
+/// Device-dependent modifier bits from IOLLEvent.h. `CGEventFlags.maskCommand`
+/// and `NSEvent.ModifierFlags.command` cannot tell the two Command keys apart,
+/// and this shortcut deliberately responds to the right one only.
+enum MacModifierSide {
+    static let leftCommand: UInt64 = 0x0000_0008
+    static let rightCommand: UInt64 = 0x0000_0010
+
+    static func rightCommandDown(_ rawFlags: UInt64) -> Bool {
+        rawFlags & rightCommand != 0
+    }
+
+    static func leftCommandDown(_ rawFlags: UInt64) -> Bool {
+        rawFlags & leftCommand != 0
+    }
+}
+
 struct CommandTapRecognizer {
     private(set) var isCommandDown = false
     private(set) var isTapCandidate = false
@@ -35,6 +51,8 @@ struct CommandTapRecognizer {
     }
 }
 
+private let macReleaseKeyCode: Int64 = 0x09 // V
+
 private func speakPasteEventTapCallback(
     _ proxy: CGEventTapProxy,
     _ type: CGEventType,
@@ -44,26 +62,34 @@ private func speakPasteEventTapCallback(
     guard let userInfo else { return Unmanaged.passUnretained(event) }
     let address = UInt(bitPattern: userInfo)
     let flags = event.flags
+    let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
     DispatchQueue.main.async {
         guard let pointer = UnsafeMutableRawPointer(bitPattern: address) else { return }
         let hotKey = Unmanaged<MacGlobalHotKey>.fromOpaque(pointer).takeUnretainedValue()
-        hotKey.handle(type: type, flags: flags)
+        hotKey.handle(type: type, rawFlags: flags.rawValue, keyCode: keyCode)
     }
     return Unmanaged.passUnretained(event)
 }
 
 @MainActor
 final class MacGlobalHotKey {
+    static let toggleLabel = "right ⌘"
+    static let releaseLabel = "⌥⌘V"
+
     private var eventTap: CFMachPort?
     private var eventTapSource: CFRunLoopSource?
     private var localMonitor: Any?
     private var activationObserver: NSObjectProtocol?
-    private var action: (() -> Void)?
+    private var toggleAction: (() -> Void)?
+    private var releaseAction: (() -> Void)?
     private var recognizer = CommandTapRecognizer()
 
-    func install(action: @escaping () -> Void) {
+    /// `toggle` starts and stops dictation on a bare right-Command tap.
+    /// `release` drops a held transcript at the current caret.
+    func install(toggle: @escaping () -> Void, release: @escaping () -> Void) {
         uninstall()
-        self.action = action
+        toggleAction = toggle
+        releaseAction = release
 
         // Superwhisper and Wispr Flow use an Accessibility-authorized CGEventTap
         // for modifier-only/global shortcuts. The event is always passed through
@@ -100,11 +126,12 @@ final class MacGlobalHotKey {
         eventTapSource = nil
         localMonitor = nil
         activationObserver = nil
-        action = nil
+        toggleAction = nil
+        releaseAction = nil
         recognizer.reset()
     }
 
-    fileprivate func handle(type: CGEventType, flags: CGEventFlags) {
+    fileprivate func handle(type: CGEventType, rawFlags: UInt64, keyCode: Int64) {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             if let eventTap {
                 CGEvent.tapEnable(tap: eventTap, enable: true)
@@ -112,6 +139,7 @@ final class MacGlobalHotKey {
             return
         }
 
+        let flags = CGEventFlags(rawValue: rawFlags)
         switch type {
         case .flagsChanged:
             let otherModifiers = flags.intersection([
@@ -122,14 +150,28 @@ final class MacGlobalHotKey {
                 .maskSecondaryFn,
             ])
             recognizeModifierChange(
-                commandDown: flags.contains(.maskCommand),
+                commandDown: MacModifierSide.rightCommandDown(rawFlags),
+                // A left Command held alongside the right one means this is a
+                // chord, not the bare tap the shortcut responds to.
                 hasOtherModifiers: !otherModifiers.isEmpty
+                    || MacModifierSide.leftCommandDown(rawFlags)
             )
-        case .keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel:
+        case .keyDown:
+            if isReleaseChord(flags: flags, keyCode: keyCode) {
+                releaseAction?()
+            }
+            recognizer.keyPressed()
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel:
             recognizer.keyPressed()
         default:
             break
         }
+    }
+
+    private func isReleaseChord(flags: CGEventFlags, keyCode: Int64) -> Bool {
+        guard keyCode == macReleaseKeyCode else { return false }
+        guard flags.contains(.maskCommand), flags.contains(.maskAlternate) else { return false }
+        return !flags.contains(.maskControl) && !flags.contains(.maskShift)
     }
 
     private func refreshMonitor() {
@@ -193,17 +235,31 @@ final class MacGlobalHotKey {
     }
 
     private func handleLocal(_ event: NSEvent) {
+        // NSEvent keeps the same device-dependent bits in the low half of
+        // `rawValue`, so the left/right test is identical to the tap path.
+        let rawFlags = UInt64(event.modifierFlags.rawValue)
         switch event.type {
         case .flagsChanged:
-            let activeModifiers = event.modifierFlags
+            let otherModifiers = event.modifierFlags
                 .intersection(.deviceIndependentFlagsMask)
-                .subtracting(.capsLock)
-            let otherModifiers = activeModifiers.subtracting(.command)
+                .subtracting([.capsLock, .command])
             recognizeModifierChange(
-                commandDown: activeModifiers.contains(.command),
+                commandDown: MacModifierSide.rightCommandDown(rawFlags),
                 hasOtherModifiers: !otherModifiers.isEmpty
+                    || MacModifierSide.leftCommandDown(rawFlags)
             )
-        case .keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel:
+        case .keyDown:
+            if
+                Int64(event.keyCode) == macReleaseKeyCode,
+                event.modifierFlags.contains(.command),
+                event.modifierFlags.contains(.option),
+                !event.modifierFlags.contains(.control),
+                !event.modifierFlags.contains(.shift)
+            {
+                releaseAction?()
+            }
+            recognizer.keyPressed()
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel:
             recognizer.keyPressed()
         default:
             break
@@ -215,7 +271,7 @@ final class MacGlobalHotKey {
             commandDown: commandDown,
             hasOtherModifiers: hasOtherModifiers
         ) {
-            action?()
+            toggleAction?()
         }
     }
 

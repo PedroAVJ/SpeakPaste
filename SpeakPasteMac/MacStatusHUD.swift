@@ -55,7 +55,14 @@ final class MacStatusHUDController: ObservableObject {
             return
         }
 
-        phaseCancellable = model.$phase.sink { [weak self] _ in
+        // A held transcript keeps the HUD up on its own, so the panel has to
+        // react to both. Otherwise "your text is waiting" would vanish the
+        // moment the phase settled back to ready.
+        phaseCancellable = Publishers.Merge(
+            model.$phase.map { _ in () },
+            model.$heldTranscripts.map { _ in () }
+        )
+        .sink { [weak self] _ in
             // Combine publishers are not actor-annotated. Hop explicitly to
             // the main actor before touching AppKit or the main-actor model.
             Task { @MainActor [weak self] in
@@ -72,15 +79,19 @@ final class MacStatusHUDController: ObservableObject {
 
         switch phase {
         case .ready:
-            panel.orderOut(nil)
+            if model.heldTranscripts.isEmpty {
+                panel.orderOut(nil)
+            } else {
+                showPanel()
+            }
         case .connecting, .recording, .finalizing, .transcribing:
             showPanel()
         case .succeeded:
             showPanel()
-            scheduleHide(after: 1.5)
+            if model.heldTranscripts.isEmpty { scheduleHide(after: 1.5) }
         case .failed:
             showPanel()
-            scheduleHide(after: 4)
+            if model.heldTranscripts.isEmpty { scheduleHide(after: 4) }
         }
     }
 
@@ -201,13 +212,23 @@ private struct MacStatusHUDView: View {
     private var displayState: MacStatusHUDDisplayState {
         switch model.phase {
         case .ready:
-            MacStatusHUDDisplayState(
-                symbol: "waveform",
-                title: "READY",
-                detail: "Press Command to start",
-                color: .secondary,
-                showsElapsedTime: false
-            )
+            if model.heldTranscripts.isEmpty {
+                MacStatusHUDDisplayState(
+                    symbol: "waveform",
+                    title: "READY",
+                    detail: "Tap \(model.hotKeyLabel) to start",
+                    color: .secondary,
+                    showsElapsedTime: false
+                )
+            } else {
+                MacStatusHUDDisplayState(
+                    symbol: "tray.full.fill",
+                    title: heldTitle,
+                    detail: "Click back into \(heldDestination), or \(model.releaseHotKeyLabel) to place it here",
+                    color: .blue,
+                    showsElapsedTime: false
+                )
+            }
         case .connecting:
             MacStatusHUDDisplayState(
                 symbol: "antenna.radiowaves.left.and.right",
@@ -257,6 +278,16 @@ private struct MacStatusHUDView: View {
                 showsElapsedTime: false
             )
         }
+    }
+
+    private var heldTitle: String {
+        model.heldTranscripts.count == 1
+            ? "TEXT WAITING"
+            : "\(model.heldTranscripts.count) WAITING"
+    }
+
+    private var heldDestination: String {
+        model.heldTranscripts.first?.target.applicationName ?? "the app you started in"
     }
 
     private func elapsedText(at date: Date) -> String {

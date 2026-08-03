@@ -3,6 +3,14 @@ import AVFoundation
 import Combine
 import Foundation
 
+/// A finished transcript waiting for its destination to regain focus.
+struct MacHeldTranscript: Identifiable {
+    let id = UUID()
+    let text: String
+    let target: MacDeliveryTarget
+    let createdAt: Date
+}
+
 enum MacCapturePhase: Equatable {
     case ready
     case connecting
@@ -47,6 +55,10 @@ final class MacAppModel: ObservableObject {
     @Published private(set) var hasSavedAPIKey = false
     @Published private(set) var isMicrophoneConnected = false
     @Published private(set) var connectionLatency: TimeInterval?
+    /// Transcripts that finished while their destination was not focused. They
+    /// are never dropped and never guessed at: each waits for its own field to
+    /// come back, or for the release shortcut.
+    @Published private(set) var heldTranscripts: [MacHeldTranscript] = []
 
     private let recorder: MacAudioRecorder
     private let client: ElevenLabsClientProtocol
@@ -56,8 +68,9 @@ final class MacAppModel: ObservableObject {
     private let globalHotKey: MacGlobalHotKey
     private var meterTimer: Timer?
     private var recordingStartedAt: Date?
-    private var destinationProcessIdentifier: pid_t?
+    private var deliveryTarget: MacDeliveryTarget?
     private var connectedDeviceID: String?
+    private var pendingWatchTimer: Timer?
 
     private static let chosenDeviceKey = "mac-chosen-device-id"
     /// Earlier builds auto-persisted whatever microphone they fell back to, so
@@ -88,9 +101,10 @@ final class MacAppModel: ObservableObject {
                 self?.handleUnexpectedRecordingFailure(error, salvagedAudioURL: salvagedAudioURL)
             }
         }
-        globalHotKey.install { [weak self] in
-            self?.toggleRecording()
-        }
+        globalHotKey.install(
+            toggle: { [weak self] in self?.toggleRecording() },
+            release: { [weak self] in self?.releaseHeldTranscripts() }
+        )
     }
 
     var selectedDevice: MacAudioInputDevice? {
@@ -107,7 +121,8 @@ final class MacAppModel: ObservableObject {
         hasSavedAPIKey || environmentAPIKey?.isEmpty == false
     }
 
-    var hotKeyLabel: String { "⌘" }
+    var hotKeyLabel: String { MacGlobalHotKey.toggleLabel }
+    var releaseHotKeyLabel: String { MacGlobalHotKey.releaseLabel }
 
     /// Records the microphone the user picked in the UI. Only a deliberate
     /// choice is persisted, so an unavailable-iPhone moment can never write
@@ -216,10 +231,7 @@ final class MacAppModel: ObservableObject {
             return
         }
 
-        destinationProcessIdentifier = NSWorkspace.shared.frontmostApplication?.processIdentifier
-        if destinationProcessIdentifier == ProcessInfo.processInfo.processIdentifier {
-            destinationProcessIdentifier = nil
-        }
+        deliveryTarget = MacDeliveryTarget.captureCurrent()
 
         do {
             let connectionStartedAt = Date()
@@ -299,16 +311,21 @@ final class MacAppModel: ObservableObject {
             )
             let transcriptionDuration = Date().timeIntervalSince(transcriptionStartedAt)
             transcript = result.text
+            let target = deliveryTarget
             let delivery = await pasteController.deliver(
                 result.text,
-                pasteInto: destinationProcessIdentifier,
+                to: target,
                 autoPaste: autoPaste
             )
-            let detail: String
-            switch delivery {
-            case .pasted: detail = "Transcribed and pasted"
-            case .copied: detail = "Transcribed and copied"
-            case .copiedNeedsAccessibility: detail = "Copied; enable Accessibility for automatic paste"
+            var detail = delivery.detail
+            if delivery == .held, let target {
+                hold(result.text, for: target)
+                detail = "Held for \(target.applicationName)"
+            } else if let target {
+                // Naming the destination and the route makes the attempt log
+                // the record of which apps accept a precise insert and which
+                // fall back to a keystroke.
+                detail = "\(delivery.detail) → \(target.applicationName)"
             }
             if let interruption {
                 attempts = reliabilityStore.prepend(
@@ -346,6 +363,97 @@ final class MacAppModel: ObservableObject {
                 recordingDuration: recordingDuration,
                 transcriptionDuration: 0
             )
+        }
+    }
+
+    // MARK: Held transcripts
+
+    private func hold(_ text: String, for target: MacDeliveryTarget) {
+        heldTranscripts.append(
+            MacHeldTranscript(text: text, target: target, createdAt: Date())
+        )
+        startPendingWatcher()
+    }
+
+    /// Polls for the destination regaining focus rather than installing an
+    /// AXObserver. Observers behave inconsistently across toolkits — Electron
+    /// especially — and a 0.4 s poll that only runs while something is held is
+    /// both cheaper to reason about and uniform across every app.
+    private func startPendingWatcher() {
+        guard pendingWatchTimer == nil else { return }
+        pendingWatchTimer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.deliverHeldTranscriptsIfTargetFocused()
+            }
+        }
+    }
+
+    private func stopPendingWatcher() {
+        pendingWatchTimer?.invalidate()
+        pendingWatchTimer = nil
+    }
+
+    private func deliverHeldTranscriptsIfTargetFocused() {
+        guard !heldTranscripts.isEmpty else {
+            stopPendingWatcher()
+            return
+        }
+        let ready = heldTranscripts.filter { $0.target.holdsFocus }
+        guard !ready.isEmpty else { return }
+
+        // Everything spoken for this field, in the order it was spoken, as one
+        // insert. Two dictations while away should read as two sentences, not
+        // arrive as a race.
+        let text = ready.map(\.text).joined(separator: " ")
+        guard let target = ready.first?.target else { return }
+
+        let readyIdentifiers = Set(ready.map(\.id))
+        var delivered = target.insertWithoutFocusing(text)
+        if !delivered {
+            // The captured field holds focus, so a plain paste lands in exactly
+            // the right place even when the element refuses a direct write.
+            guard pasteController.insertAtCurrentFocus(text) != .copiedNeedsAccessibility else { return }
+            delivered = false
+        }
+        heldTranscripts.removeAll { readyIdentifiers.contains($0.id) }
+        if heldTranscripts.isEmpty { stopPendingWatcher() }
+        phase = .succeeded(delivered ? "Inserted where you left off" : "Pasted where you left off")
+        scheduleReadyReset()
+    }
+
+    /// Drops everything held at the caret's current location, wherever that is.
+    /// The user is explicitly asking for this destination, so no target match is
+    /// required.
+    func releaseHeldTranscripts() {
+        guard !heldTranscripts.isEmpty else { return }
+        let text = heldTranscripts.map(\.text).joined(separator: " ")
+        let result = pasteController.insertAtCurrentFocus(text)
+        guard result != .copiedNeedsAccessibility else {
+            phase = .failed("Enable Accessibility for SpeakPaste to insert held text.")
+            return
+        }
+        heldTranscripts.removeAll()
+        stopPendingWatcher()
+        phase = .succeeded(result == .inserted ? "Inserted here" : "Pasted here")
+        scheduleReadyReset()
+    }
+
+    func discardHeldTranscripts() {
+        heldTranscripts.removeAll()
+        stopPendingWatcher()
+    }
+
+    func copyHeldTranscripts() {
+        guard !heldTranscripts.isEmpty else { return }
+        pasteController.copyToPasteboard(heldTranscripts.map(\.text).joined(separator: " "))
+    }
+
+    private func scheduleReadyReset() {
+        let successPhase = phase
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1.5))
+            guard let self, self.phase == successPhase else { return }
+            self.phase = .ready
         }
     }
 

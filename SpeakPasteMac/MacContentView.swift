@@ -15,6 +15,9 @@ struct MacContentView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
+                    if !model.heldTranscripts.isEmpty {
+                        heldBanner
+                    }
                     microphoneSection
                     captureSection
                     if case let .failed(message) = model.phase {
@@ -92,6 +95,48 @@ struct MacContentView: View {
             if !model.hasAPIKey { return "Needs API key" }
             return "Ready"
         }
+    }
+
+    // MARK: Held transcripts
+
+    private var heldBanner: some View {
+        let count = model.heldTranscripts.count
+        let destination = model.heldTranscripts.first?.target.applicationName ?? "the previous app"
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "tray.full.fill")
+                    .foregroundStyle(.blue)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(count == 1 ? "1 transcript is waiting" : "\(count) transcripts are waiting")
+                        .font(.callout.weight(.medium))
+                    Text("Nothing is lost. Click back into \(destination) and it drops in by itself, or press \(model.releaseHotKeyLabel) to put it wherever your cursor is.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+            }
+
+            Text(model.heldTranscripts.map(\.text).joined(separator: " "))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(3)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(8)
+                .background(RoundedRectangle(cornerRadius: 6).fill(.quaternary.opacity(0.5)))
+
+            HStack(spacing: 8) {
+                Button("Copy") { model.copyHeldTranscripts() }
+                    .controlSize(.small)
+                Button("Discard") { model.discardHeldTranscripts() }
+                    .controlSize(.small)
+                Spacer()
+            }
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(.blue.opacity(0.08)))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.blue.opacity(0.3)))
     }
 
     // MARK: Microphone
@@ -523,9 +568,14 @@ struct MacContentView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .accessibilityHidden(true)
-                Text("Global shortcut: Tap \(model.hotKeyLabel) by itself to start and stop recording from any app.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Global shortcut: Tap \(model.hotKeyLabel) by itself to start and stop recording from any app. The left ⌘ is left alone so ⌘C, ⌘V, and ⌘Tab are never affected.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("Press \(model.releaseHotKeyLabel) to drop a held transcript wherever your cursor is.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .toggleStyle(.checkbox)
