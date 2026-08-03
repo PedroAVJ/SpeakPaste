@@ -12,7 +12,9 @@ enum MacAudioRecorderError: LocalizedError {
     case recordingStartTimedOut
     case recordingFinalizationTimedOut
     case audioStreamNotReady
+    case audioStreamSilent
     case audioMonitorUnavailable
+    case audioStreamStalled
 
     var errorDescription: String? {
         switch self {
@@ -36,8 +38,12 @@ enum MacAudioRecorderError: LocalizedError {
             "The microphone did not finish the recording. SpeakPaste reset the connection; try again."
         case .audioStreamNotReady:
             "The microphone connected but never delivered audio. Lock the iPhone, keep it nearby, then try again."
+        case .audioStreamSilent:
+            "The microphone is connected but sending silence. Check that it is not muted, and that the iPhone is not on a call."
         case .audioMonitorUnavailable:
             "macOS would not let SpeakPaste watch the microphone's audio stream, so it cannot tell when the iPhone is really ready. Recording was not started."
+        case .audioStreamStalled:
+            "The microphone stopped sending audio partway through. SpeakPaste kept what it had already recorded."
         }
     }
 }
@@ -63,16 +69,27 @@ private final class MacRuntimeErrorLatch: @unchecked Sendable {
     }
 }
 
-/// Counts audio sample buffers delivered by the capture session so callers can
-/// tell whether audio is actually flowing, not just whether the session claims
-/// to be running.
+/// Tracks both the arrival of audio buffers and whether they actually contain
+/// sound.
+///
+/// Counting buffers alone is not enough: a hardware-muted microphone, or an
+/// iPhone that has handed its audio to a phone call, delivers a perfectly
+/// steady stream of digital silence. That passes an arrival-only gate, so the
+/// HUD says SPEAK NOW, the user talks for a minute, and the run ends in an
+/// empty transcript.
 private final class MacSampleFlowCounter: @unchecked Sendable {
     private let lock = NSLock()
     private var storedCount: UInt64 = 0
+    private var storedAudibleCount: UInt64 = 0
 
-    func increment() {
+    /// Below this peak amplitude a buffer is indistinguishable from a muted
+    /// input. Ordinary room tone sits well above it.
+    private static let silenceFloor: Float = 0.0015
+
+    func record(peakAmplitude: Float) {
         lock.lock()
         storedCount &+= 1
+        if peakAmplitude > Self.silenceFloor { storedAudibleCount &+= 1 }
         lock.unlock()
     }
 
@@ -80,6 +97,12 @@ private final class MacSampleFlowCounter: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return storedCount
+    }
+
+    var audibleCount: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedAudibleCount
     }
 }
 
@@ -199,18 +222,31 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: .seconds(timeout))
         var lastCount = sampleFlow.count
+        var lastAudibleCount = sampleFlow.audibleCount
         var steadyWindows = 0
+        var audibleWindows = 0
         while steadyWindows < Self.requiredSteadyWindows {
             if let failure = captureQueue.sync(execute: { currentSessionFailure() }) {
                 throw failure
             }
             guard clock.now < deadline else {
-                throw MacAudioRecorderError.audioStreamNotReady
+                // Buffers arriving without sound is a different fault from no
+                // buffers at all, and it has a different fix.
+                throw lastCount > 0
+                    ? MacAudioRecorderError.audioStreamSilent
+                    : MacAudioRecorderError.audioStreamNotReady
             }
             try? await Task.sleep(for: .milliseconds(30))
             let count = sampleFlow.count
+            let audibleCount = sampleFlow.audibleCount
             steadyWindows = count > lastCount ? steadyWindows + 1 : 0
+            audibleWindows = audibleCount > lastAudibleCount ? audibleWindows + 1 : audibleWindows
             lastCount = count
+            lastAudibleCount = audibleCount
+        }
+        // A steady stream of digital silence is not a ready microphone.
+        guard audibleWindows > 0 else {
+            throw MacAudioRecorderError.audioStreamSilent
         }
     }
 
@@ -235,8 +271,57 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
         didOutput sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
-        sampleFlow.increment()
+        sampleFlow.record(peakAmplitude: Self.peakAmplitude(of: sampleBuffer))
     }
+
+    /// Peak absolute amplitude across the buffer, normalized to 0...1. Returns
+    /// zero for formats it cannot read, which is treated as silence — failing
+    /// closed is correct here, since the whole point is refusing to promise a
+    /// live microphone that is not.
+    private nonisolated static func peakAmplitude(of sampleBuffer: CMSampleBuffer) -> Float {
+        guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
+              let basicDescription = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription)
+        else {
+            return 0
+        }
+
+        var blockBuffer: CMBlockBuffer?
+        var audioBufferList = AudioBufferList()
+        let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer,
+            bufferListSizeNeededOut: nil,
+            bufferListOut: &audioBufferList,
+            bufferListSize: MemoryLayout<AudioBufferList>.size,
+            blockBufferAllocator: nil,
+            blockBufferMemoryAllocator: nil,
+            flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
+            blockBufferOut: &blockBuffer
+        )
+        guard status == noErr, blockBuffer != nil else { return 0 }
+
+        let format = basicDescription.pointee
+        let isFloat = format.mFormatFlags & kAudioFormatFlagIsFloat != 0
+        var peak: Float = 0
+
+        for buffer in UnsafeMutableAudioBufferListPointer(&audioBufferList) {
+            guard let data = buffer.mData, buffer.mDataByteSize > 0 else { continue }
+            if isFloat {
+                let count = Int(buffer.mDataByteSize) / MemoryLayout<Float>.size
+                let samples = data.bindMemory(to: Float.self, capacity: count)
+                for index in 0..<count { peak = max(peak, abs(samples[index])) }
+            } else if format.mBitsPerChannel == 16 {
+                let count = Int(buffer.mDataByteSize) / MemoryLayout<Int16>.size
+                let samples = data.bindMemory(to: Int16.self, capacity: count)
+                for index in 0..<count {
+                    peak = max(peak, abs(Float(samples[index]) / Float(Int16.max)))
+                }
+            }
+        }
+        return peak
+    }
+
+    /// Lets the app watch stream health while recording, not only before it.
+    var deliveredSampleCount: UInt64 { sampleFlow.count }
 
     /// Returns only after AVFoundation confirms that the first audio samples
     /// are being written. The caller can safely show "Speak now" after this.

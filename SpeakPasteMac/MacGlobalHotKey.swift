@@ -174,15 +174,37 @@ final class MacGlobalHotKey {
         return !flags.contains(.maskControl) && !flags.contains(.maskShift)
     }
 
-    private func refreshMonitor() {
+    /// Idempotent in BOTH directions.
+    ///
+    /// The previous version only ever installed. Revoking Accessibility left a
+    /// dead CFMachPort in `eventTap`, so on re-granting, the `eventTap == nil`
+    /// test was false and nothing was reinstalled — the global shortcut stayed
+    /// dead until the app was relaunched, silently.
+    func refreshMonitor() {
         if AXIsProcessTrusted() {
-            if eventTap == nil {
-                removeLocalMonitor()
-                installEventTap()
-            }
-        } else if localMonitor == nil {
-            installLocalMonitor()
+            guard eventTap == nil else { return }
+            removeLocalMonitor()
+            installEventTap()
+        } else {
+            removeEventTap()
+            if localMonitor == nil { installLocalMonitor() }
         }
+    }
+
+    /// True when the shortcut works from any app, rather than only while
+    /// SpeakPaste itself is frontmost.
+    var isGlobal: Bool { eventTap != nil }
+
+    private func removeEventTap() {
+        if let eventTapSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), eventTapSource, .commonModes)
+        }
+        if let eventTap {
+            CFMachPortInvalidate(eventTap)
+        }
+        eventTapSource = nil
+        eventTap = nil
+        recognizer.reset()
     }
 
     private func installEventTap() {
