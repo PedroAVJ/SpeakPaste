@@ -84,6 +84,54 @@ The screenshot does **not** prove an automatic switchback occurred; the user
 returned to Notes manually. It does prove the extension received and rendered
 the containing app's failure state through the App Group.
 
+### Regression: the system-navigation response also lands on the Home Screen
+
+[Watch the failing return recording](spec-evidence/speakpaste-return-landed-home-2026-08-02.mp4)
+
+- File: `speakpaste-return-landed-home-2026-08-02.mp4`
+- Duration: 6.755 seconds
+- Resolution: 1180 × 2556 at 60 fps
+- SHA-256: `bc42c1e74daa5e2603b1813a4f71f039652bda24719c49b8af566daca7e2fa02`
+
+This run exercised the responder-chain launch fix plus the `UISystemNavigationAction`
+return route. Observed sequence:
+
+1. Notes owns the insertion point and the user selects the SpeakPaste keyboard.
+2. Tapping **Start** foregrounds SpeakPaste, which reaches the `Recording`
+   state. Launch and microphone setup both succeed.
+3. Roughly half a second later SpeakPaste plays the Home Screen suspend
+   animation and the phone lands on the Home Screen rather than Notes. The
+   orange microphone indicator stays lit, so capture survives the transition.
+4. The one-time switchback explanation does not appear, because it was already
+   confirmed in an earlier session.
+
+The containing app's own data container shows the app was installed shortly
+before this attempt, so the recording exercises the current implementation and
+not a stale build. Because the app backgrounded rather than staying foreground
+with the manual-return hint, the return was reported as successful; the only
+route that can background SpeakPaste without foregrounding another app is the
+system-navigation response.
+
+The status bar is decisive about why. Throughout the SpeakPaste segment the
+clock renders normally and no back-to-app breadcrumb is present, so SpringBoard
+never constructed a destination pointing at Notes. Destination `0` nevertheless
+existed and accepted a response, and `canSendPrimaryResponse` only required that
+`0` be present. **The existence of destination `0` is not evidence that it leads
+anywhere.** A launch that originates in a keyboard extension has no previous
+application scene, so the primary destination resolves to the Home Screen — the
+same destination the excluded `suspendReturningToLastApp:` route produced, for
+the same underlying reason.
+
+The response is a strict one-shot value that cannot be inspected or undone after
+sending, so the destination must be identified *before* it is consumed.
+SpeakPaste therefore resolves destination `0` through
+`bundleIdForDestination:`, falling back to the scheme of `URLForDestination:`,
+and sends the response only when that names a real application other than
+SpeakPaste and, when the host is known, matches it. An unidentified or
+mismatched destination is left unsent and recorded as
+`system-navigation-destination-unconfirmed`, and the known host URL scheme
+carries the return instead.
+
 ### Regression: generic suspension returns to the Home Screen
 
 [View the Home Screen result](spec-evidence/speakpaste-suspend-returned-home-2026-08-02.png).
@@ -120,7 +168,20 @@ The reference recording is the acceptance target for the round-trip:
 8. **Failures are diagnosable.** Every launch route and its actual Boolean result
    are persisted in the shared session so a device-only failure is actionable.
    Audio failures must also identify the failed setup stage rather than exposing
-   only a raw `OSStatus` value.
+   only a raw `OSStatus` value. The App Group container cannot be listed over
+   `devicectl`, so each process also mirrors the session — minus the dictated
+   text, which is replaced by its character count — to
+   `Documents/last-dictation-session.json` in its own container. Read the
+   containing app's copy with:
+
+   ```sh
+   xcrun devicectl device copy from \
+     --device <device> \
+     --domain-type appDataContainer \
+     --domain-identifier com.pedro.SpeakPaste \
+     --source Documents/last-dictation-session.json \
+     --destination .
+   ```
 
 ## Implementation contract
 
@@ -175,6 +236,14 @@ re-fetches the current action, requires a real `UISystemNavigationAction`,
 object identity attempted before entering the response method. It never creates
 or reuses an action and never substitutes an `NSNumber` for the scalar
 destination argument.
+
+Presence of destination `0` is not sufficient. SpeakPaste additionally resolves
+which application that destination leads to, using `bundleIdForDestination:` and
+falling back to the scheme of `URLForDestination:`. It sends the response only
+when the destination names a real application other than SpeakPaste itself and,
+when the keyboard resolved a host, matches that host. Otherwise the one-shot
+response is left unsent and the return proceeds to the URL route, because an
+unidentified primary destination suspends the app to the Home Screen.
 
 A `true` response means the destination existed and BaseBoard accepted the
 response; by itself it does not prove the visible transition completed.
@@ -249,7 +318,8 @@ The next validation is intentionally one focused Notes run: open a fresh Notes
 cursor, select SpeakPaste, tap Start once, accept the one-time explanation if it
 appears, and record whether the destination is Notes, Home, or SpeakPaste. Keep
 the resulting shared session intact until its host-resolution and return
-diagnostics have been copied. The decisive fields are whether a live action
-exposed destination `0`, whether its response returned `true`, whether
-SpeakPaste observed its scene enter the background, and whether a URL fallback
-ran.
+diagnostics have been copied. The decisive fields are whether the keyboard resolved a
+host bundle identifier, what `system-navigation-primary-bundle` resolved
+destination `0` to, whether the response was sent or recorded as
+`system-navigation-destination-unconfirmed`, and whether `host-url` ran and
+returned `true`.

@@ -88,15 +88,37 @@ enum HostAppSwitcher {
         let isValid: Bool
         let canSendResponse: Bool
         let destinations: Set<UInt>
+        /// The application destination `0` actually resolves to, when SpringBoard
+        /// identifies one. A live action whose primary destination names no
+        /// application returns the phone to the Home Screen.
+        let primaryDestinationBundleIdentifier: String?
         let attempts: [String]
 
-        var canSendPrimaryResponse: Bool {
+        var hasLivePrimaryDestination: Bool {
             action != nil
                 && isValid
                 && canSendResponse
-                && destinations.contains(0)
+                && destinations.contains(HostAppSwitcher.primaryDestination)
+        }
+
+        /// The one-shot BaseBoard response cannot be undone or inspected after
+        /// the fact, so the destination must be confirmed before it is sent.
+        func confirmsReturn(to expectedBundleIdentifier: String?) -> Bool {
+            guard
+                hasLivePrimaryDestination,
+                let resolved = primaryDestinationBundleIdentifier
+            else {
+                return false
+            }
+            guard let expectedBundleIdentifier else { return true }
+            return resolved.caseInsensitiveCompare(expectedBundleIdentifier)
+                == .orderedSame
         }
     }
+
+    /// SpringBoard's primary/back destination, constructed from the previous
+    /// application scene.
+    private nonisolated static let primaryDestination: UInt = 0
 
     private static let actionChangedNotification = Notification.Name(
         "UIApplicationSystemNavigationActionChangedNotification"
@@ -132,24 +154,20 @@ enum HostAppSwitcher {
     }
 
     static func anticipatedRoute(for bundleIdentifier: String?) -> String {
-        if inspectSystemNavigationAction().canSendPrimaryResponse {
+        let host = validBundleIdentifier(bundleIdentifier)
+        if inspectSystemNavigationAction().confirmsReturn(to: host) {
             return "system-navigation-response"
         }
-        guard let bundleIdentifier = validBundleIdentifier(bundleIdentifier) else {
-            return "missing-host"
-        }
-        if fallbackURL(for: bundleIdentifier) != nil {
-            return "host-url"
-        }
-        return "workspace-bundle"
+        return anticipatedFallbackRoute(for: bundleIdentifier)
     }
 
     static func anticipatedAttempts(for bundleIdentifier: String?) -> [String] {
         let inspection = inspectSystemNavigationAction()
+        let host = validBundleIdentifier(bundleIdentifier)
         var attempts = systemNavigationProbeHistory
         attempts.append("system-navigation-probe:preflight")
         attempts.append(contentsOf: inspection.attempts)
-        if inspection.canSendPrimaryResponse {
+        if inspection.confirmsReturn(to: host) {
             attempts.append("system-navigation-response:pending")
         } else {
             attempts.append(anticipatedFallbackRoute(for: bundleIdentifier))
@@ -185,13 +203,14 @@ enum HostAppSwitcher {
     ) async -> HostAppSwitchOutcome {
         var attempts = systemNavigationProbeHistory
         let inspection = inspectSystemNavigationAction()
+        let host = validBundleIdentifier(bundleIdentifier)
         attempts.append("system-navigation-probe:return")
         attempts.append(contentsOf: inspection.attempts)
         attempts = bounded(attempts)
         onAttemptsChanged?(attempts)
 
         if
-            inspection.canSendPrimaryResponse,
+            inspection.confirmsReturn(to: host),
             let action = inspection.action,
             let activeScene = UIApplication.shared.connectedScenes.first(where: {
                 $0.activationState == .foregroundActive
@@ -237,6 +256,21 @@ enum HostAppSwitcher {
                 return HostAppSwitchOutcome(didOpen: true, attempts: attempts)
             }
         } else if
+            inspection.hasLivePrimaryDestination,
+            !inspection.confirmsReturn(to: host)
+        {
+            // A live action whose primary destination names no application, or
+            // names one other than the host, suspends SpeakPaste to the Home
+            // Screen. Leave the one-shot response unsent and use a route whose
+            // destination is known.
+            attempts.append(
+                "system-navigation-destination-unconfirmed:resolved="
+                    + diagnosticValue(inspection.primaryDestinationBundleIdentifier)
+                    + ";expected=" + diagnosticValue(host)
+            )
+            attempts = bounded(attempts)
+            onAttemptsChanged?(attempts)
+        } else if
             let action = inspection.action,
             hasAttemptedSystemNavigationAction(action)
         {
@@ -244,7 +278,7 @@ enum HostAppSwitcher {
             attempts = bounded(attempts)
             onAttemptsChanged?(attempts)
         } else if
-            inspection.canSendPrimaryResponse,
+            inspection.confirmsReturn(to: host),
             !UIApplication.shared.connectedScenes.contains(where: {
                 $0.activationState == .foregroundActive
             })
@@ -254,7 +288,7 @@ enum HostAppSwitcher {
             onAttemptsChanged?(attempts)
         }
 
-        guard let bundleIdentifier = validBundleIdentifier(bundleIdentifier) else {
+        guard let bundleIdentifier = host else {
             attempts.append("missing-host")
             attempts = bounded(attempts)
             onAttemptsChanged?(attempts)
@@ -314,6 +348,7 @@ enum HostAppSwitcher {
                 isValid: false,
                 canSendResponse: false,
                 destinations: [],
+                primaryDestinationBundleIdentifier: nil,
                 attempts: attempts
             )
         }
@@ -334,6 +369,7 @@ enum HostAppSwitcher {
                 isValid: false,
                 canSendResponse: false,
                 destinations: [],
+                primaryDestinationBundleIdentifier: nil,
                 attempts: attempts
             )
         }
@@ -351,6 +387,7 @@ enum HostAppSwitcher {
                 isValid: false,
                 canSendResponse: false,
                 destinations: [],
+                primaryDestinationBundleIdentifier: nil,
                 attempts: attempts
             )
         }
@@ -393,13 +430,55 @@ enum HostAppSwitcher {
             )
         }
 
+        let primaryBundleIdentifier = destinations.contains(primaryDestination)
+            ? resolvedBundleIdentifier(
+                action: action,
+                destination: primaryDestination
+            )
+            : nil
+        attempts.append(
+            "system-navigation-primary-bundle:"
+                + diagnosticValue(primaryBundleIdentifier)
+        )
+
         return SystemNavigationInspection(
             action: action,
             isValid: isValid,
             canSendResponse: canSendResponse,
             destinations: destinations,
+            primaryDestinationBundleIdentifier: primaryBundleIdentifier,
             attempts: attempts
         )
+    }
+
+    /// The application a destination leads to, taken from SpringBoard's own
+    /// metadata. Falls back to the destination URL's scheme because a
+    /// breadcrumb may expose a launch URL without a bundle identifier.
+    private static func resolvedBundleIdentifier(
+        action: AnyObject,
+        destination: UInt
+    ) -> String? {
+        let ownBundleIdentifier = Bundle.main.bundleIdentifier
+        if
+            let bundle = destinationString(
+                action: action,
+                selectorName: "bundleIdForDestination:",
+                destination: destination
+            )?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !bundle.isEmpty,
+            bundle.caseInsensitiveCompare(ownBundleIdentifier ?? "") != .orderedSame
+        {
+            return bundle
+        }
+        guard
+            let scheme = destinationURL(
+                action: action,
+                destination: destination
+            )?.scheme
+        else {
+            return nil
+        }
+        return bundleIdentifier(forScheme: scheme)
     }
 
     private static func navigationDestinations(
@@ -614,7 +693,7 @@ enum HostAppSwitcher {
             implementation,
             to: BooleanDestination.self
         )
-        return send(action, selector, 0)
+        return send(action, selector, primaryDestination)
     }
 
     private static func hasAttemptedSystemNavigationAction(
@@ -746,18 +825,26 @@ enum HostAppSwitcher {
         return open(workspace, openSelector, bundleIdentifier as NSString)
     }
 
+    private static let fallbackURLStrings: [String: String] = [
+        "com.apple.MobileSMS": "sms:",
+        "com.apple.mobilenotes": "mobilenotes://",
+        "com.apple.mobilemail": "message://",
+        "com.openai.chat": "chatgpt://",
+        "com.anthropic.claude": "claude://",
+        "net.whatsapp.WhatsApp": "whatsapp://",
+        "com.tinyspeck.chatlyio": "slack://",
+        "com.google.Gmail": "googlegmail://",
+        "com.linkedin.LinkedIn": "linkedin://",
+    ]
+
     private static func fallbackURL(for bundleIdentifier: String) -> URL? {
-        let schemes: [String: String] = [
-            "com.apple.MobileSMS": "sms:",
-            "com.apple.mobilenotes": "mobilenotes://",
-            "com.apple.mobilemail": "message://",
-            "com.openai.chat": "chatgpt://",
-            "com.anthropic.claude": "claude://",
-            "net.whatsapp.WhatsApp": "whatsapp://",
-            "com.tinyspeck.chatlyio": "slack://",
-            "com.google.Gmail": "googlegmail://",
-            "com.linkedin.LinkedIn": "linkedin://",
-        ]
-        return schemes[bundleIdentifier].flatMap(URL.init(string:))
+        fallbackURLStrings[bundleIdentifier].flatMap(URL.init(string:))
+    }
+
+    private static func bundleIdentifier(forScheme scheme: String) -> String? {
+        fallbackURLStrings.first { _, value in
+            URL(string: value)?.scheme?.caseInsensitiveCompare(scheme)
+                == .orderedSame
+        }?.key
     }
 }

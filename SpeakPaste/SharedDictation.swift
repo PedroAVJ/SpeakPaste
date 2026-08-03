@@ -3,6 +3,11 @@ import Foundation
 enum SharedDictationConstants {
     static let appGroupIdentifier = "group.com.example.SpeakPaste"
     static let storageKey = "active-dictation-session-v1"
+    /// The App Group container is not reachable over `devicectl`, so each
+    /// process also mirrors its session diagnostics into its own Documents
+    /// directory. A device-only launch or return failure stays actionable
+    /// without reproducing it while attached to Xcode.
+    static let diagnosticsFileName = "last-dictation-session.json"
 }
 
 enum SharedDictationPhase: String, Codable {
@@ -204,5 +209,33 @@ struct SharedDictationStore: @unchecked Sendable {
         defaults?.set(data, forKey: SharedDictationConstants.storageKey)
         // Ensure Stop/Cancel is visible immediately to a background recorder.
         defaults?.synchronize()
+        mirrorDiagnostics(snapshot)
+    }
+
+    private func mirrorDiagnostics(_ snapshot: SharedDictationSnapshot) {
+        guard
+            let directory = FileManager.default.urls(
+                for: .documentDirectory,
+                in: .userDomainMask
+            ).first
+        else {
+            return
+        }
+
+        var mirrored = snapshot
+        // The mirror exists to explain routes, never to keep dictated content
+        // in cleartext outside the session.
+        mirrored.transcript = snapshot.transcript.map { "<\($0.count) characters>" }
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        guard let data = try? encoder.encode(mirrored) else { return }
+        try? data.write(
+            to: directory.appendingPathComponent(
+                SharedDictationConstants.diagnosticsFileName
+            ),
+            options: .atomic
+        )
     }
 }
