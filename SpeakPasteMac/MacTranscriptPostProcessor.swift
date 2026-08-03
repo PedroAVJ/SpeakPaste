@@ -43,8 +43,11 @@ final class MacReplacementStore: ObservableObject {
     /// to dictate over.
     private let fileURL: URL?
 
-    init() {
-        fileURL = Self.makeFileURL()
+    /// `directory` exists so the rules can be exercised against a scratch folder
+    /// instead of the real Application Support, matching `MacHistoryStore`.
+    /// Production callers use the default.
+    init(directory: URL? = nil) {
+        fileURL = Self.makeFileURL(in: directory)
         replacements = Self.load(from: fileURL)
     }
 
@@ -96,7 +99,10 @@ final class MacReplacementStore: ObservableObject {
         try? data.write(to: fileURL, options: .atomic)
     }
 
-    private static func makeFileURL() -> URL? {
+    private static func makeFileURL(in directory: URL?) -> URL? {
+        if let directory {
+            return directory.appending(path: "replacements.json", directoryHint: .notDirectory)
+        }
         guard
             let base = try? FileManager.default.url(
                 for: .applicationSupportDirectory,
@@ -153,42 +159,54 @@ enum MacTranscriptPostProcessor {
     /// A single left-to-right pass. Text that a rule has already produced is
     /// never rescanned, so one rule's output cannot be swallowed by another
     /// rule and the result does not depend on how the rules happen to chain.
+    ///
+    /// Each rule carries its own forward-only search cursor. Re-searching every
+    /// rule over the whole remaining transcript after every substitution is
+    /// quadratic, and this runs on the main actor between transcription and
+    /// paste: a 5,000-character dictation against 30 rules froze the app for
+    /// about four seconds, and the store permits 500 rules. Because a search
+    /// started later can only find a match later, a rule's cached hit stays
+    /// valid until the cursor passes it, which makes the pass near-linear.
     private static func substitute(_ text: String, using replacements: [MacTextReplacement]) -> String {
         guard !replacements.isEmpty else { return text }
         var result = ""
         var cursor = text.startIndex
-        while cursor < text.endIndex, let match = nextMatch(in: text, from: cursor, using: replacements) {
+        var pending: [Range<String.Index>?] = replacements.map {
+            firstRange(of: $0, in: text, from: text.startIndex)
+        }
+
+        while cursor < text.endIndex {
+            // The earliest match wins; at the same position the longest one
+            // does, so a rule for "New York City" is not pre-empted by one for
+            // "New York". Ties beyond that go to the earlier rule in the list,
+            // which is the order the user sees.
+            var best: Match?
+            for index in replacements.indices {
+                if let cached = pending[index], cached.lowerBound < cursor {
+                    pending[index] = firstRange(of: replacements[index], in: text, from: cursor)
+                }
+                // A rule that found nothing from an earlier start can find
+                // nothing from a later one, so nil is final.
+                guard let range = pending[index] else { continue }
+                if let current = best {
+                    guard range.lowerBound < current.range.lowerBound
+                        || (range.lowerBound == current.range.lowerBound
+                            && range.upperBound > current.range.upperBound)
+                    else {
+                        continue
+                    }
+                }
+                best = Match(range: range, written: replacements[index].written)
+            }
+
+            guard let match = best else { break }
             result.append(contentsOf: text[cursor..<match.range.lowerBound])
             result.append(match.written)
             cursor = match.range.upperBound
         }
+
         result.append(contentsOf: text[cursor...])
         return result
-    }
-
-    /// The earliest match wins; at the same position the longest one does, so a
-    /// rule for "New York City" is not pre-empted by one for "New York".
-    private static func nextMatch(
-        in text: String,
-        from start: String.Index,
-        using replacements: [MacTextReplacement]
-    ) -> Match? {
-        var best: Match?
-        for replacement in replacements {
-            guard let range = firstRange(of: replacement, in: text, from: start) else { continue }
-            guard let current = best else {
-                best = Match(range: range, written: replacement.written)
-                continue
-            }
-            if range.lowerBound < current.range.lowerBound {
-                best = Match(range: range, written: replacement.written)
-            } else if range.lowerBound == current.range.lowerBound,
-                      text.distance(from: range.lowerBound, to: range.upperBound)
-                        > text.distance(from: current.range.lowerBound, to: current.range.upperBound) {
-                best = Match(range: range, written: replacement.written)
-            }
-        }
-        return best
     }
 
     private static func firstRange(
@@ -245,6 +263,11 @@ enum MacTranscriptPostProcessor {
         if isOpeningMark(at: precedingText.index(before: precedingText.endIndex), in: precedingText) {
             return text
         }
+        // A transcript that opens with punctuation belongs against the word
+        // before it. " , and then" is never what was dictated.
+        if let first = text.first, attachingMarks.contains(first) {
+            return text
+        }
         if startsNewSentence(before: precedingText) {
             return " " + capitalizingFirstCharacter(text)
         }
@@ -289,6 +312,12 @@ enum MacTranscriptPostProcessor {
         return String(first).uppercased() + text.dropFirst()
     }
 
+    /// Marks that never take a space in front of them, so a transcript opening
+    /// with one is pasted flush against the text already at the cursor.
+    private static let attachingMarks: Set<Character> = [
+        ",", ".", "!", "?", ":", ";", "%", ")", "]", "}",
+        "\u{201D}", "\u{2019}", "\u{00BB}", "\u{203A}",
+    ]
     private static let sentenceTerminators: Set<Character> = [".", "!", "?", ":"]
     private static let closingMarks: Set<Character> = [")", "]", "}", "\"", "'", "\u{201D}", "\u{2019}", "\u{00BB}", "\u{203A}"]
     private static let openingMarks: Set<Character> = ["(", "[", "{", "\u{201C}", "\u{2018}", "\u{00AB}", "\u{2039}", "\u{00BF}", "\u{00A1}"]
