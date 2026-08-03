@@ -30,6 +30,12 @@ struct SharedDictationSnapshot: Codable, Equatable {
     var transcript: String?
     var errorMessage: String?
     var returnBundleIdentifier: String?
+    var hostResolutionAttempts: [String]?
+    var launchAttempts: [String]?
+    var successfulLaunchRoute: String?
+    var returnAttempts: [String]?
+    var incomingURLDeliveryRoute: String?
+    var incomingURLSourceApplication: String?
     var startedAt: Date
     var updatedAt: Date
 
@@ -41,6 +47,12 @@ struct SharedDictationSnapshot: Codable, Equatable {
             transcript: nil,
             errorMessage: nil,
             returnBundleIdentifier: nil,
+            hostResolutionAttempts: nil,
+            launchAttempts: nil,
+            successfulLaunchRoute: nil,
+            returnAttempts: nil,
+            incomingURLDeliveryRoute: nil,
+            incomingURLSourceApplication: nil,
             startedAt: Date(),
             updatedAt: Date()
         )
@@ -57,6 +69,9 @@ struct SharedDictationStore: @unchecked Sendable {
     var isAvailable: Bool { defaults != nil }
 
     func load() -> SharedDictationSnapshot {
+        // The containing app and keyboard extension are separate processes.
+        // Refresh cfprefsd before polling commands written by the other side.
+        defaults?.synchronize()
         guard
             let data = defaults?.data(forKey: SharedDictationConstants.storageKey),
             let snapshot = try? JSONDecoder().decode(SharedDictationSnapshot.self, from: data)
@@ -75,6 +90,12 @@ struct SharedDictationStore: @unchecked Sendable {
             transcript: nil,
             errorMessage: nil,
             returnBundleIdentifier: returnBundleIdentifier,
+            hostResolutionAttempts: nil,
+            launchAttempts: nil,
+            successfulLaunchRoute: nil,
+            returnAttempts: nil,
+            incomingURLDeliveryRoute: nil,
+            incomingURLSourceApplication: nil,
             startedAt: Date(),
             updatedAt: Date()
         )
@@ -96,6 +117,55 @@ struct SharedDictationStore: @unchecked Sendable {
             snapshot.command = .none
             snapshot.transcript = transcript
             snapshot.errorMessage = errorMessage
+        }
+    }
+
+    func setReturnBundleIdentifier(
+        _ bundleIdentifier: String,
+        sessionID: UUID
+    ) {
+        update(sessionID: sessionID) { snapshot in
+            snapshot.returnBundleIdentifier = bundleIdentifier
+        }
+    }
+
+    func setIncomingURLContext(
+        deliveryRoute: String,
+        sourceApplication: String?,
+        sessionID: UUID
+    ) {
+        update(sessionID: sessionID) { snapshot in
+            snapshot.incomingURLDeliveryRoute = deliveryRoute
+            snapshot.incomingURLSourceApplication = sourceApplication ?? "<nil>"
+        }
+    }
+
+    func setLaunchDiagnostics(
+        _ attempts: [String],
+        successfulRoute: String?,
+        sessionID: UUID
+    ) {
+        update(sessionID: sessionID) { snapshot in
+            snapshot.launchAttempts = attempts
+            snapshot.successfulLaunchRoute = successfulRoute
+        }
+    }
+
+    func setHostResolutionDiagnostics(
+        _ attempts: [String],
+        sessionID: UUID
+    ) {
+        update(sessionID: sessionID) { snapshot in
+            snapshot.hostResolutionAttempts = attempts
+        }
+    }
+
+    func setReturnDiagnostics(
+        _ attempts: [String],
+        sessionID: UUID
+    ) {
+        update(sessionID: sessionID) { snapshot in
+            snapshot.returnAttempts = attempts
         }
     }
 
@@ -132,5 +202,7 @@ struct SharedDictationStore: @unchecked Sendable {
     private func save(_ snapshot: SharedDictationSnapshot) {
         guard let data = try? JSONEncoder().encode(snapshot) else { return }
         defaults?.set(data, forKey: SharedDictationConstants.storageKey)
+        // Ensure Stop/Cancel is visible immediately to a background recorder.
+        defaults?.synchronize()
     }
 }

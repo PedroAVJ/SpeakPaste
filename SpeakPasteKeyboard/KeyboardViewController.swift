@@ -1,3 +1,4 @@
+import ObjectiveC.runtime
 import SwiftUI
 import UIKit
 
@@ -6,16 +7,29 @@ final class KeyboardViewController: UIInputViewController {
     private var hostingController: UIHostingController<KeyboardView>?
 
     private lazy var model = KeyboardModel(
-        resolveHostBundleIdentifier: { [weak self] in
-            guard let self else { return nil }
-            return self.hostResolver.bundleIdentifier(for: self)
+        resolveHostApplication: { [weak self] in
+            guard let self else {
+                return HostApplicationResolution(
+                    bundleIdentifier: nil,
+                    attempts: ["controller-deallocated"]
+                )
+            }
+            return self.hostResolver.resolve(for: self)
         },
         openContainingApp: { [weak self] url in
-            guard let self else { return false }
+            guard let self else { return .failed(attempts: ["controller-deallocated"]) }
             return await self.open(url: url)
         },
         insertTranscript: { [weak self] transcript in
             self?.insert(transcript: transcript)
+        },
+        insertText: { [weak self] text in
+            self?.textDocumentProxy.insertText(text)
+            UIDevice.current.playInputClick()
+        },
+        deleteBackward: { [weak self] in
+            self?.textDocumentProxy.deleteBackward()
+            UIDevice.current.playInputClick()
         },
         advanceToNextKeyboard: { [weak self] in
             self?.advanceToNextInputMode()
@@ -57,29 +71,129 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     @MainActor
-    private func open(url: URL) async -> Bool {
+    private func open(url: URL) async -> KeyboardAppLaunchOutcome {
+        var attempts: [String] = []
+
+        // A keyboard's responder chain belongs to the host presentation. On
+        // current iOS versions the URL-capable responder is normally UIScene,
+        // not UIApplication. These APIs take different option types, so they
+        // must be invoked as their real classes instead of through one dynamic
+        // Objective-C signature.
+        if let result = await openUsingResponderChain(url) {
+            attempts.append("responder-\(result.route):\(result.didOpen)")
+            if result.didOpen {
+                return .opened(route: result.route, attempts: attempts)
+            }
+        }
+
+        // Apple doesn't consistently honor NSExtensionContext.open for custom
+        // keyboards, but keep the supported extension API as a fallback.
         if let extensionContext {
             let didOpen = await withCheckedContinuation { continuation in
                 extensionContext.open(url) { success in
                     continuation.resume(returning: success)
                 }
             }
-            if didOpen { return true }
+            attempts.append("extension-context:\(didOpen)")
+            if didOpen {
+                return .opened(route: "extension-context", attempts: attempts)
+            }
         }
 
-        // Keyboard extensions are not consistently permitted to use
-        // NSExtensionContext.open. The responder-chain fallback is the same
-        // sideload-only handoff used by microphone keyboard utilities.
-        let selector = NSSelectorFromString("openURL:")
+        // This personal sideload can still fall back to opening its bundle.
+        // App activation consumes the pending shared launch request even when
+        // the custom deep link itself isn't delivered.
+        let didOpenBundle = openContainingBundle()
+        attempts.append("workspace-bundle:\(didOpenBundle)")
+        if didOpenBundle {
+            return .opened(route: "workspace-bundle", attempts: attempts)
+        }
+
+        return .failed(attempts: attempts)
+    }
+
+    private func openUsingResponderChain(
+        _ url: URL
+    ) async -> (didOpen: Bool, route: String)? {
         var responder: UIResponder? = self
         while let current = responder {
-            if current.responds(to: selector) {
-                _ = current.perform(selector, with: url)
-                return true
+            if let scene = current as? UIScene {
+                let didOpen = await scene.open(url, options: nil)
+                return (didOpen, "scene")
+            }
+            if let application = current as? UIApplication {
+                let didOpen = await application.open(url, options: [:])
+                return (didOpen, "application")
             }
             responder = current.next
         }
-        return false
+        return nil
+    }
+
+    private func openContainingBundle() -> Bool {
+        guard
+            let extensionBundleIdentifier = Bundle.main.bundleIdentifier,
+            extensionBundleIdentifier.hasSuffix(".Keyboard")
+        else {
+            return false
+        }
+        let containingBundleIdentifier = String(
+            extensionBundleIdentifier.dropLast(".Keyboard".count)
+        )
+
+        guard let workspaceClass = NSClassFromString("LSApplicationWorkspace") else {
+            return false
+        }
+        let defaultSelector = NSSelectorFromString("defaultWorkspace")
+        guard
+            let defaultMethod = class_getClassMethod(
+                workspaceClass,
+                defaultSelector
+            ),
+            let defaultEncoding = method_getTypeEncoding(defaultMethod),
+            String(cString: defaultEncoding) == "@16@0:8"
+        else {
+            return false
+        }
+        typealias DefaultWorkspaceFunction = @convention(c) (
+            AnyClass,
+            Selector
+        ) -> Unmanaged<AnyObject>?
+        let defaultWorkspace = unsafeBitCast(
+            method_getImplementation(defaultMethod),
+            to: DefaultWorkspaceFunction.self
+        )
+        guard
+            let workspace = defaultWorkspace(
+                workspaceClass,
+                defaultSelector
+            )?.takeUnretainedValue()
+        else {
+            return false
+        }
+
+        let openSelector = NSSelectorFromString("openApplicationWithBundleID:")
+        guard
+            let openMethod = class_getInstanceMethod(workspaceClass, openSelector),
+            let openEncoding = method_getTypeEncoding(openMethod),
+            String(cString: openEncoding) == "B24@0:8@16"
+        else {
+            return false
+        }
+        typealias OpenApplicationFunction = @convention(c) (
+            AnyObject,
+            Selector,
+            NSString
+        ) -> Bool
+        let openApplication = unsafeBitCast(
+            method_getImplementation(openMethod),
+            to: OpenApplicationFunction.self
+        )
+        return openApplication(
+            workspace,
+            openSelector,
+            containingBundleIdentifier as NSString
+        )
     }
 
     private func insert(transcript: String) {

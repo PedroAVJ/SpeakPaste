@@ -1,6 +1,31 @@
 import Combine
 import Foundation
 
+struct KeyboardAppLaunchOutcome: Equatable, Sendable {
+    let didOpen: Bool
+    let route: String?
+    let attempts: [String]
+
+    static func opened(
+        route: String,
+        attempts: [String]
+    ) -> KeyboardAppLaunchOutcome {
+        KeyboardAppLaunchOutcome(
+            didOpen: true,
+            route: route,
+            attempts: attempts
+        )
+    }
+
+    static func failed(attempts: [String]) -> KeyboardAppLaunchOutcome {
+        KeyboardAppLaunchOutcome(
+            didOpen: false,
+            route: nil,
+            attempts: attempts
+        )
+    }
+}
+
 @MainActor
 final class KeyboardModel: ObservableObject {
     @Published private(set) var snapshot: SharedDictationSnapshot
@@ -8,25 +33,31 @@ final class KeyboardModel: ObservableObject {
     @Published private(set) var localError: String?
 
     private let store: SharedDictationStore
-    private let resolveHostBundleIdentifier: () -> String?
-    private let openContainingApp: (URL) async -> Bool
+    private let resolveHostApplication: () -> HostApplicationResolution
+    private let openContainingApp: (URL) async -> KeyboardAppLaunchOutcome
     private let insertTranscript: (String) -> Void
+    private let insertText: (String) -> Void
+    private let deleteBackward: () -> Void
     private let advanceToNextKeyboard: () -> Void
     private var pollTask: Task<Void, Never>?
     private var insertedSessionIDs: Set<UUID> = []
 
     init(
         store: SharedDictationStore = SharedDictationStore(),
-        resolveHostBundleIdentifier: @escaping () -> String?,
-        openContainingApp: @escaping (URL) async -> Bool,
+        resolveHostApplication: @escaping () -> HostApplicationResolution,
+        openContainingApp: @escaping (URL) async -> KeyboardAppLaunchOutcome,
         insertTranscript: @escaping (String) -> Void,
+        insertText: @escaping (String) -> Void,
+        deleteBackward: @escaping () -> Void,
         advanceToNextKeyboard: @escaping () -> Void
     ) {
         self.store = store
         self.snapshot = store.load()
-        self.resolveHostBundleIdentifier = resolveHostBundleIdentifier
+        self.resolveHostApplication = resolveHostApplication
         self.openContainingApp = openContainingApp
         self.insertTranscript = insertTranscript
+        self.insertText = insertText
+        self.deleteBackward = deleteBackward
         self.advanceToNextKeyboard = advanceToNextKeyboard
     }
 
@@ -66,8 +97,13 @@ final class KeyboardModel: ObservableObject {
             return
         }
 
+        let hostResolution = resolveHostApplication()
         let newSnapshot = store.begin(
-            returnBundleIdentifier: resolveHostBundleIdentifier()
+            returnBundleIdentifier: hostResolution.bundleIdentifier
+        )
+        store.setHostResolutionDiagnostics(
+            hostResolution.attempts,
+            sessionID: newSnapshot.sessionID
         )
         snapshot = newSnapshot
         guard let url = URL(
@@ -77,9 +113,24 @@ final class KeyboardModel: ObservableObject {
         }
 
         Task {
-            let didOpen = await openContainingApp(url)
-            guard !didOpen else { return }
-            let message = "SpeakPaste could not open. Open the app once, then try again."
+            let outcome = await openContainingApp(url)
+            store.setLaunchDiagnostics(
+                outcome.attempts,
+                successfulRoute: outcome.route,
+                sessionID: newSnapshot.sessionID
+            )
+            if outcome.didOpen {
+                try? await Task.sleep(for: .seconds(4))
+                let latest = store.load()
+                guard
+                    latest.sessionID == newSnapshot.sessionID,
+                    latest.phase == .launching
+                else {
+                    return
+                }
+            }
+
+            let message = "SpeakPaste did not open. Dismiss this message and try again."
             store.setPhase(
                 .failed,
                 sessionID: newSnapshot.sessionID,
@@ -115,6 +166,14 @@ final class KeyboardModel: ObservableObject {
         advanceToNextKeyboard()
     }
 
+    func type(_ text: String) {
+        insertText(text)
+    }
+
+    func backspace() {
+        deleteBackward()
+    }
+
     func dismissError() {
         localError = nil
         store.reset()
@@ -122,7 +181,15 @@ final class KeyboardModel: ObservableObject {
     }
 
     private func refresh() {
-        let latest = store.load()
+        var latest = store.load()
+        if
+            latest.phase == .launching,
+            Date().timeIntervalSince(latest.updatedAt) > 15
+        {
+            store.reset()
+            latest = store.load()
+            localError = nil
+        }
         snapshot = latest
 
         guard

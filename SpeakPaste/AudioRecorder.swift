@@ -5,6 +5,7 @@ import Foundation
 enum AudioRecorderError: LocalizedError {
     case microphoneDenied
     case couldNotStart
+    case configurationFailed(stage: String, underlying: Error)
 
     var errorDescription: String? {
         switch self {
@@ -12,6 +13,8 @@ enum AudioRecorderError: LocalizedError {
             "Microphone access is off. Enable it for SpeakPaste in Settings."
         case .couldNotStart:
             "The microphone could not start. Check whether another app is using it."
+        case let .configurationFailed(stage, underlying):
+            "Microphone \(stage) failed: \(underlying.localizedDescription)"
         }
     }
 }
@@ -35,8 +38,25 @@ final class AudioRecorder: ObservableObject {
 
     func start() throws -> URL {
         let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.record, mode: .spokenAudio, options: [.duckOthers])
-        try session.setActive(true)
+        do {
+            // This app only captures speech. `spokenAudio` is a playback mode,
+            // and `duckOthers` is not valid with the record-only category;
+            // that invalid combination returns OSStatus -50 on the iPhone.
+            try session.setCategory(.record, mode: .measurement, options: [])
+        } catch {
+            throw AudioRecorderError.configurationFailed(
+                stage: "configuration",
+                underlying: error
+            )
+        }
+        do {
+            try session.setActive(true)
+        } catch {
+            throw AudioRecorderError.configurationFailed(
+                stage: "activation",
+                underlying: error
+            )
+        }
 
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("SpeakPaste", isDirectory: true)
@@ -53,7 +73,16 @@ final class AudioRecorder: ObservableObject {
             AVEncoderBitRateKey: 96_000,
         ]
 
-        let recorder = try AVAudioRecorder(url: url, settings: settings)
+        let recorder: AVAudioRecorder
+        do {
+            recorder = try AVAudioRecorder(url: url, settings: settings)
+        } catch {
+            try? session.setActive(false, options: .notifyOthersOnDeactivation)
+            throw AudioRecorderError.configurationFailed(
+                stage: "recorder creation",
+                underlying: error
+            )
+        }
         recorder.isMeteringEnabled = true
         recorder.prepareToRecord()
         guard recorder.record() else {

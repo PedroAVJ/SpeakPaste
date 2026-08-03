@@ -103,44 +103,28 @@ struct ContentView: View {
             SettingsView()
                 .presentationDragIndicator(.visible)
         }
-        .alert(
-            "Recording started",
-            isPresented: keyboardReturnAlertPresented,
-            presenting: model.keyboardReturnPrompt
-        ) { prompt in
-            Button("Return to \(prompt.appName)") {
-                // returnToKeyboardHost() reads the prompt from the model, and
-                // alert dismissal can clear it before this action runs.
-                if model.keyboardReturnPrompt == nil {
-                    model.keyboardReturnPrompt = prompt
-                }
-                model.returnToKeyboardHost()
+        .alert("", isPresented: $model.showSwitchbackExplanation) {
+            Button("OK") {
+                model.confirmSwitchbackExplanation()
             }
-            Button("Stay in SpeakPaste", role: .cancel) {}
-        } message: { prompt in
+        } message: {
             Text(
-                "Recording is running. Head back to \(prompt.appName) and keep talking — the keyboard types the transcript when you stop."
+                "SpeakPaste will now take you back to your previous app. The first time you do this in a new app, iOS may ask for confirmation."
             )
         }
         .alert(
             "Couldn't switch back automatically",
             isPresented: $model.showManualReturnHint
         ) {
-            Button("OK", role: .cancel) {}
+            Button("Try Again") {
+                model.returnToKeyboardHost()
+            }
+            Button("Swipe Back", role: .cancel) {}
         } message: {
             Text(
                 "Swipe right along the bottom home bar to return to your app. Recording continues while you switch."
             )
         }
-    }
-
-    private var keyboardReturnAlertPresented: Binding<Bool> {
-        Binding(
-            get: { model.keyboardReturnPrompt != nil },
-            set: { isPresented in
-                if !isPresented { model.keyboardReturnPrompt = nil }
-            }
-        )
     }
 
     private var errorMessage: String? {
@@ -151,9 +135,9 @@ struct ContentView: View {
     private var header: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("SpeakPaste")
-                    .font(.system(.title2, design: .rounded, weight: .bold))
-                    .foregroundStyle(Theme.ink)
+            Text("SpeakPaste")
+                .font(.system(.title2, design: .rounded, weight: .bold))
+                .foregroundStyle(Theme.ink)
                 Text("Dictate. Copy. Paste anywhere.")
                     .font(.footnote)
                     .foregroundStyle(Theme.inkMuted)

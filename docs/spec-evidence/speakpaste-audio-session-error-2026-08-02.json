@@ -1,0 +1,12 @@
+{
+  "command": "none",
+  "errorMessage": "The operation couldn’t be completed. (OSStatus error -50.)",
+  "launchAttempts": [
+    "responder-scene:true"
+  ],
+  "phase": "failed",
+  "sessionID": "219ADC07-940B-4867-BE10-B81424B466BE",
+  "startedAt": 807411028.440114,
+  "successfulLaunchRoute": "scene",
+  "updatedAt": 807411028.600305
+}

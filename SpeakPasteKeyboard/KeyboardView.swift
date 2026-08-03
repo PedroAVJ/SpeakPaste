@@ -1,36 +1,14 @@
 import SwiftUI
 
-// The keyboard extension is a separate target and cannot link the app's
-// Theme, so the warm-dark palette is mirrored here. Keep values in sync with
-// SpeakPaste/ContentView.swift.
 private enum KBTheme {
-    static let background = Color(red: 0.09, green: 0.078, blue: 0.068)
-    static let backgroundTop = Color(red: 0.128, green: 0.106, blue: 0.09)
-    static let surface = Color(red: 0.15, green: 0.132, blue: 0.117)
-    static let surfaceRaised = Color(red: 0.185, green: 0.164, blue: 0.146)
-    static let stroke = Color.white.opacity(0.07)
-    static let accent = Color(red: 1.0, green: 0.56, blue: 0.35)
-    static let accentDeep = Color(red: 0.91, green: 0.39, blue: 0.24)
-    static let onAccent = Color(red: 0.17, green: 0.09, blue: 0.05)
-    static let ink = Color(red: 0.96, green: 0.94, blue: 0.91)
-    static let inkMuted = Color(red: 0.65, green: 0.61, blue: 0.56)
-    static let danger = Color(red: 0.98, green: 0.46, blue: 0.4)
-
-    static var backgroundGradient: LinearGradient {
-        LinearGradient(
-            colors: [backgroundTop, background],
-            startPoint: .top,
-            endPoint: .bottom
-        )
-    }
-
-    static var accentGradient: LinearGradient {
-        LinearGradient(
-            colors: [accent, accentDeep],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
-    }
+    static let keyboardBackground = Color(red: 0.82, green: 0.84, blue: 0.87)
+    static let key = Color(red: 0.99, green: 0.99, blue: 1.0)
+    static let utilityKey = Color(red: 0.67, green: 0.70, blue: 0.74)
+    static let ink = Color(red: 0.08, green: 0.09, blue: 0.10)
+    static let inkMuted = Color(red: 0.34, green: 0.36, blue: 0.39)
+    static let accent = Color(red: 0.94, green: 0.40, blue: 0.20)
+    static let accentSoft = Color(red: 1.0, green: 0.89, blue: 0.83)
+    static let danger = Color(red: 0.85, green: 0.18, blue: 0.16)
 
     static func timeString(_ interval: TimeInterval) -> String {
         let total = Int(interval)
@@ -38,84 +16,490 @@ private enum KBTheme {
     }
 }
 
-private struct KBPrimaryButtonStyle: ButtonStyle {
+private struct KBKeyButtonStyle: ButtonStyle {
+    let fill: Color
+    let foreground: Color
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.subheadline.weight(.semibold))
-            .foregroundStyle(KBTheme.onAccent)
-            .padding(.horizontal, 20)
-            .frame(maxWidth: .infinity, minHeight: 48)
-            .background(Capsule().fill(KBTheme.accentGradient))
-            .opacity(configuration.isPressed ? 0.8 : 1)
+            .foregroundStyle(foreground)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(fill)
+                    .shadow(
+                        color: .black.opacity(configuration.isPressed ? 0.04 : 0.22),
+                        radius: configuration.isPressed ? 0 : 0.5,
+                        y: configuration.isPressed ? 0 : 1.5
+                    )
+            )
+            .scaleEffect(configuration.isPressed ? 0.96 : 1)
+            .offset(y: configuration.isPressed ? 1 : 0)
     }
 }
 
-private struct KBQuietButtonStyle: ButtonStyle {
-    var tint: Color = KBTheme.accent
+private struct KBKey: View {
+    var text: String?
+    var systemImage: String?
+    var width: CGFloat?
+    var fill = KBTheme.key
+    var foreground = KBTheme.ink
+    var font: Font = .system(size: 21)
+    let accessibilityLabel: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Group {
+                if let systemImage {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 17, weight: .medium))
+                } else {
+                    Text(text ?? "")
+                        .font(font)
+                }
+            }
+        }
+        .buttonStyle(KBKeyButtonStyle(fill: fill, foreground: foreground))
+        .frame(
+            minWidth: width,
+            maxWidth: width ?? .infinity,
+            minHeight: 40,
+            maxHeight: 40
+        )
+        .accessibilityLabel(accessibilityLabel)
+    }
+}
+
+private struct KBStatusButtonStyle: ButtonStyle {
+    var fill: Color
+    var foreground: Color
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.subheadline.weight(.semibold))
-            .foregroundStyle(tint)
+            .foregroundStyle(foreground)
             .padding(.horizontal, 16)
-            .frame(minHeight: 44)
-            .background(Capsule().fill(KBTheme.surface))
-            .overlay(Capsule().stroke(KBTheme.stroke))
-            .opacity(configuration.isPressed ? 0.7 : 1)
+            .frame(minHeight: 40)
+            .background(Capsule().fill(fill))
+            .opacity(configuration.isPressed ? 0.72 : 1)
     }
+}
+
+private enum KeyPlane {
+    case letters
+    case numbers
+    case symbols
 }
 
 struct KeyboardView: View {
     @ObservedObject var model: KeyboardModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @ScaledMetric(relativeTo: .title) private var micDiameter: CGFloat = 64
+    @State private var isShifted = false
+    @State private var plane: KeyPlane = .letters
+
+    private let letterRows = [
+        Array("qwertyuiop"),
+        Array("asdfghjkl"),
+        Array("zxcvbnm"),
+    ]
+    private let numberRows = [
+        ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"],
+        ["-", "/", ":", ";", "(", ")", "$", "&", "@", "\""],
+    ]
+    private let symbolRows = [
+        ["[", "]", "{", "}", "#", "%", "^", "*", "+", "="],
+        ["_", "\\", "|", "~", "<", ">", "€", "£", "¥", "•"],
+    ]
+    private let punctuationRow = [".", ",", "?", "!", "'"]
 
     var body: some View {
-        VStack(spacing: 6) {
-            stage
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            bottomBar
+        Group {
+            if !model.hasFullAccess {
+                fullAccessPanel
+            } else if let errorMessage {
+                errorPanel(errorMessage)
+            } else if model.isLaunching {
+                launchingPanel
+            } else if model.isRecording {
+                recordingPanel
+            } else if model.isTranscribing {
+                processingPanel
+            } else {
+                typingKeyboard
+            }
         }
-        .padding(.horizontal, 14)
-        .padding(.top, 10)
-        .padding(.bottom, 8)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(KBTheme.backgroundGradient.ignoresSafeArea())
-        .tint(KBTheme.accent)
-        .environment(\.colorScheme, .dark)
-        // The keyboard has a fixed 272pt frame; text scales with Dynamic Type
-        // up to xxLarge, then caps so every state still fits.
-        .dynamicTypeSize(...DynamicTypeSize.xxLarge)
+        .background(KBTheme.keyboardBackground.ignoresSafeArea())
+        .environment(\.colorScheme, .light)
+        .dynamicTypeSize(...DynamicTypeSize.xLarge)
         .animation(
-            reduceMotion ? nil : .easeInOut(duration: 0.2),
+            reduceMotion ? nil : .easeInOut(duration: 0.18),
             value: model.snapshot.phase
-        )
-        .animation(
-            reduceMotion ? nil : .easeInOut(duration: 0.2),
-            value: model.localError
-        )
-        .animation(
-            reduceMotion ? nil : .easeInOut(duration: 0.2),
-            value: model.hasFullAccess
         )
     }
 
-    // MARK: - States
+    private var typingKeyboard: some View {
+        VStack(spacing: 5) {
+            accessoryBar
 
-    @ViewBuilder
-    private var stage: some View {
-        if !model.hasFullAccess {
-            fullAccessPrompt
-        } else if let message = errorMessage {
-            errorCard(message)
-        } else if model.isLaunching {
-            launchingState
-        } else if model.isRecording {
-            recordingState
-        } else if model.isTranscribing {
-            transcribingState
-        } else {
-            idleState
+            if plane == .letters {
+                letterKeyboard
+            } else {
+                numberKeyboard
+            }
+        }
+        .padding(.horizontal, 4)
+        .padding(.top, 5)
+        .padding(.bottom, 4)
+    }
+
+    private var accessoryBar: some View {
+        HStack(spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "waveform")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(KBTheme.accent)
+                    .frame(width: 25, height: 25)
+                    .background(Circle().fill(KBTheme.accentSoft))
+
+                Text("SpeakPaste")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(KBTheme.inkMuted)
+            }
+
+            Spacer(minLength: 8)
+
+            Button(action: model.startDictation) {
+                HStack(spacing: 5) {
+                    Text("Start")
+                    Image(systemName: "waveform")
+                }
+            }
+            .buttonStyle(
+                KBStatusButtonStyle(
+                    fill: KBTheme.accent,
+                    foreground: .white
+                )
+            )
+            .frame(height: 32)
+            .accessibilityLabel("Start dictation")
+            .accessibilityHint("Briefly opens SpeakPaste and starts recording.")
+        }
+        .frame(height: 34)
+        .padding(.horizontal, 5)
+    }
+
+    private var letterKeyboard: some View {
+        VStack(spacing: 5) {
+            keyRow(letterRows[0])
+            keyRow(letterRows[1])
+                .padding(.horizontal, 17)
+
+            HStack(spacing: 5) {
+                KBKey(
+                    systemImage: isShifted ? "shift.fill" : "shift",
+                    width: 44,
+                    fill: isShifted ? KBTheme.key : KBTheme.utilityKey,
+                    accessibilityLabel: isShifted ? "Shift on" : "Shift"
+                ) {
+                    isShifted.toggle()
+                }
+
+                keyRow(letterRows[2])
+
+                KBKey(
+                    systemImage: "delete.left",
+                    width: 44,
+                    fill: KBTheme.utilityKey,
+                    accessibilityLabel: "Delete"
+                ) {
+                    model.backspace()
+                }
+            }
+
+            functionalRow(modeLabel: "123") {
+                plane = .numbers
+                isShifted = false
+            }
+        }
+    }
+
+    private var numberKeyboard: some View {
+        let rows = plane == .symbols ? symbolRows : numberRows
+        return VStack(spacing: 5) {
+            textKeyRow(rows[0])
+            textKeyRow(rows[1])
+                .padding(.horizontal, 9)
+
+            HStack(spacing: 5) {
+                KBKey(
+                    text: plane == .symbols ? "123" : "#+=",
+                    width: 44,
+                    fill: KBTheme.utilityKey,
+                    font: .system(size: 14, weight: .medium),
+                    accessibilityLabel: plane == .symbols
+                        ? "Numbers"
+                        : "More symbols"
+                ) {
+                    plane = plane == .symbols ? .numbers : .symbols
+                }
+
+                textKeyRow(punctuationRow)
+
+                KBKey(
+                    systemImage: "delete.left",
+                    width: 44,
+                    fill: KBTheme.utilityKey,
+                    accessibilityLabel: "Delete"
+                ) {
+                    model.backspace()
+                }
+            }
+
+            functionalRow(modeLabel: "ABC") {
+                plane = .letters
+            }
+        }
+    }
+
+    private func keyRow(_ characters: [Character]) -> some View {
+        HStack(spacing: 5) {
+            ForEach(characters, id: \.self) { character in
+                let value = isShifted
+                    ? String(character).uppercased()
+                    : String(character)
+                KBKey(
+                    text: value,
+                    accessibilityLabel: value
+                ) {
+                    model.type(value)
+                    isShifted = false
+                }
+            }
+        }
+    }
+
+    private func textKeyRow(_ values: [String]) -> some View {
+        HStack(spacing: 5) {
+            ForEach(values, id: \.self) { value in
+                KBKey(text: value, accessibilityLabel: value) {
+                    model.type(value)
+                }
+            }
+        }
+    }
+
+    private func functionalRow(
+        modeLabel: String,
+        modeAction: @escaping () -> Void
+    ) -> some View {
+        HStack(spacing: 5) {
+            KBKey(
+                text: modeLabel,
+                width: 45,
+                fill: KBTheme.utilityKey,
+                font: .system(size: 14, weight: .medium),
+                accessibilityLabel: modeLabel == "ABC"
+                    ? "Letters"
+                    : "Numbers and symbols",
+                action: modeAction
+            )
+
+            KBKey(
+                systemImage: "globe",
+                width: 39,
+                fill: KBTheme.utilityKey,
+                accessibilityLabel: "Next keyboard"
+            ) {
+                model.nextKeyboard()
+            }
+
+            KBKey(text: ",", width: 34, accessibilityLabel: "Comma") {
+                model.type(",")
+            }
+
+            KBKey(
+                text: "space",
+                font: .system(size: 15),
+                accessibilityLabel: "Space"
+            ) {
+                model.type(" ")
+            }
+
+            KBKey(text: ".", width: 34, accessibilityLabel: "Period") {
+                model.type(".")
+            }
+
+            KBKey(
+                text: "return",
+                width: 57,
+                fill: KBTheme.utilityKey,
+                font: .system(size: 13, weight: .medium),
+                accessibilityLabel: "Return"
+            ) {
+                model.type("\n")
+            }
+        }
+    }
+
+    private var launchingPanel: some View {
+        statusShell {
+            ProgressView()
+                .tint(KBTheme.accent)
+                .controlSize(.large)
+            Text("Opening SpeakPaste…")
+                .font(.headline)
+                .foregroundStyle(KBTheme.ink)
+            Text("This should only take a moment.")
+                .font(.caption)
+                .foregroundStyle(KBTheme.inkMuted)
+        }
+    }
+
+    private var recordingPanel: some View {
+        VStack(spacing: 0) {
+            Spacer(minLength: 4)
+
+            TimelineView(.periodic(from: model.snapshot.startedAt, by: 1)) { context in
+                let elapsed = max(
+                    0,
+                    context.date.timeIntervalSince(model.snapshot.startedAt)
+                )
+                VStack(spacing: 10) {
+                    HStack(alignment: .center, spacing: 3) {
+                        ForEach(0..<13, id: \.self) { index in
+                            Capsule()
+                                .fill(KBTheme.ink)
+                                .frame(
+                                    width: 3,
+                                    height: CGFloat(8 + ((index * 7) % 23))
+                                )
+                        }
+                    }
+                    .accessibilityHidden(true)
+
+                    HStack(spacing: 6) {
+                        Image(systemName: "circle.fill")
+                            .font(.system(size: 7))
+                            .foregroundStyle(KBTheme.danger)
+                            .symbolEffect(
+                                .pulse,
+                                options: .repeating,
+                                isActive: !reduceMotion
+                            )
+                            .accessibilityHidden(true)
+                        Text("Listening · \(KBTheme.timeString(elapsed))")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(KBTheme.inkMuted)
+                            .monospacedDigit()
+                    }
+                    .accessibilityLabel(
+                        "Recording, \(KBTheme.timeString(elapsed)) elapsed"
+                    )
+                }
+            }
+
+            Spacer(minLength: 8)
+
+            HStack(spacing: 8) {
+                Button(action: model.cancel) {
+                    Label("Cancel", systemImage: "xmark")
+                }
+                .buttonStyle(
+                    KBStatusButtonStyle(
+                        fill: KBTheme.key,
+                        foreground: KBTheme.inkMuted
+                    )
+                )
+                .accessibilityHint("Discards the recording without typing anything.")
+
+                Button(action: model.stopAndTranscribe) {
+                    Label("Stop & Insert", systemImage: "stop.fill")
+                }
+                .buttonStyle(
+                    KBStatusButtonStyle(
+                        fill: KBTheme.accent,
+                        foreground: .white
+                    )
+                )
+                .accessibilityHint("Stops recording and types the transcript here.")
+            }
+
+            Spacer(minLength: 8)
+
+            utilityFooter
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 8)
+        .padding(.bottom, 5)
+    }
+
+    private var processingPanel: some View {
+        statusShell {
+            ProgressView()
+                .tint(KBTheme.accent)
+                .controlSize(.large)
+            Text("Transcribing…")
+                .font(.headline)
+                .foregroundStyle(KBTheme.ink)
+            Text("Your words will appear at the cursor.")
+                .font(.caption)
+                .foregroundStyle(KBTheme.inkMuted)
+        }
+    }
+
+    private var fullAccessPanel: some View {
+        statusShell {
+            Image(systemName: "lock.shield.fill")
+                .font(.system(size: 25))
+                .foregroundStyle(KBTheme.accent)
+            Text("Allow Full Access")
+                .font(.headline)
+                .foregroundStyle(KBTheme.ink)
+            Text("Enable it in Settings › General › Keyboard › Keyboards › SpeakPaste.")
+                .font(.caption)
+                .foregroundStyle(KBTheme.inkMuted)
+                .multilineTextAlignment(.center)
+            Button("Open SpeakPaste", action: model.openSpeakPaste)
+                .buttonStyle(
+                    KBStatusButtonStyle(
+                        fill: KBTheme.ink,
+                        foreground: .white
+                    )
+                )
+        }
+    }
+
+    private func errorPanel(_ message: String) -> some View {
+        statusShell {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 24))
+                .foregroundStyle(KBTheme.danger)
+            Text(message)
+                .font(.footnote)
+                .foregroundStyle(KBTheme.ink)
+                .multilineTextAlignment(.center)
+                .lineLimit(3)
+
+            HStack(spacing: 8) {
+                if model.didFail && model.localError == nil {
+                    Button("Retry", action: model.retry)
+                        .buttonStyle(
+                            KBStatusButtonStyle(
+                                fill: KBTheme.accentSoft,
+                                foreground: KBTheme.accent
+                            )
+                        )
+                }
+                Button("Dismiss", action: model.dismissError)
+                    .buttonStyle(
+                        KBStatusButtonStyle(
+                            fill: KBTheme.ink,
+                            foreground: .white
+                        )
+                    )
+            }
         }
     }
 
@@ -127,238 +511,40 @@ struct KeyboardView: View {
         return nil
     }
 
-    private var idleState: some View {
-        VStack(spacing: 8) {
-            Button(action: model.startDictation) {
-                VStack(spacing: 8) {
-                    ZStack {
-                        Circle()
-                            .fill(KBTheme.accentGradient)
-                            .frame(width: micDiameter, height: micDiameter)
-                            .shadow(color: KBTheme.accent.opacity(0.35), radius: 14, y: 5)
-                        Image(systemName: "mic.fill")
-                            .font(.system(size: micDiameter * 0.4, weight: .semibold))
-                            .foregroundStyle(.white)
-                    }
-                    Text("Start Dictation")
-                        .font(.system(.headline, design: .rounded))
-                        .foregroundStyle(KBTheme.ink)
-                }
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Start dictation")
-            .accessibilityHint(
-                "Opens SpeakPaste briefly to record. Your words are typed here when you finish."
-            )
-
-            Text("Hops to SpeakPaste to record, then types your words right here.")
-                .font(.caption)
-                .foregroundStyle(KBTheme.inkMuted)
-                .multilineTextAlignment(.center)
-        }
-        .padding(.horizontal, 24)
-    }
-
-    private var launchingState: some View {
+    private func statusShell<Content: View>(
+        @ViewBuilder content: () -> Content
+    ) -> some View {
         VStack(spacing: 10) {
-            ProgressView()
-                .controlSize(.large)
-                .tint(KBTheme.accent)
-            Text("Opening SpeakPaste…")
-                .font(.system(.headline, design: .rounded))
-                .foregroundStyle(KBTheme.ink)
-            Text("The app takes over for a moment to record, then hands the words back to this keyboard.")
-                .font(.caption)
-                .foregroundStyle(KBTheme.inkMuted)
-                .multilineTextAlignment(.center)
-        }
-        .padding(.horizontal, 24)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(
-            "Opening SpeakPaste. The app records for a moment, then hands the words back to this keyboard."
-        )
-    }
-
-    private var recordingState: some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 7) {
-                Image(systemName: "circle.fill")
-                    .font(.system(size: 9))
-                    .foregroundStyle(KBTheme.danger)
-                    .symbolEffect(.pulse, options: .repeating, isActive: !reduceMotion)
-                Text("Recording")
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(KBTheme.ink)
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(Capsule().fill(KBTheme.surface))
-            .overlay(Capsule().stroke(KBTheme.stroke))
-            .accessibilityHidden(true)
-
-            TimelineView(.periodic(from: model.snapshot.startedAt, by: 1)) { context in
-                let elapsed = max(0, context.date.timeIntervalSince(model.snapshot.startedAt))
-                Text(KBTheme.timeString(elapsed))
-                    .font(.system(size: 36, weight: .light, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(KBTheme.ink)
-                    .accessibilityLabel("Recording, \(KBTheme.timeString(elapsed)) elapsed")
-            }
-
-            HStack(spacing: 10) {
-                Button {
-                    model.cancel()
-                } label: {
-                    Label("Cancel", systemImage: "xmark")
-                }
-                .buttonStyle(KBQuietButtonStyle(tint: KBTheme.inkMuted))
-                .accessibilityHint("Discards the recording without typing anything.")
-
-                Button {
-                    model.stopAndTranscribe()
-                } label: {
-                    Label("Stop & Insert", systemImage: "stop.fill")
-                }
-                .buttonStyle(KBPrimaryButtonStyle())
-                .accessibilityHint("Stops recording and types the transcript here.")
-            }
+            Spacer(minLength: 4)
+            content()
+            Spacer(minLength: 4)
+            utilityFooter
         }
         .padding(.horizontal, 20)
+        .padding(.vertical, 6)
     }
 
-    private var transcribingState: some View {
-        VStack(spacing: 10) {
-            ProgressView()
-                .controlSize(.large)
-                .tint(KBTheme.accent)
-            Text("Transcribing…")
-                .font(.system(.headline, design: .rounded))
-                .foregroundStyle(KBTheme.ink)
-            Text("Your words will be typed at the cursor in a moment.")
-                .font(.caption)
-                .foregroundStyle(KBTheme.inkMuted)
-                .multilineTextAlignment(.center)
-        }
-        .padding(.horizontal, 24)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Transcribing. Your words will be typed at the cursor in a moment.")
-    }
-
-    private func errorCard(_ message: String) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top, spacing: 8) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(KBTheme.danger)
-                    .padding(.top, 2)
-                    .accessibilityHidden(true)
-
-                Text(message)
-                    .font(.footnote)
-                    .foregroundStyle(KBTheme.ink)
-                    .lineLimit(3)
-                    .minimumScaleFactor(0.9)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
-                Button {
-                    model.dismissError()
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(KBTheme.inkMuted)
-                        .frame(width: 44, height: 44)
-                        .contentShape(Rectangle())
-                }
-                .padding(.top, -10)
-                .padding(.trailing, -10)
-                .accessibilityLabel("Dismiss error")
-            }
-
-            HStack(spacing: 8) {
-                // A launch failure (localError) can't be retried from here
-                // because the containing app never opened; the shared retry
-                // command only reaches an app that is already running.
-                if model.didFail && model.localError == nil {
-                    Button {
-                        model.retry()
-                    } label: {
-                        Label("Retry", systemImage: "arrow.clockwise")
-                    }
-                    .buttonStyle(KBQuietButtonStyle())
-                    .accessibilityHint("Asks SpeakPaste to transcribe the recording again.")
-                }
-
-                Button {
-                    model.openSpeakPaste()
-                } label: {
-                    Label("Open SpeakPaste", systemImage: "arrow.up.forward.app")
-                }
-                .buttonStyle(KBQuietButtonStyle())
-                .accessibilityHint("Opens the SpeakPaste app.")
-            }
-        }
-        .padding(12)
-        .background(RoundedRectangle(cornerRadius: 18).fill(KBTheme.surfaceRaised))
-        .overlay(
-            RoundedRectangle(cornerRadius: 18)
-                .stroke(KBTheme.danger.opacity(0.35))
-        )
-        .padding(.horizontal, 2)
-    }
-
-    private var fullAccessPrompt: some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 7) {
-                Image(systemName: "lock.shield.fill")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(KBTheme.accent)
-                    .accessibilityHidden(true)
-                Text("Allow Full Access")
-                    .font(.system(.headline, design: .rounded))
-                    .foregroundStyle(KBTheme.ink)
-            }
-
-            Text(
-                "SpeakPaste needs Full Access to hand dictation between this keyboard and the app. Turn it on in Settings › General › Keyboard › Keyboards › SpeakPaste."
-            )
-            .font(.caption)
-            .foregroundStyle(KBTheme.inkMuted)
-            .multilineTextAlignment(.center)
-            .fixedSize(horizontal: false, vertical: true)
-
-            Button {
-                model.openSpeakPaste()
-            } label: {
-                Label("Open SpeakPaste", systemImage: "arrow.up.forward.app")
-            }
-            .buttonStyle(KBPrimaryButtonStyle())
-            .accessibilityHint("Opens the SpeakPaste app with setup instructions.")
-        }
-        .padding(.horizontal, 20)
-    }
-
-    // MARK: - Bottom bar
-
-    private var bottomBar: some View {
+    private var utilityFooter: some View {
         HStack {
             Button(action: model.nextKeyboard) {
                 Image(systemName: "globe")
                     .font(.system(size: 17, weight: .medium))
-                    .foregroundStyle(KBTheme.ink)
-                    .frame(width: 44, height: 44)
-                    .background(Circle().fill(KBTheme.surface))
-                    .overlay(Circle().stroke(KBTheme.stroke))
+                    .frame(width: 38, height: 32)
+                    .background(Capsule().fill(KBTheme.utilityKey.opacity(0.7)))
             }
+            .foregroundStyle(KBTheme.ink)
             .accessibilityLabel("Next keyboard")
-            .accessibilityHint("Switches to your next keyboard.")
 
             Spacer()
 
-            Text("SpeakPaste")
-                .font(.caption2.weight(.semibold))
-                .kerning(0.6)
-                .foregroundStyle(KBTheme.inkMuted.opacity(0.8))
-                .accessibilityHidden(true)
+            HStack(spacing: 5) {
+                Image(systemName: "waveform")
+                    .foregroundStyle(KBTheme.accent)
+                Text("SpeakPaste")
+            }
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(KBTheme.inkMuted)
+            .accessibilityHidden(true)
         }
     }
 }
