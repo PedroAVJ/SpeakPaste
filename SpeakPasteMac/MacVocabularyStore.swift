@@ -23,8 +23,11 @@ final class MacVocabularyStore: ObservableObject {
     /// still works for the session; it just will not outlive it.
     private let fileURL: URL?
 
-    init() {
-        fileURL = Self.storedFileURL()
+    /// `directory` exists so the list can be exercised against a scratch folder
+    /// instead of the real Application Support, matching `MacHistoryStore`.
+    /// Production callers use the default.
+    init(directory: URL? = nil) {
+        fileURL = Self.storedFileURL(in: directory)
         terms = Self.normalized(Self.decodedTerms(at: fileURL))
     }
 
@@ -119,6 +122,14 @@ final class MacVocabularyStore: ObservableObject {
         // UserDefaults is that a person can open it and read it.
         encoder.outputFormatting = [.prettyPrinted]
         guard let data = try? encoder.encode(terms) else { return }
+        // The directory exists as of launch, but the file is advertised as
+        // hand-editable — someone who moves or clears the SpeakPaste folder
+        // mid-session would otherwise lose every edit made afterwards, with an
+        // atomic write that fails silently.
+        try? FileManager.default.createDirectory(
+            at: fileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
         try? data.write(to: fileURL, options: .atomic)
     }
 
@@ -167,25 +178,30 @@ final class MacVocabularyStore: ObservableObject {
         return stored
     }
 
-    private static func storedFileURL() -> URL? {
+    private static func storedFileURL(in directory: URL?) -> URL? {
         let manager = FileManager.default
-        guard
-            let support = try? manager.url(
-                for: .applicationSupportDirectory,
-                in: .userDomainMask,
-                appropriateFor: nil,
-                create: true
-            )
-        else {
-            return nil
+        let container: URL
+        if let directory {
+            container = directory
+        } else {
+            guard
+                let support = try? manager.url(
+                    for: .applicationSupportDirectory,
+                    in: .userDomainMask,
+                    appropriateFor: nil,
+                    create: true
+                )
+            else {
+                return nil
+            }
+            container = support.appending(path: "SpeakPaste", directoryHint: .isDirectory)
         }
 
-        let directory = support.appending(path: "SpeakPaste", directoryHint: .isDirectory)
         do {
-            try manager.createDirectory(at: directory, withIntermediateDirectories: true)
+            try manager.createDirectory(at: container, withIntermediateDirectories: true)
         } catch {
             return nil
         }
-        return directory.appending(path: "vocabulary.json", directoryHint: .notDirectory)
+        return container.appending(path: "vocabulary.json", directoryHint: .notDirectory)
     }
 }
