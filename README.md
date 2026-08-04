@@ -58,8 +58,11 @@ You do not have to wait at the keyboard. If the field you dictated into is no
 longer focused when the transcript arrives, SpeakPaste converts that card into a
 safe hold instead of pasting somewhere else. The HUD acknowledges that once with
 a count-free clipboard or tray glyph, then disappears after two seconds; the
-dashboard owns the durable recovery state. Later chunks for that exact field
-join the held run without repeatedly overwriting your clipboard. Click back into
+dashboard owns the durable recovery state. If automatic insertion fails or the
+destination cannot expose enough text to confirm it, the newest completed
+dictation is left on the clipboard even when older recovery entries exist, so
+Command-V remains an immediate fallback. Later chunks for that exact field
+still join the durable held run in spoken order. Click back into
 the field to insert the run in spoken order, or press
 **⌥⌘V** to drop it wherever your cursor is. Delivery is attempted only into the
 captured field — never merely the same application. If a web editor rebuilds its

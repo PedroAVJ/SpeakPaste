@@ -3186,9 +3186,9 @@ final class MacAppModel: ObservableObject {
             return
         }
         // Once one chunk for this exact AX field is held, every later chunk in
-        // that run joins it without touching the pasteboard or starting an
-        // ambiguous delivery receipt. The whole run will leave in order when
-        // that exact field returns.
+        // that run joins it without starting an ambiguous delivery receipt.
+        // The whole run will leave in order when that exact field returns; the
+        // newest chunk alone becomes the immediate clipboard fallback.
         if let target = finished.target,
            heldTranscripts.contains(where: { held in
                guard let heldTarget = held.target else { return false }
@@ -3205,6 +3205,19 @@ final class MacAppModel: ObservableObject {
                 recordingDuration: finished.recordingDuration,
                 copyOnPersistenceFailure: false
             )
+            // The earlier run stays queued to prevent an automatic duplicate,
+            // but the dictation that just completed must still be immediately
+            // recoverable with Command-V. A stale queue is never permission to
+            // leave an unrelated clipboard value behind.
+            _ = await pasteController.copyToPasteboardAfterWaiting(
+                finished.text,
+                heldClipboardOwner: MacHeldClipboardIdentity(
+                    transcriptID: deliveryEscrowID,
+                    createdAt: finished.createdAt,
+                    sourceText: finished.text
+                )
+            )
+            refreshHeldClipboardOwnership()
             attempts = reliabilityStore.prepend(
                 MacReliabilityAttempt(
                     deviceName: finished.deviceName,
@@ -3251,14 +3264,16 @@ final class MacAppModel: ObservableObject {
             return
         }
         activeDeliveryEscrowIDs.insert(deliveryEscrowID)
-        let copyOnHold = heldTranscripts.isEmpty
-        let heldClipboardOwner = copyOnHold
-            ? MacHeldClipboardIdentity(
-                transcriptID: deliveryEscrowID,
-                createdAt: finished.createdAt,
-                sourceText: finished.text
-            )
-            : nil
+        // Every newly completed dictation owns its own manual fallback. Older
+        // recovery entries remain durable in-app, but must not suppress the
+        // newest transcript from the clipboard when automatic output fails or
+        // cannot be confirmed (notably in Claude/terminal editors).
+        let copyOnHold = true
+        let heldClipboardOwner = MacHeldClipboardIdentity(
+            transcriptID: deliveryEscrowID,
+            createdAt: finished.createdAt,
+            sourceText: finished.text
+        )
         let delivery = await pasteController.deliver(
             finished.preparedChunk,
             to: finished.target,

@@ -48,3 +48,32 @@ final class MacPasteVerificationTests: XCTestCase {
         XCTAssertFalse(MacPasteVerification.isExactInsertion("", before: "draft", after: "draft"))
     }
 }
+
+final class MacPasteboardRecoveryPolicyTests: XCTestCase {
+    func testUnverifiedOutputKeepsNewestTranscriptOnClipboard() {
+        XCTAssertTrue(
+            MacPasteboardRecoveryPolicy.shouldKeepTranscript(
+                deliveryReachedOutputBoundary: true,
+                pasteWasVerified: false
+            )
+        )
+    }
+
+    func testVerifiedOutputMayRestoreBorrowedClipboard() {
+        XCTAssertFalse(
+            MacPasteboardRecoveryPolicy.shouldKeepTranscript(
+                deliveryReachedOutputBoundary: true,
+                pasteWasVerified: true
+            )
+        )
+    }
+
+    func testPassiveHoldDoesNotClaimAnOutputAttemptOccurred() {
+        XCTAssertFalse(
+            MacPasteboardRecoveryPolicy.shouldKeepTranscript(
+                deliveryReachedOutputBoundary: false,
+                pasteWasVerified: false
+            )
+        )
+    }
+}

@@ -593,7 +593,11 @@ struct MacPasteController {
             if method != .menuPaste, !CGPreflightPostEventAccess() {
                 return fallbackResult(
                     text,
-                    copyOnHold: copyOnHold,
+                    // The exact destination was valid and delivery reached
+                    // its output boundary. A refused synthetic route must
+                    // leave this transcript ready for the user's Command-V,
+                    // even when an older recovery entry already exists.
+                    copyOnHold: true,
                     copied: .copiedNeedsKeyboardOutput,
                     notCopied: .held(.deliveryFailed),
                     heldClipboardOwner: heldClipboardOwner
@@ -602,7 +606,7 @@ struct MacPasteController {
             return heldResult(
                 .deliveryFailed,
                 text: text,
-                copyOnHold: copyOnHold,
+                copyOnHold: true,
                 heldClipboardOwner: heldClipboardOwner
             )
         }
@@ -611,13 +615,18 @@ struct MacPasteController {
         let verified = didTextLand(text, before: before)
         if !verified {
             // Neither a successful menu action nor CGEvent.post proves the
-            // destination consumed the text. If the field exposes no readable
-            // AX value, the first outstanding recovery remains clipboard-backed.
-            // Later chunks restore that clipboard instead of replacing it.
-            if !copyOnHold {
-                restore.restore(ifUnchangedSince: ourPasteboardChange)
-            } else if let heldClipboardOwner {
-                _ = copyToPasteboard(text, heldClipboardOwner: heldClipboardOwner)
+            // destination consumed the text. Terminals and Electron editors
+            // commonly expose no readable AX value, so every unconfirmed
+            // attempt refreshes the clipboard with this exact transcript. An
+            // older held item must never make the newest fallback disappear.
+            if MacPasteboardRecoveryPolicy.shouldKeepTranscript(
+                deliveryReachedOutputBoundary: true,
+                pasteWasVerified: verified
+            ) {
+                _ = copyToPasteboard(
+                    text,
+                    heldClipboardOwner: heldClipboardOwner
+                )
             }
             return .pasted(route: route, verified: false)
         }
@@ -705,6 +714,20 @@ struct MacPasteController {
         heldClipboardOwner: MacHeldClipboardIdentity? = nil
     ) -> Bool {
         guard deliveryGate.tryAcquire() else { return false }
+        defer { deliveryGate.release() }
+        return copyToPasteboard(text, heldClipboardOwner: heldClipboardOwner)
+    }
+
+    /// Serializes a required recovery copy behind any paste already consuming
+    /// the shared pasteboard. Unlike explicit dashboard copy actions, a newly
+    /// completed dictation cannot simply fail because another delivery held
+    /// the gate for a few hundred milliseconds.
+    @discardableResult
+    func copyToPasteboardAfterWaiting(
+        _ text: String,
+        heldClipboardOwner: MacHeldClipboardIdentity? = nil
+    ) async -> Bool {
+        await deliveryGate.acquire()
         defer { deliveryGate.release() }
         return copyToPasteboard(text, heldClipboardOwner: heldClipboardOwner)
     }
@@ -880,10 +903,12 @@ struct MacPasteController {
 
     private func preserveUnverifiedTypedOutput(
         _ text: String,
-        copyOnHold: Bool,
+        copyOnHold _: Bool,
         heldClipboardOwner: MacHeldClipboardIdentity?
     ) {
-        guard copyOnHold else { return }
+        // `copyOnHold` controls passive holds before an output attempt. Once
+        // typing began, an unverified partial or complete side effect always
+        // needs a manual Command-V fallback.
         _ = copyToPasteboard(text, heldClipboardOwner: heldClipboardOwner)
     }
 

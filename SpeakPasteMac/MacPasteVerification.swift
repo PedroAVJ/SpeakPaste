@@ -42,3 +42,16 @@ enum MacPasteVerification {
         return false
     }
 }
+
+/// Decides whether SpeakPaste may restore the clipboard it borrowed for a
+/// delivery attempt. A posted but unreadable paste is not a success receipt:
+/// terminals and Electron editors often expose no AX value, and the user must
+/// still be able to press Command-V when that event was swallowed.
+enum MacPasteboardRecoveryPolicy {
+    static func shouldKeepTranscript(
+        deliveryReachedOutputBoundary: Bool,
+        pasteWasVerified: Bool
+    ) -> Bool {
+        deliveryReachedOutputBoundary && !pasteWasVerified
+    }
+}
