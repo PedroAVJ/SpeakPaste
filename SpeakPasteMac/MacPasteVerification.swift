@@ -41,6 +41,87 @@ enum MacPasteVerification {
 
         return false
     }
+
+    static func hasExactInsertion(
+        _ insertedText: String,
+        before: String?,
+        afterSamples: [String?]
+    ) -> Bool {
+        afterSamples.contains { after in
+            isExactInsertion(insertedText, before: before, after: after)
+        }
+    }
+}
+
+enum MacDeliveryTargetDecision<Token: Equatable>: Equatable {
+    case focusedWritable(Token)
+    case clipboardFallback
+}
+
+/// The record-start target is recognition/history metadata, not delivery
+/// identity. Only the writable focus observed at the output boundary wins.
+enum MacDeliveryTargeting {
+    static func decide<Token: Equatable>(
+        captured _: Token?,
+        current: Token?,
+        currentIsWritable: Bool
+    ) -> MacDeliveryTargetDecision<Token> {
+        guard currentIsWritable, let current else { return .clipboardFallback }
+        return .focusedWritable(current)
+    }
+}
+
+enum MacDeliveryTextPolicy {
+    /// Existing recovery text never outranks the just-finished transcript for
+    /// the Command-V fallback.
+    static func clipboardFallback(
+        newestTranscript: String,
+        existingRecoveryTranscripts _: [String] = []
+    ) -> String {
+        newestTranscript
+    }
+}
+
+/// Safety boundary for side effects that follow the initial delivery target
+/// selection. AX replacement is allowed during chunked insertion when no user
+/// action occurred; a separate Return is stricter and requires the same live
+/// node that was captured after paste confirmation.
+enum MacOutputContinuationPolicy {
+    static func canContinueMultistepInsertion(
+        processIsCurrent: Bool,
+        currentIsWritable: Bool,
+        currentIsSecure: Bool,
+        sameElement: Bool,
+        interactionGeneration: UInt64?,
+        currentInteractionGeneration: UInt64?
+    ) -> Bool {
+        guard processIsCurrent, currentIsWritable, !currentIsSecure else {
+            return false
+        }
+        if let interactionGeneration, let currentInteractionGeneration {
+            return interactionGeneration == currentInteractionGeneration
+        }
+        return sameElement
+    }
+
+    static func canSendFollowUpReturn(
+        processIsCurrent: Bool,
+        currentIsWritable: Bool,
+        currentIsSecure: Bool,
+        sameElement: Bool,
+        interactionGeneration: UInt64?,
+        currentInteractionGeneration: UInt64?
+    ) -> Bool {
+        guard sameElement else { return false }
+        return canContinueMultistepInsertion(
+            processIsCurrent: processIsCurrent,
+            currentIsWritable: currentIsWritable,
+            currentIsSecure: currentIsSecure,
+            sameElement: sameElement,
+            interactionGeneration: interactionGeneration,
+            currentInteractionGeneration: currentInteractionGeneration
+        )
+    }
 }
 
 /// Decides whether SpeakPaste may restore the clipboard it borrowed for a
@@ -49,6 +130,15 @@ enum MacPasteVerification {
 /// still be able to press Command-V when that event was swallowed.
 enum MacPasteboardRecoveryPolicy {
     static func shouldKeepTranscript(
+        deliveryReachedOutputBoundary: Bool,
+        pasteWasVerified: Bool
+    ) -> Bool {
+        deliveryReachedOutputBoundary && !pasteWasVerified
+    }
+
+    /// Once an insertion side effect may have happened, replaying it is never
+    /// safe. The durable uncertain entry remains explicit-user-action only.
+    static func shouldSuspendAutomaticRetry(
         deliveryReachedOutputBoundary: Bool,
         pasteWasVerified: Bool
     ) -> Bool {

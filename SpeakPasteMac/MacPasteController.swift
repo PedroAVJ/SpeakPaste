@@ -14,6 +14,8 @@ enum MacPasteRoute: String, Equatable {
 
 /// Why a transcript was not delivered and must be held instead.
 enum MacHoldReason: Equatable {
+    /// No writable, non-secure editor owns focus at the delivery boundary.
+    case noWritableEditor
     case destinationNotFrontmost
     /// A password field or Terminal's Secure Keyboard Entry owns the keyboard.
     case secureInput
@@ -22,6 +24,7 @@ enum MacHoldReason: Equatable {
 
     var explanation: String {
         switch self {
+        case .noWritableEditor: "no writable editor is focused"
         case .destinationNotFrontmost: "you moved away"
         case .secureInput: "a password field is capturing the keyboard"
         case .deliveryFailed: "the destination refused it"
@@ -35,6 +38,9 @@ enum MacPasteResult: Equatable {
     /// value — but it must never be reported as if it were confirmed.
     case pasted(route: MacPasteRoute, verified: Bool)
     case copied
+    /// Automatic insertion had no safe live destination, so the exact newest
+    /// transcript is the intentional Command-V handoff.
+    case clipboardFallback(MacHoldReason)
     case copiedNeedsAccessibility
     case copiedNeedsKeyboardOutput
     /// The system pasteboard rejected the only attempted output. Callers must
@@ -51,6 +57,8 @@ enum MacPasteResult: Equatable {
                 "Paste sent (\(route.rawValue)) but unconfirmed; saved recovery entry kept"
             }
         case .copied: "Transcribed and copied"
+        case let .clipboardFallback(reason):
+            "Clipboard fallback — \(reason.explanation); newest transcript copied"
         case .copiedNeedsAccessibility: "Copied; enable Accessibility for automatic paste"
         case .copiedNeedsKeyboardOutput: "Copied; enable Keyboard Output for synthetic typing"
         case .clipboardFailed: "Clipboard refused the transcript; saved recovery entry kept"
@@ -78,10 +86,16 @@ enum MacPasteResult: Equatable {
             !verified
         case .copiedNeedsAccessibility, .copiedNeedsKeyboardOutput, .clipboardFailed:
             true
-        case .copied, .held:
+        case .copied, .clipboardFallback, .held:
             false
         }
     }
+}
+
+struct MacPasteDeliveryOutcome {
+    let result: MacPasteResult
+    /// The live delivery-time target, never the record-start context target.
+    let target: MacDeliveryTarget?
 }
 
 @MainActor
@@ -91,27 +105,35 @@ struct MacPasteController {
         "com.pedro.speakpaste.held-clipboard-claim"
     )
 
-    /// A literal payload preserves the legacy controller API. Prepared chunks
-    /// keep their seam open until the delivery transaction owns the gate and
-    /// has revalidated the exact focused field.
+    /// Prepared chunks keep their seam open until the delivery transaction owns
+    /// the gate and resolves the live focused editor.
     private enum Payload {
         case literal(String)
-        case prepared([MacPreparedTranscriptChunk], fallbackPrecedingText: String?)
+        case prepared([MacPreparedTranscriptChunk])
 
         var fallbackText: String {
             switch self {
             case let .literal(text):
-                text
-            case let .prepared(chunks, precedingText):
-                MacTranscriptPostProcessor.fold(chunks, after: precedingText)
+                return text
+            case let .prepared(chunks):
+                if chunks.count == 1, let newestTranscript = chunks.first?.text {
+                    return MacDeliveryTextPolicy.clipboardFallback(
+                        newestTranscript: newestTranscript
+                    )
+                }
+                return MacDeliveryTextPolicy.clipboardFallback(
+                    newestTranscript: MacTranscriptPostProcessor.fold(chunks, after: nil)
+                )
             }
         }
 
-        func resolvedForValidatedDestination() -> String {
+        func resolvedForValidatedDestination(
+            fallbackPrecedingText: String?
+        ) -> String {
             switch self {
             case let .literal(text):
                 text
-            case let .prepared(chunks, fallbackPrecedingText):
+            case let .prepared(chunks):
                 MacTranscriptPostProcessor.fold(
                     chunks,
                     after: MacAccessibility.focusedTextBeforeCursor()
@@ -121,24 +143,24 @@ struct MacPasteController {
         }
     }
 
-    /// Delivers text to `target` when it is safe to do so, and returns `.held`
-    /// otherwise. Guessing at a destination is how dictation ends up in the
-    /// wrong channel or a password field, so the caller holds instead.
+    /// Delivers to the writable editor resolved after the serialized gate is
+    /// acquired. `capturedTarget` remains context only and never wins over the
+    /// live focus.
     func deliver(
         _ text: String,
-        to target: MacDeliveryTarget?,
+        capturedTarget: MacDeliveryTarget?,
         autoPaste: Bool,
-        policy: MacDeliveryPolicy? = nil,
+        policyForTarget: (MacDeliveryTarget) -> MacDeliveryPolicy? = { _ in nil },
         copyOnHold: Bool = true,
         heldClipboardOwner: MacHeldClipboardIdentity? = nil
-    ) async -> MacPasteResult {
+    ) async -> MacPasteDeliveryOutcome {
         await deliveryGate.acquire()
         defer { deliveryGate.release() }
         return await deliverAfterAcquiringGate(
             .literal(text),
-            to: target,
+            capturedTarget: capturedTarget,
             autoPaste: autoPaste,
-            policy: policy,
+            policyForTarget: policyForTarget,
             copyOnHold: copyOnHold,
             heldClipboardOwner: heldClipboardOwner
         )
@@ -146,22 +168,22 @@ struct MacPasteController {
 
     /// Delivers an intrinsically prepared transcript. Spacing and first-letter
     /// casing are deliberately unresolved until the serialized transaction has
-    /// proved the captured AX element is still focused.
+    /// resolved the current writable editor.
     func deliver(
         _ chunk: MacPreparedTranscriptChunk,
-        to target: MacDeliveryTarget?,
+        capturedTarget: MacDeliveryTarget?,
         autoPaste: Bool,
-        policy: MacDeliveryPolicy? = nil,
+        policyForTarget: (MacDeliveryTarget) -> MacDeliveryPolicy? = { _ in nil },
         copyOnHold: Bool = true,
         heldClipboardOwner: MacHeldClipboardIdentity? = nil
-    ) async -> MacPasteResult {
+    ) async -> MacPasteDeliveryOutcome {
         await deliveryGate.acquire()
         defer { deliveryGate.release() }
         return await deliverAfterAcquiringGate(
-            .prepared([chunk], fallbackPrecedingText: target?.precedingText),
-            to: target,
+            .prepared([chunk]),
+            capturedTarget: capturedTarget,
             autoPaste: autoPaste,
-            policy: policy,
+            policyForTarget: policyForTarget,
             copyOnHold: copyOnHold,
             heldClipboardOwner: heldClipboardOwner
         )
@@ -184,7 +206,7 @@ struct MacPasteController {
         guard !MacAccessibility.focusedElementIsSecureText() else {
             return heldResult(.secureInput, text: text, copyOnHold: true)
         }
-        guard let manualTarget = MacDeliveryTarget.captureCurrent() else {
+        guard let manualTarget = MacDeliveryTarget.captureCurrentWritable() else {
             // Clicking a control in SpeakPaste makes SpeakPaste frontmost. Do
             // not paste a transcript into its own editor/search field by
             // accident; preserve it on the clipboard for the user instead.
@@ -198,7 +220,6 @@ struct MacPasteController {
         return await paste(
             .literal(text),
             intoProcess: manualTarget.processIdentifier,
-            activating: false,
             method: .automatic,
             typeOutFallback: false,
             expectedTarget: nil,
@@ -235,7 +256,7 @@ struct MacPasteController {
                 copyOnHold: copyOnHold
             )
         }
-        guard let manualTarget = MacDeliveryTarget.captureCurrent() else {
+        guard let manualTarget = MacDeliveryTarget.captureCurrentWritable() else {
             return fallbackResult(
                 fallbackText(),
                 copyOnHold: copyOnHold,
@@ -244,9 +265,8 @@ struct MacPasteController {
             )
         }
         return await paste(
-            .prepared(chunks, fallbackPrecedingText: manualTarget.precedingText),
+            .prepared(chunks),
             intoProcess: manualTarget.processIdentifier,
-            activating: false,
             method: .automatic,
             typeOutFallback: false,
             expectedTarget: nil,
@@ -256,153 +276,98 @@ struct MacPasteController {
         )
     }
 
-    /// Commits an automatically held transcript back to the exact field it was
-    /// captured from. Unlike the explicit "Paste Here" action, this keeps the
-    /// target identity all the way through the serialized delivery gate.
-    func deliverHeld(
-        _ text: String,
-        to target: MacDeliveryTarget,
-        policy: MacDeliveryPolicy?,
-        copyOnHold: Bool = true
-    ) async -> MacPasteResult {
-        await deliveryGate.acquire()
-        defer { deliveryGate.release() }
-        return await deliverHeldAfterAcquiringGate(
-            .literal(text),
-            to: target,
-            policy: policy,
-            copyOnHold: copyOnHold
-        )
-    }
-
-    /// Releases one exact-field held run in spoken order. Folding happens only
-    /// after the target is revalidated, so every seam sees the live caret text
-    /// plus the chunks already folded ahead of it.
-    func deliverHeld(
-        _ chunks: [MacPreparedTranscriptChunk],
-        to target: MacDeliveryTarget,
-        policy: MacDeliveryPolicy?,
-        copyOnHold: Bool = true
-    ) async -> MacPasteResult {
-        await deliveryGate.acquire()
-        defer { deliveryGate.release() }
-        return await deliverHeldAfterAcquiringGate(
-            .prepared(chunks, fallbackPrecedingText: target.precedingText),
-            to: target,
-            policy: policy,
-            copyOnHold: copyOnHold
-        )
-    }
-
     private func deliverAfterAcquiringGate(
         _ payload: Payload,
-        to target: MacDeliveryTarget?,
+        capturedTarget: MacDeliveryTarget?,
         autoPaste: Bool,
-        policy: MacDeliveryPolicy?,
+        policyForTarget: (MacDeliveryTarget) -> MacDeliveryPolicy?,
         copyOnHold: Bool,
         heldClipboardOwner: MacHeldClipboardIdentity? = nil
-    ) async -> MacPasteResult {
-        guard autoPaste, let target else {
-            return fallbackResult(
-                payload.fallbackText,
-                copyOnHold: copyOnHold,
-                copied: .copied,
-                notCopied: .held(.deliveryFailed),
-                heldClipboardOwner: heldClipboardOwner
+    ) async -> MacPasteDeliveryOutcome {
+        func outcome(
+            _ result: MacPasteResult,
+            target: MacDeliveryTarget? = nil
+        ) -> MacPasteDeliveryOutcome {
+            MacPasteDeliveryOutcome(result: result, target: target)
+        }
+
+        guard autoPaste else {
+            return outcome(
+                fallbackResult(
+                    payload.fallbackText,
+                    copyOnHold: copyOnHold,
+                    copied: .copied,
+                    notCopied: .held(.deliveryFailed),
+                    heldClipboardOwner: heldClipboardOwner
+                )
             )
         }
         guard AXIsProcessTrusted() else {
-            return fallbackResult(
-                payload.fallbackText,
-                copyOnHold: copyOnHold,
-                copied: .copiedNeedsAccessibility,
-                notCopied: .held(.deliveryFailed),
-                heldClipboardOwner: heldClipboardOwner
+            return outcome(
+                fallbackResult(
+                    payload.fallbackText,
+                    copyOnHold: true,
+                    copied: .copiedNeedsAccessibility,
+                    notCopied: .held(.deliveryFailed)
+                )
             )
         }
-        guard await targetBecomesDeliverable(target) else {
-            return heldResult(
-                .destinationNotFrontmost,
-                text: payload.fallbackText,
-                copyOnHold: copyOnHold,
-                heldClipboardOwner: heldClipboardOwner
+
+        if MacAccessibility.focusedElementIsSecureText() {
+            return outcome(
+                fallbackResult(
+                    payload.fallbackText,
+                    copyOnHold: true,
+                    copied: .clipboardFallback(.secureInput),
+                    notCopied: .clipboardFailed
+                )
             )
         }
-        if policy?.deliveryMethod == .clipboardOnly {
-            return fallbackResult(
-                payload.fallbackText,
-                copyOnHold: copyOnHold,
-                copied: .copied,
-                notCopied: .held(.deliveryFailed),
-                heldClipboardOwner: heldClipboardOwner
-            )
-        }
-        return await paste(
-            payload,
-            intoProcess: target.processIdentifier,
-            activating: true,
-            method: policy?.deliveryMethod ?? .automatic,
-            typeOutFallback: policy?.typeOutFallback ?? false,
-            expectedTarget: target,
-            autoSend: policy?.autoSend ?? false,
-            copyOnHold: copyOnHold,
-            heldClipboardOwner: heldClipboardOwner
+
+        let currentTarget = MacDeliveryTarget.captureCurrentWritable()
+        let targetDecision = MacDeliveryTargeting.decide(
+            captured: capturedTarget?.processIdentifier,
+            current: currentTarget?.processIdentifier,
+            currentIsWritable: currentTarget != nil
         )
-    }
-
-    /// A renderer can replace its Accessibility proxy during the same frame in
-    /// which transcription completes. Give that exact destination a short
-    /// settling window before declaring that the user moved away.
-    private func targetBecomesDeliverable(
-        _ target: MacDeliveryTarget
-    ) async -> Bool {
-        if target.canDeliverImmediately { return true }
-        for delay in [80, 120, 180] {
-            try? await Task.sleep(for: .milliseconds(delay))
-            if target.canDeliverImmediately { return true }
+        guard
+            case .focusedWritable = targetDecision,
+            let target = currentTarget
+        else {
+            return outcome(
+                fallbackResult(
+                    payload.fallbackText,
+                    copyOnHold: true,
+                    copied: .clipboardFallback(.noWritableEditor),
+                    notCopied: .clipboardFailed
+                )
+            )
         }
-        return false
-    }
 
-    private func deliverHeldAfterAcquiringGate(
-        _ payload: Payload,
-        to target: MacDeliveryTarget,
-        policy: MacDeliveryPolicy?,
-        copyOnHold: Bool
-    ) async -> MacPasteResult {
-        guard AXIsProcessTrusted() else {
-            return fallbackResult(
-                payload.fallbackText,
+        let policy = policyForTarget(target)
+        if policy?.deliveryMethod == .clipboardOnly {
+            return outcome(
+                fallbackResult(
+                    payload.fallbackText,
+                    copyOnHold: true,
+                    copied: .copied,
+                    notCopied: .clipboardFailed
+                ),
+                target: target
+            )
+        }
+        return outcome(
+            await paste(
+                payload,
+                intoProcess: target.processIdentifier,
+                method: policy?.deliveryMethod ?? .automatic,
+                typeOutFallback: policy?.typeOutFallback ?? false,
+                expectedTarget: target,
+                autoSend: policy?.autoSend ?? false,
                 copyOnHold: copyOnHold,
-                copied: .copiedNeedsAccessibility,
-                notCopied: .held(.deliveryFailed)
-            )
-        }
-        guard target.canDeliverOnReturn else {
-            return heldResult(
-                .destinationNotFrontmost,
-                text: payload.fallbackText,
-                copyOnHold: copyOnHold
-            )
-        }
-        guard policy?.deliveryMethod != .clipboardOnly else {
-            return heldResult(
-                .deliveryFailed,
-                text: payload.fallbackText,
-                copyOnHold: copyOnHold
-            )
-        }
-        return await paste(
-            payload,
-            intoProcess: target.processIdentifier,
-            activating: false,
-            method: policy?.deliveryMethod ?? .automatic,
-            typeOutFallback: policy?.typeOutFallback ?? false,
-            expectedTarget: target,
-            // Returning to a field should restore the text, never surprise-send
-            // a message that finished while the user was elsewhere.
-            autoSend: false,
-            copyOnHold: copyOnHold
+                heldClipboardOwner: heldClipboardOwner
+            ),
+            target: target
         )
     }
 
@@ -411,7 +376,6 @@ struct MacPasteController {
     private func paste(
         _ payload: Payload,
         intoProcess processIdentifier: pid_t?,
-        activating: Bool,
         method: MacDeliveryMethod,
         typeOutFallback: Bool,
         expectedTarget: MacDeliveryTarget?,
@@ -420,26 +384,38 @@ struct MacPasteController {
         copyOnHold: Bool,
         heldClipboardOwner: MacHeldClipboardIdentity? = nil
     ) async -> MacPasteResult {
-        // Checked before anything is written to the pasteboard: while secure
-        // input is held, the WindowServer discards synthetic keystrokes and
-        // CGEvent.post reports nothing, so a paste would look successful and
-        // silently vanish.
-        guard !IsSecureEventInputEnabled() else {
+        func currentUnavailableReason() -> MacHoldReason {
+            if IsSecureEventInputEnabled()
+                || MacAccessibility.focusedElementIsSecureText() {
+                return .secureInput
+            }
+            return MacAccessibility.focusedElementAcceptsText()
+                ? .destinationNotFrontmost
+                : .noWritableEditor
+        }
+        func fallbackBeforeInsertion(_ reason: MacHoldReason) -> MacPasteResult {
+            if expectedTarget != nil {
+                return fallbackResult(
+                    payload.fallbackText,
+                    copyOnHold: true,
+                    copied: .clipboardFallback(reason),
+                    notCopied: .clipboardFailed
+                )
+            }
             return heldResult(
-                .secureInput,
+                reason,
                 text: payload.fallbackText,
                 copyOnHold: copyOnHold,
                 heldClipboardOwner: heldClipboardOwner
             )
         }
 
-        if let manualTarget, !manualTarget.matchesCurrentManualDestination {
-            return heldResult(
-                .destinationNotFrontmost,
-                text: payload.fallbackText,
-                copyOnHold: copyOnHold,
-                heldClipboardOwner: heldClipboardOwner
-            )
+        // Checked before anything is written to the pasteboard: while secure
+        // input is held, the WindowServer discards synthetic keystrokes and
+        // CGEvent.post reports nothing, so a paste would look successful and
+        // silently vanish.
+        guard !IsSecureEventInputEnabled() else {
+            return fallbackBeforeInsertion(.secureInput)
         }
 
         // An explicit Paste Here has no archived target by design, so recheck
@@ -447,67 +423,41 @@ struct MacPasteController {
         // Browser password fields do not always enable global Secure Event
         // Input, but they still must never receive a retained transcript.
         if expectedTarget == nil, MacAccessibility.focusedElementIsSecureText() {
-            return heldResult(
-                .secureInput,
-                text: payload.fallbackText,
-                copyOnHold: copyOnHold,
-                heldClipboardOwner: heldClipboardOwner
-            )
+            return fallbackBeforeInsertion(.secureInput)
         }
 
-        // The delivery gate may have queued us behind another dictation. The
-        // destination must still be the exact field captured at record start
-        // after that wait, not merely when `deliver` was first called.
-        if let expectedTarget, !expectedTarget.canDeliverImmediately {
-            return heldResult(
-                .destinationNotFrontmost,
-                text: payload.fallbackText,
-                copyOnHold: copyOnHold,
-                heldClipboardOwner: heldClipboardOwner
-            )
-        }
-
-        if activating,
-           let processIdentifier,
-           let application = NSRunningApplication(processIdentifier: processIdentifier),
-           !application.isActive {
-            application.activate(options: [])
-            try? await Task.sleep(for: .milliseconds(140))
-        }
-
-        // This is the seam decision boundary. The gate is held, activation has
-        // settled, and the exact destination is checked one final time before
-        // reading its caret-local text. If AX cannot expose that text, the
-        // record-start snapshot is the conservative fallback.
-        if let expectedTarget, !expectedTarget.canDeliverImmediately {
-            return heldResult(
-                .destinationNotFrontmost,
-                text: payload.fallbackText,
-                copyOnHold: copyOnHold,
-                heldClipboardOwner: heldClipboardOwner
-            )
+        // This is the seam decision boundary. The gate is held and the live
+        // destination is checked one final time before reading caret-local
+        // text. The application must still own a writable focus, but AX object
+        // identity is deliberately irrelevant. If AX cannot expose caret text,
+        // use the live capture's snapshot.
+        if let expectedTarget, !expectedTarget.canContinueMultistepInsertion {
+            return fallbackBeforeInsertion(currentUnavailableReason())
         }
         if let manualTarget, !manualTarget.matchesCurrentManualDestination {
-            return heldResult(
-                .destinationNotFrontmost,
-                text: payload.fallbackText,
-                copyOnHold: copyOnHold,
-                heldClipboardOwner: heldClipboardOwner
-            )
+            return fallbackBeforeInsertion(currentUnavailableReason())
         }
-        let text = payload.resolvedForValidatedDestination()
+        let text = payload.resolvedForValidatedDestination(
+            fallbackPrecedingText: expectedTarget?.precedingText
+                ?? manualTarget?.precedingText
+        )
 
         if method == .typeOut {
             let result = await typeOut(
                 text,
+                fallbackText: payload.fallbackText,
                 expectedTarget: expectedTarget,
                 copyOnHold: copyOnHold,
                 heldClipboardOwner: heldClipboardOwner
             )
+            let returnTarget = autoSend && result.permitsAutoSend
+                ? MacDeliveryTarget.captureCurrentWritable()
+                : nil
             return await finishAutoSend(
                 after: result,
                 requested: autoSend,
-                target: expectedTarget
+                pasteTarget: expectedTarget,
+                returnTarget: returnTarget
             )
         }
 
@@ -523,7 +473,9 @@ struct MacPasteController {
         // situations than a synthesized keystroke.
         let targetIsStillValid: () -> Bool = {
             guard !IsSecureEventInputEnabled() else { return false }
-            if let expectedTarget { return expectedTarget.canDeliverImmediately }
+            if let expectedTarget {
+                return expectedTarget.canContinueMultistepInsertion
+            }
             if let manualTarget {
                 return manualTarget.matchesCurrentManualDestination
                     && !MacAccessibility.focusedElementIsSecureText()
@@ -532,45 +484,36 @@ struct MacPasteController {
         }
         func heldAfterLateTargetChange() -> MacPasteResult {
             restore.restore(ifUnchangedSince: ourPasteboardChange)
-            let secure = IsSecureEventInputEnabled()
-                || MacAccessibility.focusedElementIsSecureText()
-            return heldResult(
-                secure ? .secureInput : .destinationNotFrontmost,
-                text: text,
-                copyOnHold: copyOnHold,
-                heldClipboardOwner: heldClipboardOwner
-            )
+            return fallbackBeforeInsertion(currentUnavailableReason())
         }
 
         var route: MacPasteRoute?
-        if let expectedTarget, !expectedTarget.canDeliverImmediately {
+        var permitsAlternativeInsertionRoute = true
+        if let expectedTarget, !expectedTarget.canContinueMultistepInsertion {
             restore.restore(ifUnchangedSince: ourPasteboardChange)
-            return heldResult(
-                .destinationNotFrontmost,
-                text: text,
-                copyOnHold: copyOnHold,
-                heldClipboardOwner: heldClipboardOwner
-            )
+            return fallbackBeforeInsertion(currentUnavailableReason())
         } else if let manualTarget, !manualTarget.matchesCurrentManualDestination {
             restore.restore(ifUnchangedSince: ourPasteboardChange)
-            return heldResult(
-                .destinationNotFrontmost,
-                text: text,
-                copyOnHold: copyOnHold,
-                heldClipboardOwner: heldClipboardOwner
-            )
+            return fallbackBeforeInsertion(currentUnavailableReason())
         }
         if let processIdentifier {
-            if MacAccessibility.pressPasteMenuItem(
+            let menuResult = MacAccessibility.pressPasteMenuItem(
                 inProcess: processIdentifier,
                 validating: targetIsStillValid
-            ) {
+            )
+            permitsAlternativeInsertionRoute = menuResult.permitsAnotherInsertionRoute
+            switch menuResult {
+            case .invoked:
                 route = .menuAction
-            } else if !targetIsStillValid() {
+            case .focusChanged:
                 return heldAfterLateTargetChange()
+            case .unavailable:
+                break
             }
         }
-        if route == nil, method != .menuPaste {
+        if route == nil,
+           permitsAlternativeInsertionRoute,
+           method != .menuPaste {
             guard targetIsStillValid() else { return heldAfterLateTargetChange() }
             if sendPasteKeystroke() { route = .keystroke }
         }
@@ -580,20 +523,25 @@ struct MacPasteController {
             if typeOutFallback {
                 let result = await typeOut(
                     text,
+                    fallbackText: payload.fallbackText,
                     expectedTarget: expectedTarget,
                     copyOnHold: copyOnHold,
                     heldClipboardOwner: heldClipboardOwner
                 )
+                let returnTarget = autoSend && result.permitsAutoSend
+                    ? MacDeliveryTarget.captureCurrentWritable()
+                    : nil
                 return await finishAutoSend(
                     after: result,
                     requested: autoSend,
-                    target: expectedTarget
+                    pasteTarget: expectedTarget,
+                    returnTarget: returnTarget
                 )
             }
             if method != .menuPaste, !CGPreflightPostEventAccess() {
                 return fallbackResult(
-                    text,
-                    // The exact destination was valid and delivery reached
+                    payload.fallbackText,
+                    // The live destination was valid and delivery reached
                     // its output boundary. A refused synthetic route must
                     // leave this transcript ready for the user's Command-V,
                     // even when an older recovery entry already exists.
@@ -605,14 +553,13 @@ struct MacPasteController {
             }
             return heldResult(
                 .deliveryFailed,
-                text: text,
+                text: payload.fallbackText,
                 copyOnHold: true,
                 heldClipboardOwner: heldClipboardOwner
             )
         }
 
-        try? await Task.sleep(for: .milliseconds(160))
-        let verified = didTextLand(text, before: before)
+        let verified = await waitForTextToLand(text, before: before)
         if !verified {
             // Neither a successful menu action nor CGEvent.post proves the
             // destination consumed the text. Terminals and Electron editors
@@ -624,12 +571,18 @@ struct MacPasteController {
                 pasteWasVerified: verified
             ) {
                 _ = copyToPasteboard(
-                    text,
+                    payload.fallbackText,
                     heldClipboardOwner: heldClipboardOwner
                 )
             }
             return .pasted(route: route, verified: false)
         }
+        // Capture the just-confirmed field before the pasteboard restoration
+        // delay. A same-app focus switch during that delay must suppress Return,
+        // not establish a new baseline in the second editor.
+        let returnTarget = autoSend
+            ? MacDeliveryTarget.captureCurrentWritable()
+            : nil
         // Preserve the old timing guarantee while keeping the transaction
         // serialized: destinations have ample time to consume the pasteboard,
         // but another SpeakPaste delivery cannot interleave with the restore.
@@ -638,42 +591,57 @@ struct MacPasteController {
         return await finishAutoSend(
             after: .pasted(route: route, verified: verified),
             requested: autoSend,
-            target: expectedTarget
+            pasteTarget: expectedTarget,
+            returnTarget: returnTarget
         )
     }
 
     /// Runs while `deliveryGate` is still held, so another dictation cannot
-    /// paste between this transcript and its Return. The exact field and secure
-    /// input state are checked at the final side-effect boundary.
+    /// paste between this transcript and its Return. The live application,
+    /// writable focus, and secure-input state are checked at the boundary.
     private func finishAutoSend(
         after result: MacPasteResult,
         requested: Bool,
-        target: MacDeliveryTarget?
+        pasteTarget: MacDeliveryTarget?,
+        returnTarget: MacDeliveryTarget?
     ) async -> MacPasteResult {
-        guard requested, result.permitsAutoSend, let target else { return result }
+        guard
+            requested,
+            result.permitsAutoSend,
+            let pasteTarget,
+            let returnTarget,
+            pasteTarget.isSameUninterruptedOutputBoundary(as: returnTarget)
+        else {
+            return result
+        }
         try? await Task.sleep(for: .milliseconds(120))
-        guard target.canDeliverOnReturn, !IsSecureEventInputEnabled() else { return result }
+        guard returnTarget.canReceiveFollowUpReturn else { return result }
         _ = sendReturnKeystroke()
         return result
     }
 
-    /// Confirms one exact insertion into a readable field. Merely finding the
-    /// transcript somewhere in the result is unsafe: it could have already
-    /// existed while an unrelated asynchronous edit changed the value. A
-    /// missing baseline or any concurrent mutation stays unverified, which
-    /// also prevents app-rule auto-send.
-    private func didTextLand(_ text: String, before: String?) -> Bool {
-        MacPasteVerification.isExactInsertion(
-            text,
-            before: before,
-            after: MacAccessibility.focusedText()
-        )
+    /// Confirms one exact insertion into a readable field. A bounded poll lets
+    /// asynchronous native and Chromium editors publish their AX value without
+    /// turning one insertion attempt into a second side effect.
+    private func waitForTextToLand(_ text: String, before: String?) async -> Bool {
+        var samples: [String?] = []
+        for delay in [80, 120, 180] {
+            try? await Task.sleep(for: .milliseconds(delay))
+            samples.append(MacAccessibility.focusedText())
+            if MacPasteVerification.hasExactInsertion(
+                text,
+                before: before,
+                afterSamples: samples
+            ) {
+                return true
+            }
+        }
+        return false
     }
 
     /// The one policy boundary for recovery clipboard writes. `copyOnHold`
-    /// makes clipboard ownership explicit: the first held chunk can become the
-    /// recovery copy, while every later held chunk remains durable in-app and
-    /// returns `notCopied` without touching the user's current pasteboard.
+    /// makes clipboard ownership explicit for manual recovery paths. New live
+    /// output always gives the newest transcript precedence separately.
     private func fallbackResult(
         _ text: String,
         copyOnHold: Bool,
@@ -714,20 +682,6 @@ struct MacPasteController {
         heldClipboardOwner: MacHeldClipboardIdentity? = nil
     ) -> Bool {
         guard deliveryGate.tryAcquire() else { return false }
-        defer { deliveryGate.release() }
-        return copyToPasteboard(text, heldClipboardOwner: heldClipboardOwner)
-    }
-
-    /// Serializes a required recovery copy behind any paste already consuming
-    /// the shared pasteboard. Unlike explicit dashboard copy actions, a newly
-    /// completed dictation cannot simply fail because another delivery held
-    /// the gate for a few hundred milliseconds.
-    @discardableResult
-    func copyToPasteboardAfterWaiting(
-        _ text: String,
-        heldClipboardOwner: MacHeldClipboardIdentity? = nil
-    ) async -> Bool {
-        await deliveryGate.acquire()
         defer { deliveryGate.release() }
         return copyToPasteboard(text, heldClipboardOwner: heldClipboardOwner)
     }
@@ -795,6 +749,8 @@ struct MacPasteController {
         }
         keyDown.flags = .maskCommand
         keyUp.flags = .maskCommand
+        MacUserInteractionTracker.markSynthetic(keyDown)
+        MacUserInteractionTracker.markSynthetic(keyUp)
         keyDown.post(tap: .cghidEventTap)
         keyUp.post(tap: .cghidEventTap)
         return true
@@ -802,16 +758,30 @@ struct MacPasteController {
 
     private func typeOut(
         _ text: String,
+        fallbackText: String,
         expectedTarget: MacDeliveryTarget?,
         copyOnHold: Bool,
         heldClipboardOwner: MacHeldClipboardIdentity? = nil
     ) async -> MacPasteResult {
         guard CGPreflightPostEventAccess() else {
             return fallbackResult(
-                text,
+                fallbackText,
                 copyOnHold: copyOnHold,
                 copied: .copiedNeedsKeyboardOutput,
                 notCopied: .held(.deliveryFailed),
+                heldClipboardOwner: heldClipboardOwner
+            )
+        }
+        guard
+            let continuationTarget = MacDeliveryTarget.captureCurrentWritable(),
+            expectedTarget.map({
+                $0.processIdentifier == continuationTarget.processIdentifier
+            }) ?? true
+        else {
+            return heldResult(
+                .destinationNotFrontmost,
+                text: fallbackText,
+                copyOnHold: copyOnHold,
                 heldClipboardOwner: heldClipboardOwner
             )
         }
@@ -819,7 +789,7 @@ struct MacPasteController {
         guard let source = CGEventSource(stateID: .combinedSessionState) else {
             return heldResult(
                 .deliveryFailed,
-                text: text,
+                text: fallbackText,
                 copyOnHold: copyOnHold,
                 heldClipboardOwner: heldClipboardOwner
             )
@@ -831,15 +801,14 @@ struct MacPasteController {
         let characters = Array(text)
         var offset = 0
         while offset < characters.count {
-            if let expectedTarget, !expectedTarget.canDeliverImmediately {
+            if !continuationTarget.canContinueMultistepInsertion {
                 // Once even one chunk was posted, retrying the full transcript
                 // automatically would duplicate that prefix. Report an
-                // unconfirmed side effect so automatic held delivery is
-                // suspended. Only the first outstanding recovery may replace
-                // the clipboard.
+                // unconfirmed side effect and preserve the exact newest source
+                // transcript for explicit recovery.
                 if offset > 0 {
                     preserveUnverifiedTypedOutput(
-                        text,
+                        fallbackText,
                         copyOnHold: copyOnHold,
                         heldClipboardOwner: heldClipboardOwner
                     )
@@ -847,7 +816,7 @@ struct MacPasteController {
                 }
                 return heldResult(
                     .destinationNotFrontmost,
-                    text: text,
+                    text: fallbackText,
                     copyOnHold: copyOnHold,
                     heldClipboardOwner: heldClipboardOwner
                 )
@@ -868,7 +837,7 @@ struct MacPasteController {
             else {
                 if offset > 0 {
                     preserveUnverifiedTypedOutput(
-                        text,
+                        fallbackText,
                         copyOnHold: copyOnHold,
                         heldClipboardOwner: heldClipboardOwner
                     )
@@ -876,24 +845,25 @@ struct MacPasteController {
                 }
                 return heldResult(
                     .deliveryFailed,
-                    text: text,
+                    text: fallbackText,
                     copyOnHold: copyOnHold,
                     heldClipboardOwner: heldClipboardOwner
                 )
             }
             keyDown.keyboardSetUnicodeString(stringLength: chunk.utf16.count, unicodeString: Array(chunk.utf16))
             keyUp.keyboardSetUnicodeString(stringLength: chunk.utf16.count, unicodeString: Array(chunk.utf16))
+            MacUserInteractionTracker.markSynthetic(keyDown)
+            MacUserInteractionTracker.markSynthetic(keyUp)
             keyDown.post(tap: .cghidEventTap)
             keyUp.post(tap: .cghidEventTap)
             offset = end
             if offset < characters.count { try? await Task.sleep(for: .milliseconds(4)) }
         }
 
-        try? await Task.sleep(for: .milliseconds(120))
-        let verified = didTextLand(text, before: before)
+        let verified = await waitForTextToLand(text, before: before)
         if !verified {
             preserveUnverifiedTypedOutput(
-                text,
+                fallbackText,
                 copyOnHold: copyOnHold,
                 heldClipboardOwner: heldClipboardOwner
             )
@@ -921,6 +891,8 @@ struct MacPasteController {
         else {
             return false
         }
+        MacUserInteractionTracker.markSynthetic(keyDown)
+        MacUserInteractionTracker.markSynthetic(keyUp)
         keyDown.post(tap: .cghidEventTap)
         keyUp.post(tap: .cghidEventTap)
         return true

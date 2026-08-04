@@ -54,22 +54,28 @@ The Xcode project contains four product targets:
    use three single pings that rise through capture, release, and verified
    delivery, while errors are the family's only phrase: low and falling.
 
-You do not have to wait at the keyboard. If the field you dictated into is no
-longer focused when the transcript arrives, SpeakPaste converts that card into a
-safe hold instead of pasting somewhere else. The HUD acknowledges that once with
-a count-free clipboard or tray glyph, then disappears after two seconds; the
-dashboard owns the durable recovery state. If automatic insertion fails or the
-destination cannot expose enough text to confirm it, the newest completed
-dictation is left on the clipboard even when older recovery entries exist, so
-Command-V remains an immediate fallback. Later chunks for that exact field
-still join the durable held run in spoken order. Click back into
-the field to insert the run in spoken order, or press
-**⌥⌘V** to drop it wherever your cursor is. Delivery is attempted only into the
-captured field — never merely the same application. If a web editor rebuilds its
-Accessibility proxy while you remain in place, SpeakPaste accepts it only when
-the same window, editor structure, geometry, and absence of user input prove
-continuity. The optional **Hold delivery while recording** setting pauses only
-the delivery dequeue while the mic is live and flushes work between chunks.
+You do not have to wait at the keyboard. When a transcript reaches the delivery
+boundary, SpeakPaste uses the currently focused writable, non-secure editor —
+including a different field or application from where dictation began — and
+delivers through the safest supported route for that destination. It does not
+require the editor to retain the same Accessibility object identity throughout
+dictation. Electron and Chromium applications may rebuild, proxy, or replace
+their Accessibility tree and editable node, so node continuity is not a
+universal platform invariant.
+
+If no writable editor is focused, SpeakPaste leaves the exact newest completed
+dictation on the clipboard and reports the clipboard fallback, regardless of
+older recovery entries. The HUD acknowledges that fallback once with a
+count-free clipboard glyph, then disappears after two seconds. A failed or
+unconfirmed insertion also keeps the exact transcript recoverable and on the
+clipboard; its document or clipboard glyph is transient while the dashboard
+owns the durable recovery state. Because an unconfirmed side effect may already
+have landed, SpeakPaste marks it as possibly delivered and never retries it
+automatically. Delayed same-session and recovered entries can be placed
+explicitly with **⌥⌘V** at the current writable cursor; possibly delivered
+entries require the separate reviewed one-shot authorization. The optional
+**Hold delivery while recording** setting pauses only the delivery dequeue while
+the mic is live and flushes work between chunks.
 
 Stopping ends the Continuity session before transcription starts, allowing
 macOS to dismiss its system-owned capture surface on the iPhone. Each new
@@ -295,7 +301,7 @@ transcription behind it owns a directional heuristic rail that remains below
 completion until that request actually finishes. The oldest card is rearmost,
 deeper work collapses into `+N`, and only a verified delivery slides out with its
 earcon; overflow and timeout changes simply fold or crossfade. A new hold appears
-only as one count-free clipboard-or-tray glyph for two seconds. Recovered and
+only as one count-free clipboard-or-document glyph for two seconds. Recovered and
 possibly delivered text stays in the dashboard and is never replayed into the
 HUD on launch. The stack has no controls and never presents results, offline
 notices, or errors. Each continuously transcribing card is capped at 90 seconds

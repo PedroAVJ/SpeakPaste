@@ -106,7 +106,7 @@ private struct MacStoredRetryableDictation: Codable {
     let createdAt: Date
 }
 
-/// A finished transcript waiting for its destination to regain focus.
+/// A finished transcript retained for explicit copy, release, or discard.
 struct MacHeldTranscript: Identifiable {
     let id: UUID
     let text: String
@@ -286,14 +286,17 @@ final class MacAppModel: ObservableObject {
     @Published private(set) var apiKeyNotice: String?
     @Published private(set) var isMicrophoneConnected = false
     @Published private(set) var connectionLatency: TimeInterval?
-    /// Transcripts that finished while their destination was not focused. They
-    /// are never dropped and never guessed at: each waits for its own field to
-    /// come back, or for the release shortcut.
+    /// Transcripts whose output is unresolved or ambiguous. They are never
+    /// replayed automatically; the dashboard owns explicit recovery actions.
     @Published private(set) var heldTranscripts: [MacHeldTranscript] = []
     /// Non-nil only when the sole visible hold is proven by SpeakPaste's live
     /// private pasteboard claim. Queue membership alone never implies that
     /// Command-V contains the corresponding transcript.
     @Published private(set) var heldClipboardOwnerID: UUID?
+    /// Short-lived cards whose completed transcript intentionally became the
+    /// clipboard fallback without entering the durable held queue.
+    @Published private(set) var clipboardFallbackHUDCardIDs = Set<UUID>()
+    var hasVisibleClipboardFallback: Bool { !clipboardFallbackHUDCardIDs.isEmpty }
     /// Exact queue snapshot authorized by the dashboard's duplicate-risk
     /// confirmation. The actual paste must happen later, while an external
     /// destination owns focus, through the global release shortcut/menu item.
@@ -397,22 +400,17 @@ final class MacAppModel: ObservableObject {
     /// same dictation more than once.
     private var suppressedDuplicateDeliveryEscrowIDs = Set<UUID>()
     private var connectedDeviceID: String?
-    private var pendingWatchTimer: Timer?
     /// Tracks the private pasteboard claim across queue reductions. Ownership
     /// dies with its original chunk and is never promoted to another hold.
     private var trackedHeldClipboardOwner: MacHeldClipboardIdentity?
-    /// Delivery is asynchronous now, so the 0.4 s watcher must not start a
-    /// second paste on top of one already in progress.
+    /// Reconciles only the private clipboard claim. It never initiates output.
+    private var clipboardClaimWatchTimer: Timer?
+    /// Explicit held release is asynchronous and must remain single-flight.
     private var isDeliveringHeldTranscripts = false
     /// A normal ordered delivery has already crossed into its serialized paste
     /// transaction. History/last-transcript Copy must not remove that escrow
     /// underneath an in-flight side effect.
     private var activeDeliveryEscrowIDs = Set<UUID>()
-    /// An opaque accessibility field can accept a paste without exposing a
-    /// readable value. Once that side effect happened, automatic retries are
-    /// suspended so the same dictation cannot be inserted every 0.4 seconds.
-    /// The transcript stays queued for an explicit copy, paste, or discard.
-    private var suspendedAutomaticHeldIDs = Set<UUID>()
     /// Dictations deliver in the order they were spoken even when a later,
     /// shorter one finishes transcribing first. `nextDeliverySequence` is the
     /// ticket now being served; results that arrive early wait in `completed`.
@@ -642,24 +640,23 @@ final class MacAppModel: ObservableObject {
         heldTranscripts = pendingTranscriptStore.transcripts
             .filter { !suppressedDuplicateDeliveryEscrowIDs.contains($0.id) }
             .map { pending in
-            MacHeldTranscript(
-                id: pending.id,
-                text: pending.text,
-                preparedChunk: MacPreparedTranscriptChunk(
+                MacHeldTranscript(
+                    id: pending.id,
                     text: pending.text,
-                    preservesLeadingReplacementCase: false
-                ),
-                hudCardID: pending.id,
-                hudOrdinal: nil,
-                target: nil,
-                destinationApplicationName: pending.destinationApplicationName,
-                destinationBundleIdentifier: pending.destinationBundleIdentifier,
-                createdAt: pending.createdAt,
-                deliveryState: pending.deliveryState
-            )
+                    preparedChunk: MacPreparedTranscriptChunk(
+                        text: pending.text,
+                        preservesLeadingReplacementCase: false
+                    ),
+                    hudCardID: pending.id,
+                    hudOrdinal: nil,
+                    target: nil,
+                    destinationApplicationName: pending.destinationApplicationName,
+                    destinationBundleIdentifier: pending.destinationBundleIdentifier,
+                    createdAt: pending.createdAt,
+                    deliveryState: pending.deliveryState
+                )
             }
         refreshHeldClipboardOwnership()
-        if !heldTranscripts.isEmpty { startPendingWatcher() }
         // An explicit process environment key is the local-development and UI
         // test boundary. Do not query the user's real Keychain in that mode:
         // CFFIXED_USER_HOME isolates defaults and files, but macOS Keychain
@@ -1145,6 +1142,31 @@ final class MacAppModel: ObservableObject {
             recordingDuration: recordingDuration
         )
         hudPipeline = pipeline
+    }
+
+    private func showClipboardFallbackHUD(
+        id: UUID,
+        ordinal: Int?,
+        createdAt: Date,
+        recordingDuration: TimeInterval
+    ) {
+        clipboardFallbackHUDCardIDs.insert(id)
+        markHUDCardHeld(
+            id,
+            ordinal: ordinal,
+            createdAt: createdAt,
+            recordingDuration: recordingDuration
+        )
+        announceHUDEvent(ordinal: ordinal, action: "was copied to the clipboard")
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard let self,
+                  self.clipboardFallbackHUDCardIDs.remove(id) != nil
+            else {
+                return
+            }
+            self.finishHUDCard(id)
+        }
     }
 
     @discardableResult
@@ -3154,7 +3176,6 @@ final class MacAppModel: ObservableObject {
                 hudOrdinal: finished.hudOrdinal,
                 recordingDuration: finished.recordingDuration
             )
-            suspendedAutomaticHeldIDs.insert(deliveryEscrowID)
             let detail = "Automatic delivery was blocked because this transcript is already marked as possibly delivered. Review the waiting copy before any retry."
             recordCompletedFailure(
                 detail,
@@ -3182,50 +3203,6 @@ final class MacAppModel: ObservableObject {
                 deviceName: finished.deviceName,
                 recordingDuration: finished.recordingDuration,
                 transcriptionDuration: finished.transcriptionDuration
-            )
-            return
-        }
-        // Once one chunk for this exact AX field is held, every later chunk in
-        // that run joins it without starting an ambiguous delivery receipt.
-        // The whole run will leave in order when that exact field returns; the
-        // newest chunk alone becomes the immediate clipboard fallback.
-        if let target = finished.target,
-           heldTranscripts.contains(where: { held in
-               guard let heldTarget = held.target else { return false }
-               return heldTarget.refersToSameElement(as: target)
-           }) {
-            hold(
-                finished.text,
-                preparedChunk: finished.preparedChunk,
-                for: target,
-                pendingID: finished.deliveryEscrowID,
-                createdAt: finished.createdAt,
-                hudCardID: finished.hudCardID,
-                hudOrdinal: finished.hudOrdinal,
-                recordingDuration: finished.recordingDuration,
-                copyOnPersistenceFailure: false
-            )
-            // The earlier run stays queued to prevent an automatic duplicate,
-            // but the dictation that just completed must still be immediately
-            // recoverable with Command-V. A stale queue is never permission to
-            // leave an unrelated clipboard value behind.
-            _ = await pasteController.copyToPasteboardAfterWaiting(
-                finished.text,
-                heldClipboardOwner: MacHeldClipboardIdentity(
-                    transcriptID: deliveryEscrowID,
-                    createdAt: finished.createdAt,
-                    sourceText: finished.text
-                )
-            )
-            refreshHeldClipboardOwnership()
-            attempts = reliabilityStore.prepend(
-                MacReliabilityAttempt(
-                    deviceName: finished.deviceName,
-                    recordingDuration: finished.recordingDuration,
-                    transcriptionDuration: finished.transcriptionDuration,
-                    outcome: .success,
-                    detail: "Held in spoken order for \(target.applicationName)"
-                )
             )
             return
         }
@@ -3274,20 +3251,22 @@ final class MacAppModel: ObservableObject {
             createdAt: finished.createdAt,
             sourceText: finished.text
         )
-        let delivery = await pasteController.deliver(
+        let deliveryOutcome = await pasteController.deliver(
             finished.preparedChunk,
-            to: finished.target,
+            capturedTarget: finished.target,
             autoPaste: autoPaste,
-            policy: deliveryPolicy(for: finished.target),
+            policyForTarget: { self.deliveryPolicy(for: $0) },
             copyOnHold: copyOnHold,
             heldClipboardOwner: heldClipboardOwner
         )
+        let delivery = deliveryOutcome.result
+        let deliveredTarget = deliveryOutcome.target
         activeDeliveryEscrowIDs.remove(deliveryEscrowID)
         if delivery.isDelivered {
             markHUDCardsDelivered(Set([finished.hudCardID]))
         }
         var detail = delivery.detail
-        if case let .held(reason) = delivery, let target = finished.target {
+        if case let .held(reason) = delivery, let target = deliveredTarget {
             restoreDeliveryEscrowPending(finished.deliveryEscrowID)
             hold(
                 finished.text,
@@ -3302,10 +3281,9 @@ final class MacAppModel: ObservableObject {
             )
             detail = "Held for \(target.applicationName) — \(reason.explanation)"
         } else if case let .held(reason) = delivery {
-            // A later chunk deliberately avoids replacing the clipboard while
-            // another held chunk owns it. A missing live AX target therefore
-            // means "retain for manual placement," never "discard because no
-            // clipboard side effect occurred."
+            // A late focus change can invalidate the live target after capture.
+            // Keep the durable handoff for explicit placement; never guess or
+            // reinterpret that no-side-effect result as delivered.
             restoreDeliveryEscrowPending(deliveryEscrowID)
             if let pending = pendingTranscriptStore.transcript(withID: deliveryEscrowID) {
                 presentPendingTranscript(
@@ -3330,21 +3308,50 @@ final class MacAppModel: ObservableObject {
                 recoveryNotice = "Delivery was held, but its saved recovery entry could not be reloaded. The transcript remains visible in this session."
             }
             detail = "Held for manual placement — \(reason.explanation)"
-        } else if case .pasted(_, verified: false) = delivery,
-                  let escrowID = finished.deliveryEscrowID,
-                  let pending = pendingTranscriptStore.transcript(withID: escrowID) {
+        } else if case let .pasted(_, verified) = delivery,
+                  MacPasteboardRecoveryPolicy.shouldSuspendAutomaticRetry(
+                      deliveryReachedOutputBoundary: true,
+                      pasteWasVerified: verified
+                  ) {
             // The side effect may already have happened. Keep the durable
             // uncertain escrow visible and refuse every implicit retry.
+            let escrowID = finished.deliveryEscrowID ?? finished.hudCardID
+            let pending = pendingTranscriptStore.transcript(withID: escrowID)
+                ?? MacPendingTranscript(
+                    id: escrowID,
+                    text: finished.text,
+                    destinationApplicationName: deliveredTarget?.applicationName
+                        ?? finished.target?.applicationName
+                        ?? "Unknown app",
+                    destinationBundleIdentifier: deliveredTarget?.bundleIdentifier
+                        ?? finished.target?.bundleIdentifier,
+                    createdAt: finished.createdAt,
+                    deliveryState: .deliveryUncertain
+                )
             presentPendingTranscript(
                 pending,
-                target: finished.target,
+                target: deliveredTarget,
                 preparedChunk: finished.preparedChunk,
                 hudCardID: finished.hudCardID,
                 hudOrdinal: finished.hudOrdinal,
                 recordingDuration: finished.recordingDuration
             )
-            suspendedAutomaticHeldIDs.insert(escrowID)
-            detail = "\(delivery.detail); saved recovery entry marked as possibly delivered"
+            let hasDurableRecovery = pendingTranscriptStore.transcript(withID: escrowID) != nil
+            if !hasDurableRecovery {
+                recoveryNotice = "The paste may have landed. Its durable recovery entry could not be reloaded, so the exact transcript remains visible for this session and will not be retried automatically."
+            }
+            detail = hasDurableRecovery
+                ? "\(delivery.detail); saved recovery entry marked as possibly delivered"
+                : "\(delivery.detail); possibly delivered copy retained for this session"
+        } else if case .clipboardFallback = delivery {
+            finishDeliveryEscrow(finished.deliveryEscrowID)
+            showClipboardFallbackHUD(
+                id: finished.hudCardID,
+                ordinal: finished.hudOrdinal,
+                createdAt: finished.createdAt,
+                recordingDuration: finished.recordingDuration
+            )
+            refreshHeldClipboardOwnership()
         } else if case .clipboardFailed = delivery,
                   let escrowID = finished.deliveryEscrowID {
             // No external insertion was attempted successfully, so an escrow
@@ -3354,7 +3361,7 @@ final class MacAppModel: ObservableObject {
             if let restored = pendingTranscriptStore.transcript(withID: escrowID) {
                 presentPendingTranscript(
                     restored,
-                    target: finished.target,
+                    target: deliveredTarget,
                     preparedChunk: finished.preparedChunk,
                     hudCardID: finished.hudCardID,
                     hudOrdinal: finished.hudOrdinal,
@@ -3365,9 +3372,9 @@ final class MacAppModel: ObservableObject {
         } else {
             finishDeliveryEscrow(finished.deliveryEscrowID)
             finishHUDCard(finished.hudCardID)
-            if let target = finished.target {
-            // Naming the destination and the route makes the attempt log the
-            // record of where each dictation actually went.
+            if let target = deliveredTarget {
+                // Naming the destination and the route makes the attempt log
+                // the record of where each dictation actually went.
                 detail = "\(delivery.detail) → \(target.applicationName)"
             }
         }
@@ -3491,12 +3498,10 @@ final class MacAppModel: ObservableObject {
         let removed = removeDeliveredHeldTranscripts(durableIDs)
         finishHUDCards(forHeldTranscriptIDs: removed)
         heldTranscripts.removeAll { removed.contains($0.id) }
-        suspendedAutomaticHeldIDs.subtract(removed)
         refreshHeldClipboardOwnership()
         explicitlyResolvedDeliveryEscrowIDs.formUnion(
             removed.subtracting(visibleIDs)
         )
-        if heldTranscripts.isEmpty { stopPendingWatcher() }
         if removed == durableIDs {
             if resolvesCurrentLast {
                 lastTranscriptOutputIsResolved = true
@@ -3658,7 +3663,6 @@ final class MacAppModel: ObservableObject {
                 finishHUDCard(heldTranscripts[index].hudCardID)
             }
             refreshHeldClipboardOwnership()
-            startPendingWatcher()
             return
         }
         armedUncertainPasteIDs.removeAll()
@@ -3688,7 +3692,6 @@ final class MacAppModel: ObservableObject {
             finishHUDCard(resolvedHUDCardID)
         }
         refreshHeldClipboardOwnership()
-        startPendingWatcher()
     }
 
     /// Re-read durable state rather than presenting a stale value captured
@@ -3717,10 +3720,8 @@ final class MacAppModel: ObservableObject {
                 }
                 finishHUDCards(forHeldTranscriptIDs: Set([id]))
                 heldTranscripts.removeAll { $0.id == id }
-                suspendedAutomaticHeldIDs.remove(id)
                 armedUncertainPasteIDs.removeAll()
                 refreshHeldClipboardOwnership()
-                if heldTranscripts.isEmpty { stopPendingWatcher() }
                 recoveryNotice = "The transcript was output; its recovery entry had already been cleared."
                 return true
             }
@@ -3730,10 +3731,8 @@ final class MacAppModel: ObservableObject {
             }
             finishHUDCards(forHeldTranscriptIDs: Set([id]))
             heldTranscripts.removeAll { $0.id == id }
-            suspendedAutomaticHeldIDs.remove(id)
             armedUncertainPasteIDs.removeAll()
             refreshHeldClipboardOwnership()
-            if heldTranscripts.isEmpty { stopPendingWatcher() }
             return true
         } catch {
             // The requested output already exists, so a stale escrow is a
@@ -3834,7 +3833,6 @@ final class MacAppModel: ObservableObject {
             suppressedDuplicateDeliveryEscrowIDs.subtract(retiredSiblingIDs)
             finishHUDCards(forHeldTranscriptIDs: retiredSiblingIDs)
             heldTranscripts.removeAll { retiredSiblingIDs.contains($0.id) }
-            suspendedAutomaticHeldIDs.subtract(retiredSiblingIDs)
             armedUncertainPasteIDs.removeAll()
             refreshHeldClipboardOwnership()
 
@@ -3853,7 +3851,6 @@ final class MacAppModel: ObservableObject {
             if !transferred.isEmpty {
                 for pending in transferred {
                     presentPendingTranscript(pending, target: nil)
-                    suspendedAutomaticHeldIDs.insert(pending.id)
                 }
                 recoveryNotice = "Output is paused because a duplicate recovery entry may already have been delivered. Review the canonical waiting transcript before Copy, Discard, or Paste Anyway."
                 return false
@@ -3928,10 +3925,12 @@ final class MacAppModel: ObservableObject {
     /// once the claimed owner leaves, preserving the user's clipboard wins.
     private func refreshHeldClipboardOwnership() {
         guard !heldTranscripts.isEmpty else {
+            stopClipboardClaimWatcher()
             trackedHeldClipboardOwner = nil
             heldClipboardOwnerID = nil
             return
         }
+        startClipboardClaimWatcher()
         guard let claim = pasteController.heldClipboardClaim() else {
             trackedHeldClipboardOwner = nil
             heldClipboardOwnerID = nil
@@ -3952,135 +3951,35 @@ final class MacAppModel: ObservableObject {
             trackedHeldClipboardOwner = nil
         }
 
-        let visibleOwnerID = heldTranscripts.count == 1 ? currentOwnerID : nil
+        // The transient held card represents the newest waiting result. Older
+        // recovery entries must not hide that newest result's proven clipboard
+        // handoff, but an old claim must not color a newer document-only hold.
+        let visibleOwnerID = currentOwnerID == heldTranscripts.last?.id
+            ? currentOwnerID
+            : nil
         if heldClipboardOwnerID != visibleOwnerID {
             heldClipboardOwnerID = visibleOwnerID
         }
     }
 
-    /// Polls for the destination regaining focus rather than installing an
-    /// AXObserver. Observers behave inconsistently across toolkits — Electron
-    /// especially — and a 0.4 s poll that only runs while something is held is
-    /// both cheaper to reason about and uniform across every app.
-    private func startPendingWatcher() {
-        guard pendingWatchTimer == nil else { return }
-        pendingWatchTimer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] _ in
+    /// Clipboard ownership can change outside SpeakPaste. This monitor only
+    /// reconciles the private claim used by the UI; it never delivers or retries
+    /// a transcript.
+    private func startClipboardClaimWatcher() {
+        guard clipboardClaimWatchTimer == nil else { return }
+        clipboardClaimWatchTimer = Timer.scheduledTimer(
+            withTimeInterval: 0.4,
+            repeats: true
+        ) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.deliverHeldTranscriptsIfTargetFocused()
+                self?.refreshHeldClipboardOwnership()
             }
         }
     }
 
-    private func stopPendingWatcher() {
-        pendingWatchTimer?.invalidate()
-        pendingWatchTimer = nil
-    }
-
-    private func deliverHeldTranscriptsIfTargetFocused() {
-        if !isDeliveringHeldTranscripts, activeDeliveryEscrowIDs.isEmpty {
-            refreshHeldClipboardOwnership()
-        }
-        guard !heldTranscripts.isEmpty else {
-            stopPendingWatcher()
-            return
-        }
-        guard autoPaste, !phase.isBusy, !isDeliveringHeldTranscripts else { return }
-        guard let seed = heldTranscripts.first(where: {
-            $0.target?.canDeliverOnReturn == true
-        }), let target = seed.target else { return }
-        let ready = heldTranscripts.filter { held in
-            held.target?.refersToSameElement(as: target) == true
-        }
-        // The exact-field run is one ordered unit. If its earliest member may
-        // already have landed, skipping it and auto-returning a later chunk
-        // would create an unprovable hole in the user's multipart thought.
-        // Keep the whole run behind the uncertain member for reviewed release.
-        guard ready.allSatisfy({ held in
-            !suspendedAutomaticHeldIDs.contains(held.id)
-                && !held.deliveryIsUncertain
-                && held.target?.canDeliverOnReturn == true
-        }) else {
-            return
-        }
-        guard
-            !ready.isEmpty,
-            deliveryPolicy(for: target)?.deliveryMethod != .clipboardOnly
-        else {
-            return
-        }
-
-        // Everything spoken for this field, in the order it was spoken, as one
-        // insert. Two dictations while away should read as two sentences, not
-        // arrive as a race.
-        let chunks = ready.map(\.preparedChunk)
-        let readyIdentifiers = Set(ready.map(\.id))
-        let originallyPendingIdentifiers = Set(
-            ready.filter { $0.deliveryState == .pending }.map(\.id)
-        )
-        guard ensureSourceRecoveryIsUnlinked(for: readyIdentifiers) else {
-            phase = .failed(
-                "Waiting text cannot return automatically until its source-audio recovery transaction finishes. Nothing was pasted or removed."
-            )
-            return
-        }
-        guard markHeldDeliveryUncertain(readyIdentifiers) else { return }
-        isDeliveringHeldTranscripts = true
-        activeDeliveryEscrowIDs.formUnion(readyIdentifiers)
-        Task { [weak self] in
-            guard let self else { return }
-            defer {
-                self.activeDeliveryEscrowIDs.subtract(readyIdentifiers)
-                self.isDeliveringHeldTranscripts = false
-            }
-            let result = await self.pasteController.deliverHeld(
-                chunks,
-                to: target,
-                policy: self.deliveryPolicy(for: target),
-                copyOnHold: false
-            )
-            if case .pasted(_, verified: false) = result {
-                // A write may have happened even though this field cannot be
-                // read back. Never turn uncertainty into repeated inserts.
-                self.suspendedAutomaticHeldIDs.formUnion(readyIdentifiers)
-                guard !self.phase.isBusy else { return }
-                self.sounds.playFailed()
-                self.phase = .failed(
-                    "Paste was sent but could not be confirmed. It will not be attempted again automatically; verify the field, then copy, paste, or discard the held copy."
-                )
-                return
-            }
-            // Held text is only forgotten once it has actually gone somewhere.
-            // Anything else — secure input, a refused menu action, a swallowed
-            // keystroke — keeps it queued, because the app promises it is safe.
-            guard result.isDelivered else {
-                self.restoreHeldDeliveryPending(originallyPendingIdentifiers)
-                return
-            }
-            let durablyRemoved = self.removeDeliveredHeldTranscripts(readyIdentifiers)
-            self.markHUDCardsDelivered(
-                Set(ready.lazy.filter { durablyRemoved.contains($0.id) }.map(\.hudCardID))
-            )
-            self.finishHUDCards(forHeldTranscriptIDs: durablyRemoved)
-            self.heldTranscripts.removeAll { durablyRemoved.contains($0.id) }
-            self.suspendedAutomaticHeldIDs.subtract(durablyRemoved)
-            self.refreshHeldClipboardOwnership()
-            if self.heldTranscripts.isEmpty { self.stopPendingWatcher() }
-            guard durablyRemoved == readyIdentifiers else {
-                guard !self.phase.isBusy else { return }
-                self.sounds.playFailed()
-                self.phase = .failed(
-                    "Paste was confirmed, but a recovery copy could not be cleared. It remains marked as possibly delivered; verify before Paste Anyway."
-                )
-                return
-            }
-            self.sounds.playDelivered()
-            for held in ready where durablyRemoved.contains(held.id) {
-                self.announceHUDEvent(ordinal: held.hudOrdinal, action: "was delivered")
-            }
-            guard !self.phase.isBusy else { return }
-            self.phase = .succeeded("Pasted where you left off")
-            self.scheduleReadyReset()
-        }
+    private func stopClipboardClaimWatcher() {
+        clipboardClaimWatchTimer?.invalidate()
+        clipboardClaimWatchTimer = nil
     }
 
     /// Drops everything held at the caret's current location, wherever that is.
@@ -4157,9 +4056,7 @@ final class MacAppModel: ObservableObject {
             )
             self.finishHUDCards(forHeldTranscriptIDs: removed)
             self.heldTranscripts.removeAll { removed.contains($0.id) }
-            self.suspendedAutomaticHeldIDs.subtract(removed)
             self.refreshHeldClipboardOwnership()
-            if self.heldTranscripts.isEmpty { self.stopPendingWatcher() }
             guard removed == identifiers else {
                 self.phase = .failed(
                     "Paste was confirmed, but a recovery copy could not be cleared. It remains marked as possibly delivered; verify before Paste Anyway."
@@ -4273,14 +4170,12 @@ final class MacAppModel: ObservableObject {
             }
             finishHUDCards(forHeldTranscriptIDs: removed)
             heldTranscripts.removeAll { removed.contains($0.id) }
-            suspendedAutomaticHeldIDs.subtract(removed)
             armedUncertainPasteIDs.removeAll()
             refreshHeldClipboardOwnership()
             if let lastTranscriptPendingID, removed.contains(lastTranscriptPendingID) {
                 self.lastTranscriptPendingID = nil
                 lastTranscriptOutputIsResolved = true
             }
-            if heldTranscripts.isEmpty { stopPendingWatcher() }
             recoveryNotice = "Discarded the reviewed waiting transcripts."
         } catch {
             recoveryNotice = "Could not discard held transcripts: \(error.localizedDescription)"
@@ -4311,9 +4206,7 @@ final class MacAppModel: ObservableObject {
         let removed = removeDeliveredHeldTranscripts(identifiers)
         finishHUDCards(forHeldTranscriptIDs: removed)
         heldTranscripts.removeAll { removed.contains($0.id) }
-        suspendedAutomaticHeldIDs.subtract(removed)
         refreshHeldClipboardOwnership()
-        if heldTranscripts.isEmpty { stopPendingWatcher() }
         recoveryNotice = removed == identifiers
             ? "Copied the waiting text and resolved its reviewed recovery entries."
             : "The waiting text was copied, but a recovery entry could not be cleared and remains marked as possibly delivered."

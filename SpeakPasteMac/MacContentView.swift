@@ -225,7 +225,14 @@ private struct MacDashboardView: View {
         let count = model.heldTranscripts.count
         return VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .top, spacing: 8) {
-                Image(systemName: "tray.full.fill")
+                Image(
+                    systemName: MacHUDHeldSymbol.systemName(
+                        clipboardBacked: model.heldClipboardOwnerID != nil,
+                        isAvailable: { name in
+                            NSImage(systemSymbolName: name, accessibilityDescription: nil) != nil
+                        }
+                    )
+                )
                     .foregroundStyle(.blue)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
@@ -278,18 +285,14 @@ private struct MacDashboardView: View {
         }
         let recoveredCount = model.heldTranscripts.filter(\.isRecovered).count
         let live = model.heldTranscripts.filter { !$0.isRecovered }
-        let destinations = Array(Set(live.map(\.destinationApplicationName))).sorted()
 
         if live.isEmpty {
             return "Recovered from a previous session. Focus the field where the text belongs, then press \(model.releaseHotKeyLabel) or use the menu-bar Paste command."
         }
         if recoveredCount > 0 {
-            return "\(recoveredCount) recovered transcript\(recoveredCount == 1 ? "" : "s") need manual placement. The remaining \(live.count) will paste only when their exact original fields regain focus."
+            return "\(recoveredCount) recovered transcript\(recoveredCount == 1 ? "" : "s") and \(live.count) same-session transcript\(live.count == 1 ? "" : "s") need manual placement at the current writable cursor."
         }
-        if destinations.count == 1, let destination = destinations.first {
-            return "Return to the exact original field in \(destination) for automatic paste, or focus any field and press \(model.releaseHotKeyLabel)."
-        }
-        return "These transcripts are waiting for \(destinations.count) original fields. Each pastes only when its own field regains focus; \(model.releaseHotKeyLabel) places all of them manually."
+        return "Focus the writable editor where this text belongs, then press \(model.releaseHotKeyLabel). Waiting text is never replayed automatically."
     }
 
     private var retryBanner: some View {
@@ -1430,10 +1433,10 @@ private struct MacOnboardingView: View {
                 .font(.system(size: 44))
                 .foregroundStyle(Color.accentColor)
                 .accessibilityHidden(true)
-            Text("Dictate in any app. Your text returns only to the field where you started.")
+            Text("Dictate in any app. Delivery follows your current writable cursor.")
                 .font(.title3.weight(.semibold))
                 .fixedSize(horizontal: false, vertical: true)
-            Text("Tap \(model.hotKeyLabel) once in any app to start or stop. Tap it twice to switch the sticky input mode between this Mac and your iPhone — even while speaking. SpeakPaste transcribes with ElevenLabs Scribe and returns the result to the exact field when it is still active. Otherwise, the text waits safely.")
+            Text("Tap \(model.hotKeyLabel) once in any app to start or stop. Tap it twice to switch the sticky input mode between this Mac and your iPhone — even while speaking. SpeakPaste transcribes with ElevenLabs Scribe and delivers to the writable, non-secure editor focused when the text is ready. If none is focused, the newest transcript becomes the clipboard fallback.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1701,7 +1704,7 @@ private struct MacOnboardingView: View {
             .padding(12)
             .background(RoundedRectangle(cornerRadius: 8).fill(.quaternary.opacity(0.4)))
 
-            Text("If a dictation finishes while you're elsewhere, it waits for the exact original field. Focus that field again for automatic paste, or use \(model.releaseHotKeyLabel) to place it manually.")
+            Text("At delivery time, SpeakPaste uses the currently focused editor. If no writable editor is focused, the newest transcript is copied to the clipboard; use \(model.releaseHotKeyLabel) to place saved recovery text manually.")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)

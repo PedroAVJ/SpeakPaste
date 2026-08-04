@@ -1,6 +1,23 @@
 import Combine
 import Foundation
 
+/// SF Symbols used for held-output state. Both preferred symbols predate the
+/// macOS 14 deployment floor. The runtime fallback keeps a misspelled or
+/// unexpectedly unavailable symbol from turning the HUD into an empty glyph.
+enum MacHUDHeldSymbol {
+    static let clipboard = "clipboard.fill"
+    static let recovery = "doc.text.fill"
+    static let fallback = "doc.fill"
+
+    static func systemName(
+        clipboardBacked: Bool,
+        isAvailable: (String) -> Bool
+    ) -> String {
+        let preferred = clipboardBacked ? clipboard : recovery
+        return isAvailable(preferred) ? preferred : fallback
+    }
+}
+
 /// The microphone-facing portion of one HUD card.
 enum MacHUDCaptureActivity: Equatable, Sendable {
     case inactive

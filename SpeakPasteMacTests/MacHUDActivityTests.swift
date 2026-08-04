@@ -1,6 +1,47 @@
+import AppKit
 import Combine
 import XCTest
 @testable import SpeakPaste
+
+final class MacHUDHeldSymbolTests: XCTestCase {
+    func testHeldSymbolMappingUsesClipboardAndDocumentGlyphs() {
+        XCTAssertEqual(
+            MacHUDHeldSymbol.systemName(
+                clipboardBacked: true,
+                isAvailable: { _ in true }
+            ),
+            "clipboard.fill"
+        )
+        XCTAssertEqual(
+            MacHUDHeldSymbol.systemName(
+                clipboardBacked: false,
+                isAvailable: { _ in true }
+            ),
+            "doc.text.fill"
+        )
+    }
+
+    func testHeldSymbolsRenderAndMissingPreferredSymbolFallsBack() {
+        for name in [
+            MacHUDHeldSymbol.clipboard,
+            MacHUDHeldSymbol.recovery,
+            MacHUDHeldSymbol.fallback,
+        ] {
+            XCTAssertNotNil(
+                NSImage(systemSymbolName: name, accessibilityDescription: nil),
+                "Expected supported macOS 14 SF Symbol: \(name)"
+            )
+        }
+
+        XCTAssertEqual(
+            MacHUDHeldSymbol.systemName(
+                clipboardBacked: true,
+                isAvailable: { _ in false }
+            ),
+            MacHUDHeldSymbol.fallback
+        )
+    }
+}
 
 final class MacHUDStackTests: XCTestCase {
     private let base = Date(timeIntervalSince1970: 10_000)

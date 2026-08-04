@@ -26,10 +26,12 @@ automation/model/media-control surfaces, but still need product or release work:
 
 ## Automated candidate gates
 
-- [ ] Run the complete focused Swift test suite, including persistence failure,
-      pending-audio, pending-transcript ambiguity, Command gesture/input mode,
-      vocabulary boundary, retained-audio quota/free-space, and single-instance
-      coverage.
+- [ ] Run the complete focused Swift test suite, including delivery-time editor
+      replacement/retargeting, no-focused-editor clipboard fallback, ambiguous
+      insertion no-retry behavior, Paste accelerator casing, glyph compatibility,
+      persistence failure, pending-audio, pending-transcript ambiguity, Command
+      gesture/input mode, vocabulary boundary, retained-audio quota/free-space,
+      and single-instance coverage.
 - [ ] Build `SpeakPasteMac` from a clean candidate checkout with the documented
       ad-hoc command. Review every warning and confirm the generated app contains
       the intended sources and no credential or local state.
@@ -77,8 +79,8 @@ TCC grants, or Application Support.
       badge on the rearmost card, and only verified deliveries pop from the
       rear; overflow and timeout changes must fold or crossfade. Force a held
       chunk and confirm one count-free clipboard glyph appears only while the
-      hold owns the private live pasteboard claim, changes to a neutral tray
-      after another app replaces the clipboard, and disappears within two
+      hold owns the private live pasteboard claim, changes to a neutral document
+      glyph after another app replaces the clipboard, and disappears within two
       seconds. Relaunch with waiting or uncertain recovery entries and confirm
       none are replayed into the HUD; the dashboard remains authoritative. Hold the
       model in Connecting and Releasing
@@ -94,15 +96,22 @@ TCC grants, or Application Support.
       seam against the live caret: words get exactly one needed space,
       punctuation attaches, existing spaces/newlines do not gain another, and a
       sentence-ending mark gives the next ordinary chunk sensible casing.
-- [ ] Move focus away after the first chunk so it holds, then dictate later
-      chunks pinned to that same field. Confirm they chain-hold explicitly, the
-      clipboard remains the first single chunk instead of being overwritten,
-      the HUD does not become a queue counter, and returning to the exact field releases the whole
-      run as one ordered, cleanly fitted insertion. Force the first member into
-      an unconfirmed state and confirm no later same-field member skips ahead.
-      When delivery leaves one hold, confirm clipboard ownership transfers only
-      if its original private claim still exists. Confirm a different field in
-      the same app does not qualify.
+- [ ] Start a dictation in one editor, then focus a different writable field or
+      application before transcription completes. Confirm the transcript is
+      fitted to and delivered into the editor that owns focus at the delivery
+      boundary, without requiring the record-start AX node or application.
+      Repeat while an Electron or Chromium editor rebuilds or replaces its AX
+      tree and editable node; the current writable editor must still qualify.
+- [ ] Move focus to a noneditable control before delivery and seed older recovery
+      entries. Confirm no insertion is attempted, the exact newest transcript
+      becomes the clipboard fallback, the dashboard keeps every unresolved entry,
+      and the HUD remains a transient status rather than a queue counter. Use the
+      explicit release command from another writable editor and confirm the
+      delayed text is fitted to that current cursor.
+- [ ] Force an insertion whose side effect cannot be confirmed. Confirm the exact
+      transcript remains recoverable and clipboard-backed, is marked possibly
+      delivered, and is never retried automatically. A later explicit Paste
+      Anyway must require a fresh one-shot authorization for the reviewed queue.
 - [ ] Turn **Hold delivery while recording** on, dictate overlapping chunks, and
       confirm completed work never dequeues while capture is active but flushes
       in the pauses between chunks. Turn it off during capture and confirm the
@@ -179,7 +188,8 @@ for the release evidence.
 - [ ] Grant permissions through onboarding, select the Continuity microphone,
       and complete the three-second microphone test.
 - [ ] Focus a Notes field, tap bare right Command, wait for **Listening**,
-      dictate, and tap it again. Confirm text reaches that exact field and the
+      dictate, and tap it again. Keep that writable field focused through the
+      delivery boundary and confirm text reaches the current cursor while the
       iPhone's system-owned capture surface dismisses before transcription.
 - [ ] Repeat immediately to prove clean Continuity release and reconnect, not
       merely one successful transcription.
@@ -194,12 +204,17 @@ for the release evidence.
       immediately, discard the active segment, release the microphone, and leave
       no capture indicator behind. A normal single-Command stop must still
       transcribe.
-- [ ] Start in one field and switch to another before the response returns. No
-      text may enter the second field. Returning to the exact original field must
-      release only its matching held text.
+- [ ] Start in one writable field and switch to another field or application
+      before the response returns. Confirm the current delivery-time editor
+      receives the text. Repeat in Electron or Chromium while its AX tree or
+      editable node is replaced; record-start node identity must not be required.
+- [ ] Repeat with no writable editor focused. Confirm no insertion occurs and the
+      exact newest transcript is the clipboard fallback even with older recovery
+      entries. Then explicitly release delayed text into a current writable
+      editor rather than waiting for an archived node to return.
 - [ ] Repeat in an opaque field. An unverifiable paste must be labelled
-      unconfirmed/possibly delivered, remain recoverable, and never insert a
-      second copy automatically.
+      unconfirmed/possibly delivered, remain recoverable and clipboard-backed,
+      and never insert a second copy automatically.
 - [ ] Exercise an unavailable/disconnected microphone, device reconnect,
       mid-stream loss with partial salvage, secure input, revoked permissions,
       sleep/wake, and the 20-minute automatic stop path.

@@ -368,7 +368,8 @@ private struct MacStatusHUDView: View {
                 MacHUDStackCardView(
                     card: card,
                     inputLevel: model.inputLevel,
-                    heldClipboardBacked: model.heldClipboardOwnerID != nil,
+                    heldClipboardBacked: model.hasVisibleClipboardFallback
+                        || model.heldClipboardOwnerID != nil,
                     reduceMotion: reduceMotion
                 )
                 .scaleEffect(
@@ -395,7 +396,8 @@ private struct MacStatusHUDView: View {
         .accessibilityLabel(
             stack.accessibilityLabel(
                 sourceName: sourceName,
-                heldClipboardBacked: model.heldClipboardOwnerID != nil
+                heldClipboardBacked: model.hasVisibleClipboardFallback
+                    || model.heldClipboardOwnerID != nil
             )
         )
     }
@@ -800,14 +802,21 @@ private struct MacHUDDictationProgress: View {
 /// The transient hold marker: a single wordless glyph, on screen for two
 /// seconds, declaring that the just-finished chunk stayed here instead of
 /// leaving. The clipboard glyph appears only when a private live claim proves
-/// Command-V is backed by the sole held chunk; otherwise a neutral tray says
+/// Command-V is backed by the newest held chunk; otherwise a neutral document says
 /// "saved here." No count, hint, or control — the durable queue and every
 /// release action live in the dashboard and menu bar.
 private struct MacHUDHeldBadge: View {
     let clipboardBacked: Bool
 
     var body: some View {
-        Image(systemName: clipboardBacked ? "doc.on.clipboard" : "tray.full")
+        Image(
+            systemName: MacHUDHeldSymbol.systemName(
+                clipboardBacked: clipboardBacked,
+                isAvailable: { name in
+                    NSImage(systemSymbolName: name, accessibilityDescription: nil) != nil
+                }
+            )
+        )
             .font(.system(size: 13, weight: .semibold))
             .foregroundStyle(
                 clipboardBacked

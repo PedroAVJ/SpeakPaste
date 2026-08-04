@@ -3,51 +3,6 @@ import AppKit
 import Carbon
 import Foundation
 
-/// A privacy-neutral snapshot of an editable Accessibility element. It stores
-/// structure and geometry, never the field's value or selected text.
-struct MacAccessibilityTargetFingerprint: Equatable, Sendable {
-    let role: String
-    let subrole: String?
-    let stableIdentifiers: Set<String>
-    let placeholder: String?
-    let frame: CGRect?
-
-    /// Chromium can replace an AX proxy while leaving the same editor focused.
-    /// A replacement is accepted only in the same window, with no intervening
-    /// user input, and with a strong structural or geometric match.
-    func safelyMatchesRebuilt(
-        _ other: MacAccessibilityTargetFingerprint,
-        sameWindow: Bool,
-        noInterveningUserInput: Bool
-    ) -> Bool {
-        guard sameWindow, noInterveningUserInput else { return false }
-        guard role == other.role, subrole == other.subrole else { return false }
-
-        if !stableIdentifiers.isEmpty,
-           !stableIdentifiers.isDisjoint(with: other.stableIdentifiers) {
-            return true
-        }
-
-        let placeholdersMatch = placeholder?.isEmpty == false
-            && placeholder == other.placeholder
-        guard placeholdersMatch || framesSubstantiallyOverlap(other) else {
-            return false
-        }
-        return framesSubstantiallyOverlap(other)
-    }
-
-    private func framesSubstantiallyOverlap(
-        _ other: MacAccessibilityTargetFingerprint
-    ) -> Bool {
-        guard let frame, let otherFrame = other.frame else { return false }
-        let smallerArea = min(frame.width * frame.height, otherFrame.width * otherFrame.height)
-        guard smallerArea > 0 else { return false }
-        let intersection = frame.intersection(otherFrame)
-        guard !intersection.isNull else { return false }
-        return (intersection.width * intersection.height) / smallerArea >= 0.85
-    }
-}
-
 /// Identifies the unmodified Command-V menu item without depending on the
 /// application's localization or on AppKit's accelerator letter casing.
 /// Electron currently exposes the Paste accelerator as uppercase `V`, while
@@ -69,10 +24,24 @@ enum MacPasteMenuShortcut {
     }
 }
 
-/// Counts focus-changing user actions without observing their contents. Bare
-/// Command taps are flags-changed events and deliberately do not increment it.
-private final class MacUserInteractionTracker: @unchecked Sendable {
+enum MacPasteMenuActionResult: Equatable {
+    /// No menu side effect was reached; another insertion route is safe.
+    case unavailable
+    /// Focus stopped being a writable control before the menu action.
+    case focusChanged
+    /// AXPress was invoked. Its return status cannot prove whether the target
+    /// consumed the paste, so no second insertion route may be attempted.
+    case invoked
+
+    var permitsAnotherInsertionRoute: Bool { self == .unavailable }
+}
+
+/// Counts user actions that can move focus or the insertion point without
+/// observing their contents. SpeakPaste's own marked CGEvents are excluded so
+/// a chunked insertion can distinguish its output from intervening user input.
+final class MacUserInteractionTracker: @unchecked Sendable {
     static let shared = MacUserInteractionTracker()
+    static let syntheticEventMarker: Int64 = 0x5350_4541_4B
 
     private let lock = NSLock()
     private var generation: UInt64 = 0
@@ -87,7 +56,11 @@ private final class MacUserInteractionTracker: @unchecked Sendable {
                 .keyDown,
                 .scrollWheel,
             ]
-        ) { [weak self] _ in
+        ) { [weak self] event in
+            if event.cgEvent?.getIntegerValueField(.eventSourceUserData)
+                == Self.syntheticEventMarker {
+                return
+            }
             self?.recordInteraction()
         }
     }
@@ -99,6 +72,13 @@ private final class MacUserInteractionTracker: @unchecked Sendable {
         return generation
     }
 
+    static func markSynthetic(_ event: CGEvent) {
+        event.setIntegerValueField(
+            .eventSourceUserData,
+            value: syntheticEventMarker
+        )
+    }
+
     private func recordInteraction() {
         lock.lock()
         generation &+= 1
@@ -106,10 +86,10 @@ private final class MacUserInteractionTracker: @unchecked Sendable {
     }
 }
 
-/// Where a dictation is meant to land: the application that was frontmost when
-/// recording started, plus the exact element that held keyboard focus. Keeping
-/// the element — not just the process — is what lets SpeakPaste refuse to
-/// deliver into a different field that happens to be focused later.
+/// Application/context metadata captured for recognition and History. Delivery
+/// deliberately resolves the live focused editor later: Electron and Chromium
+/// may rebuild or proxy their Accessibility nodes while the user stays put, so
+/// a record-start AX object is not a universal destination identity.
 struct MacDeliveryTarget {
     let processIdentifier: pid_t
     let applicationName: String
@@ -118,13 +98,12 @@ struct MacDeliveryTarget {
     /// proper nouns/code identifiers for Scribe keyterm biasing, never a dump
     /// of the field or screen contents.
     let contextKeyterms: [String]
-    /// The text immediately before the caret when recording began. Formatting
-    /// must follow the intended field, not whichever field happens to be
-    /// focused when the network request finishes.
+    /// The text immediately before the caret at this snapshot. A live delivery
+    /// capture uses it only if a second caret-local read is unavailable.
     let precedingText: String?
     private let element: AXUIElement?
-    private let window: AXUIElement?
-    private let fingerprint: MacAccessibilityTargetFingerprint?
+    /// This is captured at the delivery boundary, not at record start. It is
+    /// used only to keep a multi-step side effect from following later input.
     private let interactionGeneration: UInt64?
 
     init(
@@ -134,8 +113,6 @@ struct MacDeliveryTarget {
         contextKeyterms: [String] = [],
         precedingText: String? = nil,
         element: AXUIElement?,
-        window: AXUIElement? = nil,
-        fingerprint: MacAccessibilityTargetFingerprint? = nil,
         interactionGeneration: UInt64? = nil
     ) {
         self.processIdentifier = processIdentifier
@@ -144,8 +121,6 @@ struct MacDeliveryTarget {
         self.contextKeyterms = contextKeyterms
         self.precedingText = precedingText
         self.element = element
-        self.window = window
-        self.fingerprint = fingerprint
         self.interactionGeneration = interactionGeneration
     }
 
@@ -163,23 +138,40 @@ struct MacDeliveryTarget {
         else {
             return nil
         }
-        let element = MacAccessibility.systemFocusedElement()
+        let interactionBeforeCapture = MacUserInteractionTracker.shared.snapshot
+        let element = MacAccessibility.focusedWritableElement()
+        let contextKeyterms = collectContext ? element.map {
+            MacAccessibility.contextKeyterms(
+                from: $0,
+                applicationName: application.localizedName
+            )
+        } ?? [] : []
+        let precedingText = element.flatMap(MacAccessibility.textBeforeCursor(in:))
+        let interactionAfterCapture = MacUserInteractionTracker.shared.snapshot
+        guard
+            NSWorkspace.shared.frontmostApplication?.processIdentifier
+                == application.processIdentifier,
+            interactionBeforeCapture == interactionAfterCapture
+        else {
+            return nil
+        }
         return MacDeliveryTarget(
             processIdentifier: application.processIdentifier,
             applicationName: application.localizedName ?? "the previous app",
             bundleIdentifier: application.bundleIdentifier,
-            contextKeyterms: collectContext ? element.map {
-                MacAccessibility.contextKeyterms(
-                    from: $0,
-                    applicationName: application.localizedName
-                )
-            } ?? [] : [],
-            precedingText: element.flatMap(MacAccessibility.textBeforeCursor(in:)),
+            contextKeyterms: contextKeyterms,
+            precedingText: precedingText,
             element: element,
-            window: element.flatMap(MacAccessibility.window(of:)),
-            fingerprint: element.flatMap(MacAccessibility.targetFingerprint(of:)),
-            interactionGeneration: MacUserInteractionTracker.shared.snapshot
+            interactionGeneration: interactionAfterCapture
         )
+    }
+
+    /// Resolves the output destination at delivery time. A missing writable,
+    /// non-secure focus deliberately selects clipboard fallback instead.
+    @MainActor
+    static func captureCurrentWritable() -> MacDeliveryTarget? {
+        guard let target = captureCurrent(), target.hasElement else { return nil }
+        return target
     }
 
     /// Whether an element was resolvable at capture time. Toolkits with weak
@@ -187,101 +179,74 @@ struct MacDeliveryTarget {
     /// the two cases must be treated differently.
     var hasElement: Bool { element != nil }
 
-    /// Whether two queued dictations were captured for the exact same field.
-    /// A process match alone is not identity: changing chats, browser tabs, or
-    /// form controls commonly keeps the same PID. Opaque captures deliberately
-    /// never compare equal because there is no AX object proving continuity.
-    func refersToSameElement(as other: MacDeliveryTarget) -> Bool {
-        guard processIdentifier == other.processIdentifier else { return false }
-        guard let element, let otherElement = other.element else { return false }
-        if CFEqual(element, otherElement) { return true }
-        return safelyMatchesRebuiltElement(
-            otherElement,
-            otherWindow: other.window,
-            otherFingerprint: other.fingerprint,
-            currentInteractionGeneration: other.interactionGeneration
-        )
-    }
-
-    /// Revalidation for the explicit "Paste Here" action. Unlike unattended
-    /// delivery, an opaque field is allowed when it exposed no AX element both
-    /// when invoked and at the side-effect boundary, but the frontmost process
-    /// must still be unchanged. When AX identity exists, it must be exact.
+    /// Revalidation for explicit output. A replacement AX node is valid when
+    /// the same live application still owns a writable, non-secure focus and
+    /// no user action moved the insertion point after capture.
     @MainActor
     var matchesCurrentManualDestination: Bool {
-        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == processIdentifier else {
-            return false
-        }
-        let current = MacAccessibility.systemFocusedElement()
-        if let element {
-            guard let current else { return false }
-            return CFEqual(element, current)
-        }
-        return current == nil
+        canContinueMultistepInsertion
     }
 
-    /// True only when the very element captured at record time holds focus
-    /// right now. A different field in the same app does not qualify. This is
-    /// the only condition under which text is delivered unattended.
-    var holdsFocus: Bool {
+    /// Strictly links an optional follow-up side effect to the editor selected
+    /// for this one delivery. It is intentionally short-lived and must not be
+    /// used as a record-start continuity requirement.
+    func isSameUninterruptedOutputBoundary(as other: MacDeliveryTarget) -> Bool {
         guard
+            processIdentifier == other.processIdentifier,
+            interactionGeneration == other.interactionGeneration,
             let element,
-            let current = MacAccessibility.systemFocusedElement()
+            let otherElement = other.element
         else {
             return false
         }
-        if CFEqual(element, current) { return true }
-        return safelyMatchesRebuiltElement(
-            current,
-            otherWindow: MacAccessibility.window(of: current),
-            otherFingerprint: MacAccessibility.targetFingerprint(of: current),
+        return CFEqual(element, otherElement)
+    }
+
+    /// A transcript may start in any live writable node, including a rebuilt AX
+    /// proxy. Once chunked output has begun, however, user input must not move
+    /// the remaining chunks elsewhere. If event monitoring is unavailable,
+    /// exact short-lived node identity is the fail-closed fallback.
+    @MainActor
+    var canContinueMultistepInsertion: Bool {
+        guard
+            NSWorkspace.shared.frontmostApplication?.processIdentifier == processIdentifier,
+            !MacAccessibility.focusedElementIsSecureText(),
+            let current = MacAccessibility.focusedWritableElement()
+        else {
+            return false
+        }
+        return MacOutputContinuationPolicy.canContinueMultistepInsertion(
+            processIsCurrent: true,
+            currentIsWritable: true,
+            currentIsSecure: false,
+            sameElement: element.map { CFEqual($0, current) } ?? false,
+            interactionGeneration: interactionGeneration,
             currentInteractionGeneration: MacUserInteractionTracker.shared.snapshot
         )
     }
 
-    private func safelyMatchesRebuiltElement(
-        _ otherElement: AXUIElement,
-        otherWindow: AXUIElement?,
-        otherFingerprint: MacAccessibilityTargetFingerprint?,
-        currentInteractionGeneration: UInt64?
-    ) -> Bool {
-        guard let window, let otherWindow, CFEqual(window, otherWindow) else {
-            return false
-        }
+    /// Return is a separate side effect after paste confirmation. Suppress it
+    /// unless the just-confirmed node still owns focus and no user action has
+    /// occurred during the delay. This strict, short-lived check does not make
+    /// AX identity a requirement for selecting the transcript destination.
+    @MainActor
+    var canReceiveFollowUpReturn: Bool {
         guard
-            let interactionGeneration,
-            interactionGeneration == currentInteractionGeneration,
-            let fingerprint,
-            let otherFingerprint
+            NSWorkspace.shared.frontmostApplication?.processIdentifier == processIdentifier,
+            !MacAccessibility.focusedElementIsSecureText(),
+            let element,
+            let current = MacAccessibility.focusedWritableElement()
         else {
             return false
         }
-        return fingerprint.safelyMatchesRebuilt(
-            otherFingerprint,
-            sameWindow: true,
-            noInterveningUserInput: true
+        return MacOutputContinuationPolicy.canSendFollowUpReturn(
+            processIsCurrent: true,
+            currentIsWritable: true,
+            currentIsSecure: false,
+            sameElement: CFEqual(element, current),
+            interactionGeneration: interactionGeneration,
+            currentInteractionGeneration: MacUserInteractionTracker.shared.snapshot
         )
-    }
-
-    /// Whether it is safe to deliver *right now*. A process match alone is not
-    /// enough: changing Slack chats or browser fields keeps the same PID while
-    /// changing the destination. A rebuilt Accessibility proxy is accepted
-    /// only with same-window structural continuity and no intervening input.
-    @MainActor
-    var canDeliverImmediately: Bool {
-        NSWorkspace.shared.frontmostApplication?.processIdentifier == processIdentifier
-            && holdsFocus
-            && MacAccessibility.focusedElementAcceptsText()
-    }
-
-    /// Whether a transcript held earlier may now be delivered unattended. A
-    /// direct AX identity or the same narrow rebuilt-proxy proof is required;
-    /// merely returning to the same app is never sufficient.
-    @MainActor
-    var canDeliverOnReturn: Bool {
-        NSWorkspace.shared.frontmostApplication?.processIdentifier == processIdentifier
-            && holdsFocus
-            && MacAccessibility.focusedElementAcceptsText()
     }
 }
 
@@ -310,41 +275,51 @@ enum MacAccessibility {
 
     /// Whether whatever holds focus right now is somewhere a paste belongs.
     /// Secure fields are excluded outright — a dictation must never be pushed
-    /// into a password box.
+    /// into a password box. Browser and Electron editors sometimes focus a
+    /// proxy child, so resolve a bounded parent chain to the writable control.
     static func focusedElementAcceptsText() -> Bool {
-        guard let element = systemFocusedElement() else { return false }
-        guard let role = stringAttribute(kAXRoleAttribute, of: element) else { return false }
-        guard !isSecureTextElement(element) else { return false }
-        return role == (kAXTextFieldRole as String)
+        focusedWritableElement() != nil
+    }
+
+    static func focusedWritableElement(maximumAncestorDepth: Int = 6) -> AXUIElement? {
+        guard let focused = systemFocusedElement() else { return nil }
+        var candidate = focused
+        var visited: [AXUIElement] = []
+        var firstWritableCandidate: AXUIElement?
+
+        for _ in 0...maximumAncestorDepth {
+            if visited.contains(where: { CFEqual($0, candidate) }) { return nil }
+            visited.append(candidate)
+            AXUIElementSetMessagingTimeout(candidate, messagingTimeout)
+            if isSecureTextElement(candidate) { return nil }
+            if firstWritableCandidate == nil, elementAcceptsText(candidate) {
+                firstWritableCandidate = candidate
+            }
+            guard let parent = elementAttribute(kAXParentAttribute, of: candidate) else {
+                return firstWritableCandidate
+            }
+            candidate = parent
+        }
+        return firstWritableCandidate
+    }
+
+    /// Pure role boundary kept separate so the deployment regression suite can
+    /// cover native and Chromium-style editable ancestors without live UI.
+    static func roleAcceptsText(_ role: String?, explicitlyEditable: Bool) -> Bool {
+        explicitlyEditable
+            || role == (kAXTextFieldRole as String)
             || role == (kAXTextAreaRole as String)
             || role == (kAXComboBoxRole as String)
     }
 
-    static func window(of element: AXUIElement) -> AXUIElement? {
-        elementAttribute(kAXWindowAttribute, of: element)
-    }
-
-    static func targetFingerprint(
-        of element: AXUIElement
-    ) -> MacAccessibilityTargetFingerprint? {
-        guard let role = stringAttribute(kAXRoleAttribute, of: element) else {
-            return nil
-        }
-        var stableIdentifiers = Set<String>()
-        if let identifier = nonemptyStringAttribute(kAXIdentifierAttribute, of: element) {
-            stableIdentifiers.insert("ax:\(identifier)")
-        }
-        if let identifier = nonemptyStringAttribute("AXDOMIdentifier", of: element) {
-            stableIdentifiers.insert("dom:\(identifier)")
-        }
-        let placeholder = nonemptyStringAttribute(kAXPlaceholderValueAttribute, of: element)
-            ?? nonemptyStringAttribute(kAXDescriptionAttribute, of: element)
-        return MacAccessibilityTargetFingerprint(
-            role: role,
-            subrole: stringAttribute(kAXSubroleAttribute, of: element),
-            stableIdentifiers: stableIdentifiers,
-            placeholder: placeholder,
-            frame: frame(of: element)
+    private static func elementAcceptsText(_ element: AXUIElement) -> Bool {
+        guard isEnabled(element) else { return false }
+        let writable = booleanAttribute("AXEditable", of: element)
+            ?? valueIsSettable(element)
+        guard writable != false else { return false }
+        return roleAcceptsText(
+            stringAttribute(kAXRoleAttribute, of: element),
+            explicitlyEditable: writable == true
         )
     }
 
@@ -354,16 +329,26 @@ enum MacAccessibility {
     /// and after waiting for the serialized delivery transaction.
     static func focusedElementIsSecureText() -> Bool {
         if IsSecureEventInputEnabled() { return true }
-        guard let element = systemFocusedElement() else { return false }
-        return isSecureTextElement(element)
+        guard let focused = systemFocusedElement() else { return false }
+        var candidate = focused
+        var visited: [AXUIElement] = []
+        for _ in 0...6 {
+            if visited.contains(where: { CFEqual($0, candidate) }) { return false }
+            visited.append(candidate)
+            if isSecureTextElement(candidate) { return true }
+            guard let parent = elementAttribute(kAXParentAttribute, of: candidate) else {
+                return false
+            }
+            candidate = parent
+        }
+        return false
     }
 
     /// The text currently in the focused field, when it exposes one. Used to
     /// confirm a paste actually landed rather than trusting that a synthesized
     /// keystroke was delivered.
     static func focusedText() -> String? {
-        guard let element = systemFocusedElement() else { return nil }
-        guard !isSecureTextElement(element) else { return nil }
+        guard let element = focusedWritableElement() else { return nil }
         AXUIElementSetMessagingTimeout(element, messagingTimeout)
         return stringAttribute(kAXValueAttribute, of: element)
     }
@@ -373,7 +358,7 @@ enum MacAccessibility {
     /// field's final character instead of the character immediately before the
     /// selection.
     static func focusedTextBeforeCursor() -> String? {
-        guard let element = systemFocusedElement() else { return nil }
+        guard let element = focusedWritableElement() else { return nil }
         return textBeforeCursor(in: element)
     }
 
@@ -498,7 +483,7 @@ enum MacAccessibility {
     static func pressPasteMenuItem(
         inProcess processIdentifier: pid_t,
         validating targetIsStillValid: () -> Bool
-    ) -> Bool {
+    ) -> MacPasteMenuActionResult {
         let application = AXUIElementCreateApplication(processIdentifier)
         AXUIElementSetMessagingTimeout(application, messagingTimeout)
 
@@ -512,7 +497,7 @@ enum MacAccessibility {
             let menuBarValue,
             CFGetTypeID(menuBarValue) == AXUIElementGetTypeID()
         else {
-            return false
+            return .unavailable
         }
         let menuBar = menuBarValue as! AXUIElement
 
@@ -538,12 +523,13 @@ enum MacAccessibility {
                     // timeout. Revalidate at the exact side-effect boundary so
                     // a focus switch during that traversal cannot paste into a
                     // different field or a newly focused password control.
-                    guard targetIsStillValid() else { return false }
-                    return AXUIElementPerformAction(item, kAXPressAction as CFString) == .success
+                    guard targetIsStillValid() else { return .focusChanged }
+                    _ = AXUIElementPerformAction(item, kAXPressAction as CFString)
+                    return .invoked
                 }
             }
         }
-        return false
+        return .unavailable
     }
 
     private static func children(of element: AXUIElement) -> [AXUIElement] {
@@ -573,64 +559,34 @@ enum MacAccessibility {
         return (value as! AXUIElement)
     }
 
-    private static func frame(of element: AXUIElement) -> CGRect? {
-        guard
-            let origin = pointAttribute(kAXPositionAttribute, of: element),
-            let size = sizeAttribute(kAXSizeAttribute, of: element)
-        else {
-            return nil
-        }
-        return CGRect(origin: origin, size: size)
-    }
-
-    private static func pointAttribute(
-        _ attribute: String,
-        of element: AXUIElement
-    ) -> CGPoint? {
-        var value: CFTypeRef?
-        guard
-            AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
-            let value,
-            CFGetTypeID(value) == AXValueGetTypeID()
-        else {
-            return nil
-        }
-        let axValue = value as! AXValue
-        guard AXValueGetType(axValue) == .cgPoint else { return nil }
-        var point = CGPoint.zero
-        guard AXValueGetValue(axValue, .cgPoint, &point) else { return nil }
-        return point
-    }
-
-    private static func sizeAttribute(
-        _ attribute: String,
-        of element: AXUIElement
-    ) -> CGSize? {
-        var value: CFTypeRef?
-        guard
-            AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
-            let value,
-            CFGetTypeID(value) == AXValueGetTypeID()
-        else {
-            return nil
-        }
-        let axValue = value as! AXValue
-        guard AXValueGetType(axValue) == .cgSize else { return nil }
-        var size = CGSize.zero
-        guard AXValueGetValue(axValue, .cgSize, &size) else { return nil }
-        return size
-    }
-
     private static func isEnabled(_ element: AXUIElement) -> Bool {
+        booleanAttribute(kAXEnabledAttribute, of: element) ?? true
+    }
+
+    private static func booleanAttribute(
+        _ attribute: String,
+        of element: AXUIElement
+    ) -> Bool? {
         var value: CFTypeRef?
         guard
-            AXUIElementCopyAttributeValue(element, kAXEnabledAttribute as CFString, &value) == .success,
+            AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
             let value,
             CFGetTypeID(value) == CFBooleanGetTypeID()
         else {
-            return true
+            return nil
         }
         return CFBooleanGetValue((value as! CFBoolean))
+    }
+
+    private static func valueIsSettable(_ element: AXUIElement) -> Bool? {
+        var settable = DarwinBoolean(false)
+        let status = AXUIElementIsAttributeSettable(
+            element,
+            kAXValueAttribute as CFString,
+            &settable
+        )
+        guard status == .success else { return nil }
+        return settable.boolValue
     }
 
     private static func isSecureTextElement(_ element: AXUIElement) -> Bool {
@@ -701,12 +657,4 @@ enum MacAccessibility {
         return (value as! CFString) as String
     }
 
-    private static func nonemptyStringAttribute(
-        _ attribute: String,
-        of element: AXUIElement
-    ) -> String? {
-        guard let value = stringAttribute(attribute, of: element) else { return nil }
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
 }

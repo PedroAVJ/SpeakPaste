@@ -55,79 +55,73 @@ final class MacPasteMenuShortcutTests: XCTestCase {
     }
 }
 
-final class MacAccessibilityTargetFingerprintTests: XCTestCase {
-    private let frame = CGRect(x: 20, y: 30, width: 500, height: 80)
+final class MacDeliveryTargetingTests: XCTestCase {
+    func testDeliveryUsesReplacementEditorInsteadOfCapturedNodeIdentity() {
+        XCTAssertEqual(
+            MacDeliveryTargeting.decide(
+                captured: "electron-node-before-dictation",
+                current: "electron-node-at-delivery",
+                currentIsWritable: true
+            ),
+            .focusedWritable("electron-node-at-delivery")
+        )
+    }
 
-    func testRebuiltEditorMatchesOnlyWithContinuityProof() {
-        let original = fingerprint(identifiers: ["dom:prompt"])
-        let rebuilt = fingerprint(identifiers: ["dom:prompt"])
+    func testDeliveryRetargetsToCurrentWritableEditorAcrossApplications() {
+        XCTAssertEqual(
+            MacDeliveryTargeting.decide(
+                captured: "source-app-editor",
+                current: "current-app-editor",
+                currentIsWritable: true
+            ),
+            .focusedWritable("current-app-editor")
+        )
+    }
 
+    func testMissingOrReadOnlyCurrentFocusSelectsClipboardFallback() {
+        XCTAssertEqual(
+            MacDeliveryTargeting.decide(
+                captured: "old-editor",
+                current: Optional<String>.none,
+                currentIsWritable: false
+            ),
+            .clipboardFallback
+        )
+        XCTAssertEqual(
+            MacDeliveryTargeting.decide(
+                captured: "old-editor",
+                current: "read-only-control",
+                currentIsWritable: false
+            ),
+            .clipboardFallback
+        )
+    }
+
+    func testWritableRolesIncludeEditableChromiumAncestors() {
         XCTAssertTrue(
-            original.safelyMatchesRebuilt(
-                rebuilt,
-                sameWindow: true,
-                noInterveningUserInput: true
+            MacAccessibility.roleAcceptsText(
+                "AXTextArea",
+                explicitlyEditable: false
+            )
+        )
+        XCTAssertTrue(
+            MacAccessibility.roleAcceptsText(
+                "AXGroup",
+                explicitlyEditable: true
             )
         )
         XCTAssertFalse(
-            original.safelyMatchesRebuilt(
-                rebuilt,
-                sameWindow: false,
-                noInterveningUserInput: true
-            )
-        )
-        XCTAssertFalse(
-            original.safelyMatchesRebuilt(
-                rebuilt,
-                sameWindow: true,
-                noInterveningUserInput: false
+            MacAccessibility.roleAcceptsText(
+                "AXButton",
+                explicitlyEditable: false
             )
         )
     }
 
-    func testRebuiltEditorFallbackRequiresMatchingRoleAndSubstantialFrameOverlap() {
-        let original = fingerprint()
-        let shiftedSlightly = MacAccessibilityTargetFingerprint(
-            role: "AXTextArea",
-            subrole: nil,
-            stableIdentifiers: [],
-            placeholder: "Message",
-            frame: frame.offsetBy(dx: 10, dy: 0)
-        )
-        let unrelatedField = MacAccessibilityTargetFingerprint(
-            role: "AXTextField",
-            subrole: nil,
-            stableIdentifiers: [],
-            placeholder: "Search",
-            frame: CGRect(x: 20, y: 300, width: 500, height: 40)
-        )
-
-        XCTAssertTrue(
-            original.safelyMatchesRebuilt(
-                shiftedSlightly,
-                sameWindow: true,
-                noInterveningUserInput: true
-            )
-        )
-        XCTAssertFalse(
-            original.safelyMatchesRebuilt(
-                unrelatedField,
-                sameWindow: true,
-                noInterveningUserInput: true
-            )
-        )
-    }
-
-    private func fingerprint(
-        identifiers: Set<String> = []
-    ) -> MacAccessibilityTargetFingerprint {
-        MacAccessibilityTargetFingerprint(
-            role: "AXTextArea",
-            subrole: nil,
-            stableIdentifiers: identifiers,
-            placeholder: "Message",
-            frame: frame
-        )
+    func testInvokedMenuActionNeverFallsThroughToAnotherInsertionRoute() {
+        XCTAssertTrue(MacPasteMenuActionResult.unavailable.permitsAnotherInsertionRoute)
+        XCTAssertFalse(MacPasteMenuActionResult.focusChanged.permitsAnotherInsertionRoute)
+        XCTAssertFalse(MacPasteMenuActionResult.invoked.permitsAnotherInsertionRoute)
     }
 }
 

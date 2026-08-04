@@ -47,6 +47,23 @@ final class MacPasteVerificationTests: XCTestCase {
         XCTAssertFalse(MacPasteVerification.isExactInsertion("hello", before: "hello", after: "hello"))
         XCTAssertFalse(MacPasteVerification.isExactInsertion("", before: "draft", after: "draft"))
     }
+
+    func testBoundedConfirmationAcceptsAStableLaterAccessibilitySample() {
+        XCTAssertTrue(
+            MacPasteVerification.hasExactInsertion(
+                " world",
+                before: "hello",
+                afterSamples: ["hello", nil, "hello world"]
+            )
+        )
+        XCTAssertFalse(
+            MacPasteVerification.hasExactInsertion(
+                " world",
+                before: "hello",
+                afterSamples: ["hello", nil, "hello World"]
+            )
+        )
+    }
 }
 
 final class MacPasteboardRecoveryPolicyTests: XCTestCase {
@@ -73,6 +90,98 @@ final class MacPasteboardRecoveryPolicyTests: XCTestCase {
             MacPasteboardRecoveryPolicy.shouldKeepTranscript(
                 deliveryReachedOutputBoundary: false,
                 pasteWasVerified: false
+            )
+        )
+    }
+
+    func testNoEditorFallbackAlwaysUsesExactNewestTranscript() {
+        XCTAssertEqual(
+            MacDeliveryTextPolicy.clipboardFallback(
+                newestTranscript: "newest exact transcript",
+                existingRecoveryTranscripts: [
+                    "older waiting transcript",
+                    "possibly delivered transcript",
+                ]
+            ),
+            "newest exact transcript"
+        )
+    }
+
+    func testAmbiguousInsertionForbidsAutomaticRetry() {
+        XCTAssertTrue(
+            MacPasteboardRecoveryPolicy.shouldSuspendAutomaticRetry(
+                deliveryReachedOutputBoundary: true,
+                pasteWasVerified: false
+            )
+        )
+        XCTAssertFalse(
+            MacPasteboardRecoveryPolicy.shouldSuspendAutomaticRetry(
+                deliveryReachedOutputBoundary: false,
+                pasteWasVerified: false
+            )
+        )
+        XCTAssertFalse(
+            MacPasteboardRecoveryPolicy.shouldSuspendAutomaticRetry(
+                deliveryReachedOutputBoundary: true,
+                pasteWasVerified: true
+            )
+        )
+    }
+}
+
+final class MacOutputContinuationPolicyTests: XCTestCase {
+    func testChunkedInsertionAllowsAXReplacementWithoutUserInput() {
+        XCTAssertTrue(
+            MacOutputContinuationPolicy.canContinueMultistepInsertion(
+                processIsCurrent: true,
+                currentIsWritable: true,
+                currentIsSecure: false,
+                sameElement: false,
+                interactionGeneration: 7,
+                currentInteractionGeneration: 7
+            )
+        )
+        XCTAssertFalse(
+            MacOutputContinuationPolicy.canContinueMultistepInsertion(
+                processIsCurrent: true,
+                currentIsWritable: true,
+                currentIsSecure: false,
+                sameElement: true,
+                interactionGeneration: 7,
+                currentInteractionGeneration: 8
+            )
+        )
+    }
+
+    func testFollowUpReturnRequiresSameConfirmedNodeAndNoUserInput() {
+        XCTAssertFalse(
+            MacOutputContinuationPolicy.canSendFollowUpReturn(
+                processIsCurrent: true,
+                currentIsWritable: true,
+                currentIsSecure: false,
+                sameElement: false,
+                interactionGeneration: 7,
+                currentInteractionGeneration: 7
+            )
+        )
+        XCTAssertFalse(
+            MacOutputContinuationPolicy.canSendFollowUpReturn(
+                processIsCurrent: true,
+                currentIsWritable: true,
+                currentIsSecure: false,
+                sameElement: true,
+                interactionGeneration: 7,
+                currentInteractionGeneration: 8
+            )
+        )
+        XCTAssertTrue(
+            MacOutputContinuationPolicy.canSendFollowUpReturn(
+                processIsCurrent: true,
+                currentIsWritable: true,
+                currentIsSecure: false,
+                sameElement: true,
+                interactionGeneration: 7,
+                currentInteractionGeneration: 7
             )
         )
     }
