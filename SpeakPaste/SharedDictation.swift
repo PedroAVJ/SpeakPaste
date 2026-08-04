@@ -30,12 +30,11 @@ enum SharedDictationConstants {
     static let hostApplicationIdentityKey = "host-application-identity-v1"
 }
 
-/// Privacy-safe identity for the host field and cursor. UIKit inconsistently
-/// reports an absent context as either `nil` or an empty string while a custom
-/// keyboard is removed and restored. Treat those two representations as the
-/// same state, while retaining the document identifier and text around the
-/// cursor so a real field, selection, edit, or cursor change still blocks an
-/// automatic insertion.
+/// Privacy-safe evidence that a keyboard field was active when dictation
+/// started. UIKit inconsistently reports absent context as `nil` or an empty
+/// string while a keyboard is removed and restored, so those representations
+/// normalize to the same diagnostic identity. Delivery deliberately follows
+/// the active cursor where the user taps Stop instead of pinning this identity.
 enum InsertionContextFingerprint {
     static func make(
         documentIdentifier: UUID,
