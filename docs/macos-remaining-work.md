@@ -203,15 +203,15 @@ for the release evidence.
       test an empty caret and a collapsed caret in the middle of existing text.
       Confirm changing hypotheses replace one live span rather than append
       duplicates, preserve all prefix/suffix text, and show only the tiny caret
-      mic marker — the ordinary top HUD must never appear. Then start with a
-      nonempty selection and confirm the run stays on batch with no top HUD: no
-      provisional text appears, and ordinary final batch delivery replaces the
-      captured selection exactly once.
+      mic marker — never transcript words in the top HUD. Then start with a
+      nonempty selection and confirm the run stays on batch: no provisional text
+      appears, and ordinary final batch delivery replaces the captured selection
+      exactly once.
 - [ ] Dictate text that makes the hypothesis grow, shrink, and rewrite. Stop
       normally and confirm the iPhone capture surface dismisses before realtime
       commit finishes, the provisional span does not flash into a duplicate, and
       exactly one fully post-processed final transcript remains at the original
-      cursor without an erase/reinsert gap or a second synthetic paste.
+      cursor.
 - [ ] After stopping, move the caret, select text, or type while the final result
       is passing through History. The final paste must not follow the moved caret
       or replace the new selection; it must wait for explicit manual placement.

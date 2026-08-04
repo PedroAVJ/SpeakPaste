@@ -94,7 +94,6 @@ let package = Package(
                 "MacPasteVerification.swift",
                 "MacRealtimeTranscriptCore.swift",
                 "MacRealtimeTextEdit.swift",
-                "MacRealtimePCMConverter.swift",
                 "MacCommandGesture.swift",
                 "MacHUDActivity.swift",
                 "MacInputMode.swift",
