@@ -148,6 +148,13 @@ entitlements, and property lists stay in sync automatically:
 The app and keyboard must use the same App Group override. The defaults remain
 safe public examples, so a personal sideload no longer requires source edits.
 
+For a repeatable physical-device install, put those values plus your team,
+signing identity, and device identifier in the ignored
+`scripts/local-identity.env`, then run `scripts/install-iphone.sh`. The installer
+builds directly against the device SDK, packages the checked-in icon PNGs using
+`CFBundleIcons`, signs the result, installs it, and launches it. It does not
+require an iOS Simulator runtime or modify tracked identifiers.
+
 Then:
 
 1. Select the same development team for **SpeakPaste** and

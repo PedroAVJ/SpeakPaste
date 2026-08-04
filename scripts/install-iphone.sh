@@ -2,10 +2,10 @@
 # Build, sign, and install the iPhone app and its keyboard on a physical device.
 #
 # The repo ships generic `com.example` identifiers on purpose. A real device
-# needs identifiers owned by a developer account, so this script applies local
-# values to the tracked files, builds, and restores the originals afterward --
-# including on failure. Put your own values in scripts/local-identity.env,
-# which is untracked. When running from a Git worktree, point
+# needs identifiers owned by a developer account, so this script supplies local
+# values through overridable build settings. It never edits tracked files. Put
+# your own values in scripts/local-identity.env, which is untracked. When
+# running from a Git worktree, point
 # SPEAKPASTE_IDENTITY_ENV at the main checkout's copy:
 #
 #   APP_BUNDLE_ID=com.you.SpeakPaste
@@ -13,6 +13,7 @@
 #   DEVELOPMENT_TEAM=ABCDE12345
 #   SIGNING_IDENTITY="Apple Development: you@example.com (XXXXXXXXXX)"
 #   DEVICE=00000000-0000000000000000        # xcrun devicectl list devices
+#   BUILD_NUMBER=2                          # optional; defaults to 1
 #
 # Two Xcode constraints shape the steps below:
 #
@@ -48,40 +49,23 @@ for required in APP_BUNDLE_ID APP_GROUP DEVELOPMENT_TEAM SIGNING_IDENTITY DEVICE
     fi
 done
 
+build_number=${BUILD_NUMBER:-1}
+keyboard_bundle_id=${KEYBOARD_BUNDLE_ID:-$APP_BUNDLE_ID.Keyboard}
+live_activity_bundle_id=${LIVE_ACTIVITY_BUNDLE_ID:-$APP_BUNDLE_ID.LiveActivity}
+tests_bundle_id=${TESTS_BUNDLE_ID:-${APP_BUNDLE_ID}Tests}
 build_dir=$(mktemp -d /tmp/SpeakPasteiOS.XXXXXX)
-backup_dir=$(mktemp -d /tmp/SpeakPasteIdentity.XXXXXX)
+build_succeeded=false
 
-patched="SpeakPaste.xcodeproj/project.pbxproj
-SpeakPaste/SpeakPaste.entitlements
-SpeakPasteKeyboard/SpeakPasteKeyboard.entitlements
-SpeakPaste/SharedDictation.swift"
-
-restore() {
-    echo "$patched" | while read -r file; do
-        [ -n "$file" ] || continue
-        if [ -f "$backup_dir/$(basename "$file")" ]; then
-            cp "$backup_dir/$(basename "$file")" "$file"
-        fi
-    done
-    rm -rf "$backup_dir"
-    echo "==> Repo identifiers restored"
+cleanup() {
+    if [ "$build_succeeded" = true ]; then
+        rm -rf "$build_dir"
+    else
+        echo "==> Preserving failed build artifacts at $build_dir" >&2
+    fi
 }
-trap restore EXIT
+trap cleanup EXIT
 
-echo "$patched" | while read -r file; do
-    [ -n "$file" ] || continue
-    cp "$file" "$backup_dir/$(basename "$file")"
-done
-
-echo "==> Applying local identity ($APP_BUNDLE_ID, $APP_GROUP)"
-sed -i '' "s/com\.example\.SpeakPaste/${APP_BUNDLE_ID}/g" \
-    SpeakPaste.xcodeproj/project.pbxproj
-sed -i '' "s/group\.com\.example\.SpeakPaste/${APP_GROUP}/g" \
-    SpeakPaste/SpeakPaste.entitlements \
-    SpeakPasteKeyboard/SpeakPasteKeyboard.entitlements \
-    SpeakPaste/SharedDictation.swift
-
-echo "==> Building for device"
+echo "==> Building $APP_BUNDLE_ID ($build_number) for device"
 xcodebuild \
     -project SpeakPaste.xcodeproj \
     -target SpeakPaste \
@@ -92,7 +76,15 @@ xcodebuild \
     SYMROOT="$build_dir/sym" \
     DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
     CODE_SIGN_STYLE=Automatic \
-    EXCLUDED_SOURCE_FILE_NAMES='*.xcassets' \
+    CURRENT_PROJECT_VERSION="$build_number" \
+    SPEAKPASTE_APP_BUNDLE_IDENTIFIER="$APP_BUNDLE_ID" \
+    SPEAKPASTE_KEYBOARD_BUNDLE_IDENTIFIER="$keyboard_bundle_id" \
+    SPEAKPASTE_LIVE_ACTIVITY_BUNDLE_IDENTIFIER="$live_activity_bundle_id" \
+    SPEAKPASTE_TESTS_BUNDLE_IDENTIFIER="$tests_bundle_id" \
+    SPEAKPASTE_APP_GROUP_IDENTIFIER="$APP_GROUP" \
+    EXCLUDED_SOURCE_FILE_NAMES=Assets.xcassets \
+    ASSETCATALOG_COMPILER_APPICON_NAME= \
+    ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME= \
     -allowProvisioningUpdates \
     build >"$build_dir/build.log" 2>&1 || {
         echo "error: build failed. Last lines:" >&2
@@ -100,25 +92,52 @@ xcodebuild \
         exit 1
     }
 
+if grep -q '/usr/bin/actool' "$build_dir/build.log"; then
+    echo "error: the device-only build unexpectedly invoked actool" >&2
+    exit 1
+fi
+
 app="$build_dir/Products/SpeakPaste.app"
 icons="SpeakPaste/Assets.xcassets/AppIcon.appiconset"
 
 echo "==> Installing app icon without the asset catalog"
 for pair in "60@2x:AppIcon60x60@2x" "60@3x:AppIcon60x60@3x" \
             "40@2x:AppIcon40x40@2x" "40@3x:AppIcon40x40@3x" \
-            "29@2x:AppIcon29x29@2x" "29@3x:AppIcon29x29@3x"; do
+            "29@2x:AppIcon29x29@2x" "29@3x:AppIcon29x29@3x" \
+            "20@2x:AppIcon20x20@2x" "20@3x:AppIcon20x20@3x"; do
     source_name=${pair%%:*}
     dest_name=${pair##*:}
     cp "$icons/AppIcon-${source_name}.png" "$app/${dest_name}.png"
 done
 
+if [ -e "$app/Assets.car" ]; then
+    echo "error: the device-only build unexpectedly produced Assets.car" >&2
+    exit 1
+fi
+
 plist="$app/Info.plist"
+/usr/libexec/PlistBuddy -c "Delete :CFBundleIcons" "$plist" >/dev/null 2>&1 || true
 /usr/libexec/PlistBuddy -c "Add :CFBundleIcons dict" "$plist" >/dev/null
 /usr/libexec/PlistBuddy -c "Add :CFBundleIcons:CFBundlePrimaryIcon dict" "$plist" >/dev/null
 /usr/libexec/PlistBuddy -c "Add :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles array" "$plist" >/dev/null
-for name in AppIcon60x60 AppIcon40x40 AppIcon29x29; do
+for name in AppIcon60x60 AppIcon40x40 AppIcon29x29 AppIcon20x20; do
     /usr/libexec/PlistBuddy \
         -c "Add :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles: string $name" \
+        "$plist" >/dev/null
+done
+
+actual_bundle_id=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$plist")
+actual_build_number=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$plist")
+if [ "$actual_bundle_id" != "$APP_BUNDLE_ID" ] || \
+   [ "$actual_build_number" != "$build_number" ]; then
+    echo "error: built identity does not match the requested app" >&2
+    exit 1
+fi
+/usr/libexec/PlistBuddy -c "Delete :CFBundleIconFiles" "$plist" >/dev/null 2>&1 || true
+/usr/libexec/PlistBuddy -c "Add :CFBundleIconFiles array" "$plist" >/dev/null
+for name in AppIcon60x60 AppIcon40x40 AppIcon29x29 AppIcon20x20; do
+    /usr/libexec/PlistBuddy \
+        -c "Add :CFBundleIconFiles: string $name" \
         "$plist" >/dev/null
 done
 
@@ -129,7 +148,7 @@ codesign -d --entitlements "$build_dir/app.entitlements" --xml "$app" 2>/dev/nul
 codesign -f -s "$SIGNING_IDENTITY" \
     --entitlements "$build_dir/app.entitlements" \
     --generate-entitlement-der "$app" >/dev/null 2>&1
-codesign --verify --strict "$app"
+codesign --verify --deep --strict "$app"
 
 echo "==> Installing on $DEVICE"
 xcrun devicectl device install app --device "$DEVICE" "$app" | tail -5
@@ -139,13 +158,29 @@ xcrun devicectl device install app --device "$DEVICE" "$app" | tail -5
 # keeps the value out of the command line, and nothing prints it.
 if [ -n "${ELEVENLABS_API_KEY:-}" ]; then
     echo "==> Seeding the ElevenLabs key into the device Keychain"
-    DEVICECTL_CHILD_ELEVENLABS_API_KEY="$ELEVENLABS_API_KEY" \
+    if DEVICECTL_CHILD_ELEVENLABS_API_KEY="$ELEVENLABS_API_KEY" \
         xcrun devicectl device process launch \
         --device "$DEVICE" \
         --terminate-existing \
-        "$APP_BUNDLE_ID" >/dev/null 2>&1 \
-        && echo "    seeded" \
-        || echo "    launch failed; open SpeakPaste and add the key in Settings"
+        "$APP_BUNDLE_ID" >"$build_dir/launch.log" 2>&1; then
+        echo "    seeded"
+    else
+        echo "    installed; unlock the iPhone and open SpeakPaste to finish launch"
+    fi
 else
-    echo "==> ELEVENLABS_API_KEY not set; skipping Keychain seed"
+    echo "==> Launching"
+    if ! xcrun devicectl device process launch \
+        --device "$DEVICE" \
+        --terminate-existing \
+        "$APP_BUNDLE_ID" >"$build_dir/launch.log" 2>&1; then
+        echo "    installed; unlock the iPhone and open SpeakPaste to finish launch"
+    fi
 fi
+
+echo "==> Verifying installed build"
+xcrun devicectl device info apps \
+    --device "$DEVICE" \
+    --bundle-id "$APP_BUNDLE_ID" \
+    --columns '*' | tail -2
+
+build_succeeded=true
