@@ -457,6 +457,52 @@ final class AudioRecordingSafetyTrackerTests: XCTestCase {
     }
 }
 
+@MainActor
+final class AppModelRecordingRecoveryTests: XCTestCase {
+    func testActivationAdoptsStoppedActiveCaptureCreatedAfterModelLaunch() throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanUp() }
+        let suiteName = "SpeakPasteAppModelRecoveryTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let sharedDirectory = fixture.baseDirectory.appendingPathComponent(
+            "Shared",
+            isDirectory: true
+        )
+        let sharedStore = SharedDictationStore(
+            suiteName: suiteName,
+            storageDirectory: sharedDirectory
+        )
+        let model = AppModel(
+            history: HistoryStore(defaults: defaults),
+            defaults: defaults,
+            sharedStore: sharedStore,
+            recordingJournal: fixture.journal
+        )
+        XCTAssertFalse(model.hasRecoverableRecording)
+
+        // Reproduce an already-running scene: the stopped capture appears after
+        // AppModel's launch-only adoption pass and remains in Active until the
+        // next activation repeats adoption.
+        let capture = try fixture.journal.beginCapture(
+            ownerProcessIdentifier: .max
+        )
+        let audio = Data("released speech awaiting adoption".utf8)
+        try audio.write(
+            to: fixture.journal.audioURL(for: capture),
+            options: .withoutOverwriting
+        )
+
+        model.handleActivation()
+
+        XCTAssertTrue(model.hasRecoverableRecording)
+        XCTAssertEqual(
+            try fixture.journal.recoverableEntries().map(\.id),
+            [capture.id]
+        )
+    }
+}
+
 private final class Fixture {
     let baseDirectory: URL
     let journalRoot: URL
