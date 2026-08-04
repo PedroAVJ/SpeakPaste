@@ -417,6 +417,103 @@ final class RecordingJournalTests: XCTestCase {
             XCTAssertEqual(error as? RecordingJournalError, .unsafeStorage)
         }
     }
+
+    func testMissingApplicationSupportDirectoryIsBootstrappedSecurely() throws {
+        let fileManager = FileManager.default
+        let baseDirectory = fileManager.temporaryDirectory.appendingPathComponent(
+            "SpeakPasteApplicationSupportTests-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? fileManager.removeItem(at: baseDirectory) }
+        let libraryDirectory = baseDirectory.appendingPathComponent(
+            "Library",
+            isDirectory: true
+        )
+        try fileManager.createDirectory(
+            at: baseDirectory,
+            withIntermediateDirectories: false
+        )
+        try fileManager.createDirectory(
+            at: libraryDirectory,
+            withIntermediateDirectories: false
+        )
+        let applicationSupport = libraryDirectory.appendingPathComponent(
+            "Application Support",
+            isDirectory: true
+        )
+        let journalRoot = applicationSupport
+            .appendingPathComponent("SpeakPaste", isDirectory: true)
+            .appendingPathComponent("RecordingJournal", isDirectory: true)
+        let journal = RecordingJournal(
+            rootDirectory: journalRoot,
+            bootstrapDirectories: [applicationSupport]
+        )
+
+        XCTAssertFalse(
+            fileManager.fileExists(atPath: applicationSupport.path)
+        )
+        let capture = try journal.beginCapture()
+
+        var isDirectory: ObjCBool = false
+        XCTAssertTrue(
+            fileManager.fileExists(
+                atPath: applicationSupport.path,
+                isDirectory: &isDirectory
+            )
+        )
+        XCTAssertTrue(isDirectory.boolValue)
+        XCTAssertEqual(try journal.audioURL(for: capture).pathExtension, "m4a")
+    }
+
+    func testSymbolicLinkAtApplicationSupportBootstrapFailsClosed() throws {
+        let fileManager = FileManager.default
+        let baseDirectory = fileManager.temporaryDirectory.appendingPathComponent(
+            "SpeakPasteApplicationSupportLinkTests-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? fileManager.removeItem(at: baseDirectory) }
+        let libraryDirectory = baseDirectory.appendingPathComponent(
+            "Library",
+            isDirectory: true
+        )
+        let outsideDirectory = baseDirectory.appendingPathComponent(
+            "Outside",
+            isDirectory: true
+        )
+        try fileManager.createDirectory(
+            at: baseDirectory,
+            withIntermediateDirectories: false
+        )
+        try fileManager.createDirectory(
+            at: libraryDirectory,
+            withIntermediateDirectories: false
+        )
+        try fileManager.createDirectory(
+            at: outsideDirectory,
+            withIntermediateDirectories: false
+        )
+        let sentinel = outsideDirectory.appendingPathComponent("keep.txt")
+        try Data("keep".utf8).write(to: sentinel)
+        let applicationSupport = libraryDirectory.appendingPathComponent(
+            "Application Support",
+            isDirectory: true
+        )
+        XCTAssertEqual(symlink(outsideDirectory.path, applicationSupport.path), 0)
+        let journal = RecordingJournal(
+            rootDirectory: applicationSupport
+                .appendingPathComponent("SpeakPaste", isDirectory: true)
+                .appendingPathComponent(
+                    "RecordingJournal",
+                    isDirectory: true
+                ),
+            bootstrapDirectories: [applicationSupport]
+        )
+
+        XCTAssertThrowsError(try journal.recoverableEntries()) { error in
+            XCTAssertEqual(error as? RecordingJournalError, .unsafeStorage)
+        }
+        XCTAssertEqual(try Data(contentsOf: sentinel), Data("keep".utf8))
+    }
 }
 
 final class AudioRecordingSafetyTrackerTests: XCTestCase {

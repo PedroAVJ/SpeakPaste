@@ -134,12 +134,13 @@ final class AppModel: ObservableObject {
         if isRecording {
             stopAndTranscribe()
         } else {
-            Task { await startRecording() }
+            scheduleRecordingStart()
         }
     }
 
     func startRecording() async {
-        await startRecording(for: nil)
+        guard reserveRecordingStart() else { return }
+        await performRecordingStart(for: nil)
     }
 
     func handleIncomingURL(_ url: URL) {
@@ -183,12 +184,20 @@ final class AppModel: ObservableObject {
             return
         }
 
-        Task { await startRecording(for: snapshot) }
+        scheduleSharedRecordingStart(sessionID: snapshot.sessionID)
     }
 
     func handleActivation() {
         history.reload()
         restoreOldestRecoverableRecording()
+        if case .failed = phase {
+            // Keep the visible error until the user chooses Retry or Dismiss.
+        } else {
+            // An update/relaunch can inherit a setup failure that has neither
+            // audio nor a live recorder. Clear only that disposable state so
+            // the keyboard is not permanently blocked by an old attempt.
+            resetNonrecoverableSharedFailureIfNeeded()
+        }
         let snapshot = sharedStore.load()
         guard
             snapshot.phase == .launching,
@@ -199,7 +208,7 @@ final class AppModel: ObservableObject {
         else {
             return
         }
-        Task { await startRecording(for: snapshot) }
+        scheduleSharedRecordingStart(sessionID: snapshot.sessionID)
     }
 
     func returnToKeyboardHost() {
@@ -256,10 +265,34 @@ final class AppModel: ObservableObject {
         automaticallyReturnToKeyboardHost(sessionID: sessionID)
     }
 
-    private func startRecording(
+    private func scheduleRecordingStart() {
+        guard reserveRecordingStart() else { return }
+        Task { await performRecordingStart(for: nil) }
+    }
+
+    private func scheduleSharedRecordingStart(sessionID: UUID) {
+        guard reserveRecordingStart() else { return }
+        guard let snapshot = sharedStore.claimLaunchingSession(
+            sessionID: sessionID
+        ) else {
+            isStartingRecording = false
+            return
+        }
+        Task { await performRecordingStart(for: snapshot) }
+    }
+
+    private func reserveRecordingStart() -> Bool {
+        guard !isRecording, !isTranscribing, !isStartingRecording else {
+            return false
+        }
+        isStartingRecording = true
+        return true
+    }
+
+    private func performRecordingStart(
         for incomingSharedSnapshot: SharedDictationSnapshot?
     ) async {
-        guard !isRecording, !isTranscribing, !isStartingRecording else { return }
+        defer { isStartingRecording = false }
         guard activeRecordingURL == nil else {
             let message = "An unfinished recording is ready to retry. Transcribe or discard it before starting another dictation."
             phase = .failed(message)
@@ -275,18 +308,7 @@ final class AppModel: ObservableObject {
             endBackgroundExecution()
             return
         }
-        isStartingRecording = true
-        defer { isStartingRecording = false }
         var sharedSnapshot = incomingSharedSnapshot
-        if let incomingSharedSnapshot {
-            // Claim the launch immediately. Permission sheets are user-paced;
-            // leaving this at `.launching` makes the keyboard's open watchdog
-            // report a false failure while iOS is still asking for access.
-            sharedStore.setPhase(
-                .starting,
-                sessionID: incomingSharedSnapshot.sessionID
-            )
-        }
         if var snapshot = sharedSnapshot {
             let capturedPIDAge = Date().timeIntervalSince(snapshot.startedAt)
             let canResolveCapturedPID = (-5 ... 30).contains(capturedPIDAge)
@@ -338,29 +360,24 @@ final class AppModel: ObservableObject {
         }
 
         let recordingSessionID = sharedSnapshot?.sessionID ?? UUID()
-        let ownsCapture: Bool
         if sharedSnapshot != nil {
-            ownsCapture = sharedStore.renewCaptureLease(
+            // The launch and lease were claimed atomically before this task
+            // was queued. If ownership changed meanwhile, this is a stale
+            // callback; leave the newer state and its real error untouched.
+            guard sharedStore.renewCaptureLease(
                 ownerID: recordingSessionID
-            )
-        } else {
-            ownsCapture = sharedStore.acquireCaptureLease(
-                ownerID: recordingSessionID
-            )
-        }
-        guard ownsCapture else {
-            let message = "Another SpeakPaste recording is already using the microphone. Stop it before starting a new dictation."
-            phase = .failed(message)
-            if let sharedSnapshot {
-                sharedStore.setPhase(
-                    .failed,
-                    sessionID: sharedSnapshot.sessionID,
-                    errorMessage: message,
-                    hasRecoverableAudio: false,
-                    recoveryAction: .openContainingApp
-                )
+            ) else {
+                return
             }
-            return
+        } else {
+            guard sharedStore.acquireCaptureLease(
+                ownerID: recordingSessionID
+            ) else {
+                phase = .failed(
+                    "Another SpeakPaste recording is already using the microphone. Stop it before starting a new dictation."
+                )
+                return
+            }
         }
         activeRecordingSessionID = recordingSessionID
         captureLeaseHeldID = recordingSessionID
@@ -606,8 +623,9 @@ final class AppModel: ObservableObject {
         if activeRecordingURL != nil {
             retry()
         } else {
+            resetNonrecoverableSharedFailureIfNeeded()
             phase = .idle
-            Task { await startRecording() }
+            scheduleRecordingStart()
         }
     }
 
@@ -716,8 +734,16 @@ final class AppModel: ObservableObject {
     func dismissError() {
         guard activeRecordingURL == nil else { return }
         if case .failed = phase {
+            resetNonrecoverableSharedFailureIfNeeded()
             phase = .idle
         }
+    }
+
+    private func resetNonrecoverableSharedFailureIfNeeded() {
+        let snapshot = sharedStore.load()
+        _ = sharedStore.resetNonrecoverableFailure(
+            sessionID: snapshot.sessionID
+        )
     }
 
     private func transcribeActiveRecording() {

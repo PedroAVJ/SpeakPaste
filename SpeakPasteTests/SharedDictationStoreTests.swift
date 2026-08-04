@@ -223,6 +223,191 @@ final class SharedDictationStoreTests: XCTestCase {
         XCTAssertTrue(store.isCaptureLeaseActive)
     }
 
+    func testKeyboardLaunchCanBeClaimedOnlyOnce() throws {
+        let suiteName = "SharedDictationStoreTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = SharedDictationStore(suiteName: suiteName)
+        let session = try XCTUnwrap(
+            store.begin(returnBundleIdentifier: "net.whatsapp.WhatsApp")
+        )
+
+        let claimed = try XCTUnwrap(
+            store.claimLaunchingSession(sessionID: session.sessionID)
+        )
+
+        XCTAssertEqual(claimed.phase, .starting)
+        XCTAssertEqual(claimed.captureOwnerID, session.sessionID)
+        XCTAssertNil(
+            store.claimLaunchingSession(sessionID: session.sessionID)
+        )
+        XCTAssertEqual(store.load().phase, .starting)
+    }
+
+    func testReleasedFailureCannotBeReclaimedOrHaveItsErrorReplaced() throws {
+        let suiteName = "SharedDictationStoreTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = SharedDictationStore(suiteName: suiteName)
+        let session = try XCTUnwrap(
+            store.begin(returnBundleIdentifier: "net.whatsapp.WhatsApp")
+        )
+        let originalError = "The recording journal is unavailable."
+        store.setPhase(
+            .failed,
+            sessionID: session.sessionID,
+            errorMessage: originalError,
+            hasRecoverableAudio: false,
+            recoveryAction: .openContainingApp
+        )
+        XCTAssertTrue(
+            store.releaseCaptureLease(ownerID: session.sessionID)
+        )
+        let failed = store.load()
+
+        XCTAssertNil(
+            store.claimLaunchingSession(sessionID: session.sessionID)
+        )
+        XCTAssertEqual(store.load(), failed)
+        XCTAssertEqual(store.load().errorMessage, originalError)
+    }
+
+    func testReleasedSetupFailureCanBeResetForAFreshAttempt() throws {
+        let suiteName = "SharedDictationStoreTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = SharedDictationStore(suiteName: suiteName)
+        let session = try XCTUnwrap(
+            store.begin(returnBundleIdentifier: "net.whatsapp.WhatsApp")
+        )
+        store.setPhase(
+            .failed,
+            sessionID: session.sessionID,
+            errorMessage: "Setup failed.",
+            hasRecoverableAudio: false,
+            recoveryAction: .openContainingApp
+        )
+        XCTAssertTrue(
+            store.releaseCaptureLease(ownerID: session.sessionID)
+        )
+
+        XCTAssertTrue(
+            store.resetNonrecoverableFailure(sessionID: session.sessionID)
+        )
+        XCTAssertEqual(store.load().phase, .idle)
+        XCTAssertNotEqual(store.load().sessionID, session.sessionID)
+        XCTAssertNotNil(
+            store.begin(returnBundleIdentifier: "net.whatsapp.WhatsApp")
+        )
+    }
+
+    func testLiveOrRecoverableFailureCannotBeResetAutomatically() throws {
+        let suiteName = "SharedDictationStoreTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = SharedDictationStore(suiteName: suiteName)
+        let session = try XCTUnwrap(
+            store.begin(returnBundleIdentifier: "net.whatsapp.WhatsApp")
+        )
+        store.setPhase(
+            .failed,
+            sessionID: session.sessionID,
+            errorMessage: "Late launch.",
+            hasRecoverableAudio: false,
+            recoveryAction: .openContainingApp
+        )
+
+        XCTAssertFalse(
+            store.resetNonrecoverableFailure(sessionID: session.sessionID)
+        )
+        XCTAssertEqual(store.load().phase, .failed)
+
+        XCTAssertTrue(
+            store.releaseCaptureLease(ownerID: session.sessionID)
+        )
+        store.setPhase(
+            .failed,
+            sessionID: session.sessionID,
+            errorMessage: "Audio saved.",
+            hasRecoverableAudio: true,
+            recoveryAction: .retryTranscription
+        )
+        XCTAssertFalse(
+            store.resetNonrecoverableFailure(sessionID: session.sessionID)
+        )
+        XCTAssertTrue(store.load().hasRecoverableAudio == true)
+    }
+
+    func testLateLaunchCanClaimWatchdogFailureWhileLeaseIsStillLive() throws {
+        let suiteName = "SharedDictationStoreTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = SharedDictationStore(suiteName: suiteName)
+        let session = try XCTUnwrap(
+            store.begin(returnBundleIdentifier: "net.whatsapp.WhatsApp")
+        )
+        store.setPhase(
+            .failed,
+            sessionID: session.sessionID,
+            errorMessage: "SpeakPaste did not open.",
+            hasRecoverableAudio: false,
+            recoveryAction: .openContainingApp
+        )
+
+        let claimed = try XCTUnwrap(
+            store.claimLaunchingSession(sessionID: session.sessionID)
+        )
+
+        XCTAssertEqual(claimed.phase, .starting)
+        XCTAssertNil(claimed.errorMessage)
+        XCTAssertEqual(claimed.captureOwnerID, session.sessionID)
+    }
+
+    func testLiveRecoverableFailureCannotBeClaimedAsANewLaunch() throws {
+        let suiteName = "SharedDictationStoreTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = SharedDictationStore(suiteName: suiteName)
+        let session = try XCTUnwrap(
+            store.begin(returnBundleIdentifier: "net.whatsapp.WhatsApp")
+        )
+        store.setPhase(
+            .failed,
+            sessionID: session.sessionID,
+            errorMessage: "Audio saved.",
+            hasRecoverableAudio: true,
+            recoveryAction: .retryTranscription
+        )
+        let recoverable = store.load()
+
+        XCTAssertNil(
+            store.claimLaunchingSession(sessionID: session.sessionID)
+        )
+        XCTAssertEqual(store.load(), recoverable)
+        XCTAssertTrue(store.load().hasRecoverableAudio == true)
+    }
+
+    func testLegacyLaunchWithoutCaptureOwnerCanBeClaimed() throws {
+        let suiteName = "SharedDictationStoreTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = SharedDictationStore(suiteName: suiteName)
+        let session = try XCTUnwrap(
+            store.begin(returnBundleIdentifier: "com.apple.mobilenotes")
+        )
+        XCTAssertTrue(
+            store.releaseCaptureLease(ownerID: session.sessionID)
+        )
+
+        let claimed = try XCTUnwrap(
+            store.claimLaunchingSession(sessionID: session.sessionID)
+        )
+
+        XCTAssertEqual(claimed.phase, .starting)
+        XCTAssertEqual(claimed.captureOwnerID, session.sessionID)
+        XCTAssertNotNil(claimed.captureLeaseUpdatedAt)
+    }
+
     func testExpiredCaptureLeaseCannotBlockANewRecorder() throws {
         let suiteName = "SharedDictationStoreTests-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))

@@ -218,6 +218,57 @@ struct SharedDictationStore: @unchecked Sendable {
         } ?? nil
     }
 
+    /// Atomically turns a keyboard launch into the one foreground capture
+    /// attempt for that session. URL delivery and scene activation may both
+    /// observe the same launch, so the phase transition and lease renewal must
+    /// happen under the same cross-process lock.
+    ///
+    /// A late URL may arrive after the keyboard's launch watchdog publishes a
+    /// failure. That failure is claimable only while this exact session still
+    /// owns a live lease. A recorder failure releases the lease first, making
+    /// every subsequently queued launch a harmless no-op that cannot replace
+    /// the original error.
+    func claimLaunchingSession(
+        sessionID: UUID
+    ) -> SharedDictationSnapshot? {
+        withStateLock {
+            var snapshot = loadUnlocked()
+            guard snapshot.sessionID == sessionID else { return nil }
+
+            switch snapshot.phase {
+            case .launching:
+                // Older snapshots predate the capture-owner fields. The
+                // session identifier itself is sufficient to adopt those.
+                guard
+                    snapshot.captureOwnerID == nil
+                        || snapshot.captureOwnerID == sessionID
+                else {
+                    return nil
+                }
+            case .failed:
+                guard
+                    snapshot.captureOwnerID == sessionID,
+                    snapshot.hasRecoverableAudio == false,
+                    hasLiveCaptureLease(snapshot)
+                else {
+                    return nil
+                }
+            default:
+                return nil
+            }
+
+            snapshot.phase = .starting
+            snapshot.errorMessage = nil
+            snapshot.hasRecoverableAudio = nil
+            snapshot.recoveryAction = nil
+            snapshot.captureOwnerID = sessionID
+            snapshot.captureLeaseUpdatedAt = Date()
+            advanceRevision(&snapshot)
+            guard saveUnlocked(snapshot) else { return nil }
+            return snapshot
+        } ?? nil
+    }
+
     /// Start an intent-driven session while iOS grants background capture.
     /// Publishing `starting` keeps the keyboard truthful until the recorder
     /// proves that the microphone is live. Never replace a completed transcript
@@ -511,6 +562,28 @@ struct SharedDictationStore: @unchecked Sendable {
         withStateLock {
             let current = loadUnlocked()
             guard current.sessionID == sessionID else { return false }
+            var idle = SharedDictationSnapshot.idle
+            idle.revision = (current.revision ?? 0) + 1
+            return saveUnlocked(idle)
+        } ?? false
+    }
+
+    /// Clears only a failed setup attempt that cannot contain user audio and
+    /// no longer owns the recorder. This lets an updated or relaunched app
+    /// repair stale launch state without racing a late, still-live launch or
+    /// discarding a recoverable recording.
+    @discardableResult
+    func resetNonrecoverableFailure(sessionID: UUID) -> Bool {
+        withStateLock {
+            let current = loadUnlocked()
+            guard
+                current.sessionID == sessionID,
+                current.phase == .failed,
+                current.hasRecoverableAudio != true,
+                !hasLiveCaptureLease(current)
+            else {
+                return false
+            }
             var idle = SharedDictationSnapshot.idle
             idle.revision = (current.revision ?? 0) + 1
             return saveUnlocked(idle)

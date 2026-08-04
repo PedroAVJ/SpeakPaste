@@ -751,22 +751,47 @@ final class RecordingJournal {
     let retiredDirectory: URL
 
     private let fileManager: FileManager
+    private let bootstrapDirectories: [URL]
 
     convenience init(fileManager: FileManager = .default) {
-        let applicationSupport = fileManager
+        if let applicationSupport = fileManager
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)
             .first
-            ?? fileManager.temporaryDirectory
-        self.init(
-            rootDirectory: applicationSupport
-                .appendingPathComponent("SpeakPaste", isDirectory: true)
-                .appendingPathComponent("RecordingJournal", isDirectory: true),
-            fileManager: fileManager
-        )
+        {
+            self.init(
+                rootDirectory: applicationSupport
+                    .appendingPathComponent("SpeakPaste", isDirectory: true)
+                    .appendingPathComponent(
+                        "RecordingJournal",
+                        isDirectory: true
+                    ),
+                bootstrapDirectories: [applicationSupport],
+                fileManager: fileManager
+            )
+        } else {
+            // The temporary directory itself is an existing system-owned
+            // anchor. Do not chmod it; only create SpeakPaste beneath it.
+            self.init(
+                rootDirectory: fileManager.temporaryDirectory
+                    .appendingPathComponent("SpeakPaste", isDirectory: true)
+                    .appendingPathComponent(
+                        "RecordingJournal",
+                        isDirectory: true
+                    ),
+                fileManager: fileManager
+            )
+        }
     }
 
-    init(rootDirectory: URL, fileManager: FileManager = .default) {
+    init(
+        rootDirectory: URL,
+        bootstrapDirectories: [URL] = [],
+        fileManager: FileManager = .default
+    ) {
         self.rootDirectory = rootDirectory.standardizedFileURL
+        self.bootstrapDirectories = bootstrapDirectories.map(
+            \.standardizedFileURL
+        )
         entriesDirectory = self.rootDirectory.appendingPathComponent("Entries", isDirectory: true)
         activeDirectory = self.rootDirectory.appendingPathComponent("Active", isDirectory: true)
         stagingDirectory = self.rootDirectory.appendingPathComponent("Staging", isDirectory: true)
@@ -1255,6 +1280,23 @@ final class RecordingJournal {
 
     private func prepareStorage() throws {
         do {
+            for directory in bootstrapDirectories {
+                // Explicit anchors are only allowed inside the journal's own
+                // ancestry. This keeps the bootstrap path from widening the
+                // journal's chmod/no-follow boundary to an unrelated folder.
+                guard
+                    directory.pathComponents.count
+                        < rootDirectory.pathComponents.count,
+                    rootDirectory.pathComponents.starts(
+                        with: directory.pathComponents
+                    )
+                else {
+                    throw RecordingJournalError.unsafeStorage
+                }
+                try RecordingJournalPrivateIO.ensurePrivateDirectory(
+                    at: directory
+                )
+            }
             let parent = rootDirectory.deletingLastPathComponent()
             try RecordingJournalPrivateIO.ensurePrivateDirectory(at: parent)
             try RecordingJournalPrivateIO.ensurePrivateDirectory(at: rootDirectory)
