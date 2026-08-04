@@ -42,6 +42,8 @@ enum MacAudioImportPanel {
 
 private struct MacDashboardView: View {
     @EnvironmentObject private var model: MacAppModel
+    @EnvironmentObject private var presence: MacApplicationPresenceCoordinator
+    @Environment(\.openSettings) private var openSettings
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var destructiveAction: DashboardDestructiveAction?
     @State private var microphoneTestDeviceID: String?
@@ -133,7 +135,9 @@ private struct MacDashboardView: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("Status: \(statusText)")
 
-            SettingsLink {
+            Button {
+                presence.openSettings { openSettings() }
+            } label: {
                 Image(systemName: "gearshape")
                     .font(.system(size: 13))
             }

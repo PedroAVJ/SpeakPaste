@@ -2,6 +2,48 @@ import AppKit
 import Combine
 import SwiftUI
 
+@MainActor
+private final class MacDashboardWindowController: NSObject, NSWindowDelegate {
+    private let presence: MacApplicationPresenceCoordinator
+    private let window: NSWindow
+
+    init(model: MacAppModel, presence: MacApplicationPresenceCoordinator) {
+        self.presence = presence
+
+        let content = MacContentView()
+            .environmentObject(model)
+            .environmentObject(presence)
+        let hostingController = NSHostingController(rootView: content)
+        let window = NSWindow(contentViewController: hostingController)
+        self.window = window
+
+        super.init()
+
+        window.title = "SpeakPaste"
+        window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+        window.setContentSize(NSSize(width: 520, height: 680))
+        window.contentMinSize = NSSize(width: 480, height: 580)
+        window.isReleasedWhenClosed = false
+        window.tabbingMode = .disallowed
+        window.setFrameAutosaveName("SpeakPasteDashboard")
+        window.delegate = self
+    }
+
+    func show() {
+        if window.isMiniaturized {
+            window.deminiaturize(nil)
+        }
+        if !window.isVisible, !window.setFrameUsingName("SpeakPasteDashboard") {
+            window.center()
+        }
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        presence.dashboardDidClose()
+    }
+}
+
 /// Owns everything that must exist only in the process holding the app lease.
 /// A secondary launch therefore never initializes `MacAppModel` and cannot
 /// migrate defaults, recovery journals, or History before it terminates.
@@ -10,6 +52,8 @@ private final class MacAppRuntime: ObservableObject {
     let model: MacAppModel?
     let statusHUD: MacStatusHUDController?
     let realtimeCaretIndicator: MacRealtimeCaretIndicatorController?
+    let presence: MacApplicationPresenceCoordinator
+    let dashboardWindowController: MacDashboardWindowController?
     let existingApplication: NSRunningApplication?
     let launchFailureMessage: String?
 
@@ -17,6 +61,8 @@ private final class MacAppRuntime: ObservableObject {
     private var modelObservation: AnyCancellable?
 
     init(bundleIdentifier: String? = Bundle.main.bundleIdentifier) {
+        let presence = MacApplicationPresenceCoordinator()
+        self.presence = presence
 #if SPEAKPASTE_UI_TEST_INSTANCE
         // This code path exists only in a specially compiled QA bundle whose
         // CFFIXED_USER_HOME and TMPDIR are redirected before launch.
@@ -41,16 +87,22 @@ private final class MacAppRuntime: ObservableObject {
                 self.model = nil
                 self.statusHUD = nil
                 self.realtimeCaretIndicator = nil
+                self.dashboardWindowController = nil
                 self.existingApplication = legacyInstance
                 self.launchFailureMessage = nil
                 self.modelObservation = nil
                 return
             }
             let model = MacAppModel()
+            let dashboardWindowController = MacDashboardWindowController(
+                model: model,
+                presence: presence
+            )
             self.lease = lease
             self.model = model
             self.statusHUD = MacStatusHUDController(model: model)
             self.realtimeCaretIndicator = MacRealtimeCaretIndicatorController(model: model)
+            self.dashboardWindowController = dashboardWindowController
             self.existingApplication = nil
             self.launchFailureMessage = nil
             self.modelObservation = nil
@@ -59,11 +111,15 @@ private final class MacAppRuntime: ObservableObject {
                     self?.objectWillChange.send()
                 }
             }
+            presence.installDashboardPresenter { [weak dashboardWindowController] in
+                dashboardWindowController?.show()
+            }
         case .alreadyHeld:
             self.lease = nil
             self.model = nil
             self.statusHUD = nil
             self.realtimeCaretIndicator = nil
+            self.dashboardWindowController = nil
             self.existingApplication = legacyInstance ?? Self.existingSpeakPasteApplication()
             self.launchFailureMessage = nil
             self.modelObservation = nil
@@ -72,6 +128,7 @@ private final class MacAppRuntime: ObservableObject {
             self.model = nil
             self.statusHUD = nil
             self.realtimeCaretIndicator = nil
+            self.dashboardWindowController = nil
             self.existingApplication = legacyInstance
             self.launchFailureMessage = "SpeakPaste could not create its per-user safety lock, so it did not open or touch local dictation data. Check the permissions on your temporary folder, then try again."
             self.modelObservation = nil
@@ -108,19 +165,26 @@ private final class MacAppRuntime: ObservableObject {
 final class MacSingleInstanceGuard: NSObject, NSApplicationDelegate {
     private weak var model: MacAppModel?
     private weak var existingApplication: NSRunningApplication?
+    private weak var presence: MacApplicationPresenceCoordinator?
     private var isPrimaryInstance = false
     private var launchFailureMessage: String?
     private var terminationReplyPending = false
+    private var startPrimaryRuntime: (() -> Void)?
 
     fileprivate func configure(runtime: MacAppRuntime) {
         model = runtime.model
         existingApplication = runtime.existingApplication
+        presence = runtime.presence
         isPrimaryInstance = runtime.isPrimaryInstance
         launchFailureMessage = runtime.launchFailureMessage
+        startPrimaryRuntime = { [weak runtime] in runtime?.start() }
     }
 
     func applicationWillFinishLaunching(_ notification: Notification) {
-        guard !isPrimaryInstance else { return }
+        if isPrimaryInstance {
+            presence?.establishLaunchPolicy()
+            return
+        }
         existingApplication?.activate(options: [])
         if let launchFailureMessage {
             let alert = NSAlert()
@@ -131,6 +195,22 @@ final class MacSingleInstanceGuard: NSObject, NSApplicationDelegate {
             alert.runModal()
         }
         NSApp.terminate(nil)
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        guard isPrimaryInstance else { return }
+        // Bootstrap recording recovery, the global hotkey, the HUD observer,
+        // and session tracking independently of every visible UI surface.
+        startPrimaryRuntime?()
+    }
+
+    func applicationShouldHandleReopen(
+        _ sender: NSApplication,
+        hasVisibleWindows flag: Bool
+    ) -> Bool {
+        guard isPrimaryInstance else { return false }
+        presence?.openDashboard()
+        return true
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -163,22 +243,13 @@ struct SpeakPasteMacApp: App {
     }
 
     var body: some Scene {
-        Window("SpeakPaste", id: "main") {
-            if let model = runtime.model {
-                MacContentView()
-                    .environmentObject(model)
-                    .onAppear { runtime.start() }
-            } else {
-                EmptyView()
-            }
-        }
-        .defaultSize(width: 520, height: 680)
-        .windowResizability(.contentMinSize)
-
         Settings {
             if let model = runtime.model {
                 MacSettingsView()
                     .environmentObject(model)
+                    .environmentObject(runtime.presence)
+                    .onAppear { runtime.presence.settingsDidAppear() }
+                    .onDisappear { runtime.presence.settingsDidDisappear() }
             } else {
                 EmptyView()
             }
@@ -188,16 +259,12 @@ struct SpeakPasteMacApp: App {
             if let model = runtime.model {
                 MacMenuBarView()
                     .environmentObject(model)
+                    .environmentObject(runtime.presence)
             }
         } label: {
             if let model = runtime.model {
                 Image(systemName: menuBarSymbol(for: model))
                     .accessibilityLabel(menuBarAccessibilityLabel(for: model))
-                    // The menu bar item exists from launch, so this runs even
-                    // when the main window never opens — a login-item start
-                    // with the Dock icon off still gets the indicator and recovery
-                    // marker.
-                    .onAppear { runtime.start() }
             } else {
                 EmptyView()
             }
@@ -246,7 +313,8 @@ struct SpeakPasteMacApp: App {
 
 struct MacMenuBarView: View {
     @EnvironmentObject private var model: MacAppModel
-    @Environment(\.openWindow) private var openWindow
+    @EnvironmentObject private var presence: MacApplicationPresenceCoordinator
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         captureItems
@@ -316,8 +384,7 @@ struct MacMenuBarView: View {
         if !model.heldTranscripts.isEmpty {
             Button(heldMenuTitle) {
                 if model.hasUncertainHeldTranscripts {
-                    openWindow(id: "main")
-                    NSApp.activate(ignoringOtherApps: true)
+                    presence.openDashboard()
                 } else {
                     model.releaseHeldTranscripts()
                 }
@@ -365,14 +432,14 @@ struct MacMenuBarView: View {
         }
         .accessibilityLabel("Transcription language, currently \(model.language.title)")
         Button("Open SpeakPaste") {
-            openWindow(id: "main")
-            NSApp.activate(ignoringOtherApps: true)
+            presence.openDashboard()
         }
-        SettingsLink { Text("Settings…") }
+        Button("Settings…") {
+            presence.openSettings { openSettings() }
+        }
         Button("Replay Onboarding") {
             model.showOnboardingAgain()
-            openWindow(id: "main")
-            NSApp.activate(ignoringOtherApps: true)
+            presence.openDashboard()
         }
     }
 

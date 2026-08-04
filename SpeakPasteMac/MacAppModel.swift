@@ -275,12 +275,6 @@ final class MacAppModel: ObservableObject {
     @Published var hudPlacement: MacHUDPlacement = .top {
         didSet { UserDefaults.standard.set(hudPlacement.rawValue, forKey: Self.hudPlacementKey) }
     }
-    @Published var showInDock = true {
-        didSet {
-            UserDefaults.standard.set(showInDock, forKey: Self.showInDockKey)
-            applyActivationPolicy()
-        }
-    }
     @Published private(set) var hasCompletedOnboarding = false
     @Published private(set) var elapsed: TimeInterval = 0
     @Published private(set) var inputLevel: Double = 0
@@ -488,7 +482,6 @@ final class MacAppModel: ObservableObject {
     private static let spokenFormattingCommandsKey = "mac-spoken-formatting-commands"
     private static let hudEnabledKey = "mac-hud-enabled"
     private static let hudPlacementKey = "mac-hud-placement"
-    private static let showInDockKey = "mac-show-in-dock"
     private static let retainSuccessfulAudioKey = "mac-retain-successful-audio"
     private static let completedOnboardingKey = "mac-completed-onboarding"
     private static let retryableFailuresKey = "mac-retryable-failures"
@@ -761,9 +754,6 @@ final class MacAppModel: ObservableObject {
            let placement = MacHUDPlacement(rawValue: storedPlacement) {
             hudPlacement = placement
         }
-        if defaults.object(forKey: Self.showInDockKey) != nil {
-            showInDock = defaults.bool(forKey: Self.showInDockKey)
-        }
         if defaults.object(forKey: Self.retainSuccessfulAudioKey) != nil {
             retainSuccessfulAudio = defaults.bool(forKey: Self.retainSuccessfulAudioKey)
         }
@@ -777,7 +767,6 @@ final class MacAppModel: ObservableObject {
             }
         }
         hasCompletedOnboarding = defaults.bool(forKey: Self.completedOnboardingKey)
-        applyActivationPolicy()
         MacKeyboardLayout.startObservingLayoutChanges()
         // A grant can be given or revoked in System Settings while the user
         // never returns to SpeakPaste, which used to leave the shortcut dead
@@ -1734,9 +1723,9 @@ final class MacAppModel: ObservableObject {
         UserDefaults.standard.set(false, forKey: Self.completedOnboardingKey)
     }
 
-    /// Starts only after the first real app surface appears. A second instance
-    /// exits from the application delegate before then, so it cannot overwrite
-    /// the primary process's health marker and make a later crash look clean.
+    /// Starts from the surviving primary process's application delegate. A
+    /// second instance exits before this point, so it cannot overwrite the
+    /// primary process's health marker and make a later crash look clean.
     func startSessionTracking() {
         guard !hasStartedSessionTracking else { return }
         hasStartedSessionTracking = true
@@ -5129,11 +5118,6 @@ final class MacAppModel: ObservableObject {
             .first?
             .appendingPathComponent("SpeakPaste", isDirectory: true)
             .appendingPathComponent("PendingAudio", isDirectory: true)
-    }
-
-    private func applyActivationPolicy() {
-        let policy: NSApplication.ActivationPolicy = showInDock ? .regular : .accessory
-        Task { @MainActor in _ = NSApp.setActivationPolicy(policy) }
     }
 
     private var resolvedAPIKey: String? {

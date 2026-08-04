@@ -38,7 +38,7 @@ struct MacSettingsView: View {
 
 private struct MacGeneralSettings: View {
     @EnvironmentObject private var model: MacAppModel
-    @Environment(\.openWindow) private var openWindow
+    @EnvironmentObject private var presence: MacApplicationPresenceCoordinator
     @State private var confirmingAPIKeyRemoval = false
 
     var body: some View {
@@ -85,8 +85,7 @@ private struct MacGeneralSettings: View {
                     .foregroundStyle(.secondary)
             }
 
-            Section("Appearance & startup") {
-                Toggle("Show SpeakPaste in the Dock", isOn: $model.showInDock)
+            Section("Startup") {
                 Toggle(
                     "Launch SpeakPaste at login",
                     isOn: Binding(
@@ -128,8 +127,7 @@ private struct MacGeneralSettings: View {
                     Spacer()
                     Button("Replay Onboarding…") {
                         model.showOnboardingAgain()
-                        openWindow(id: "main")
-                        NSApp.activate(ignoringOtherApps: true)
+                        presence.openDashboard()
                     }
                 }
                 Text("Reopens the guided setup in the main window: API key, permissions, microphone test, and shortcuts.")

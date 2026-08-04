@@ -88,6 +88,7 @@ let package = Package(
                 "MacDiagnostics.swift",
                 "MacHistoryStore.swift",
                 "MacActiveCaptureRecovery.swift",
+                "MacApplicationPresence.swift",
                 "MacPendingAudioStore.swift",
                 "MacPendingTranscriptStore.swift",
                 "MacPasteVerification.swift",

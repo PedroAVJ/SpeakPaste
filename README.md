@@ -28,8 +28,10 @@ The Xcode project contains four product targets:
 
 1. Open `SpeakPaste.xcodeproj` in Xcode.
 2. Select the **SpeakPasteMac** scheme and **My Mac** as the destination.
-3. Build and run. The product is named **SpeakPaste.app**.
-4. Save your ElevenLabs API key when prompted.
+3. Build and run. The product is named **SpeakPaste.app** and launches as a
+   menu-bar utility, without a Dock icon or Command-Tab entry.
+4. Click the menu bar icon, choose **Open SpeakPaste**, and save your ElevenLabs
+   API key when prompted.
 5. Keep your iPhone nearby and locked and SpeakPaste selects its Continuity
    microphone automatically. Your current **Mac** or **iPhone** input mode is
    remembered across launches. If that source is unavailable, SpeakPaste says
@@ -76,6 +78,13 @@ explicitly with **⌥⌘V** at the current writable cursor; possibly delivered
 entries require the separate reviewed one-shot authorization. The optional
 **Hold delivery while recording** setting pauses only the delivery dequeue while
 the mic is live and flushes work between chunks.
+
+The menu bar item remains available while SpeakPaste runs. Opening the dashboard
+or Settings temporarily gives SpeakPaste normal foreground-app presence in the
+Dock and Command-Tab; closing the last of those windows returns it to its quiet
+menu-bar-only state. The transient dictation indicator never changes app
+presence, and recording plus the global shortcut continue without any window or
+menu being open.
 
 Stopping ends the Continuity session before transcription starts, allowing
 macOS to dismiss its system-owned capture surface on the iPhone. Each new

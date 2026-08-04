@@ -58,6 +58,12 @@ TCC grants, or Application Support.
 - [ ] Complete and revisit every onboarding step. Check API-key states,
       permission/readiness explanations, microphone selection/test, shortcuts,
       successful-audio disclosure, and the language menu.
+- [ ] Launch with no saved windows and confirm SpeakPaste appears only in the
+      menu bar, not the Dock or Command-Tab. Open the dashboard, then Settings,
+      and confirm regular app presence persists until both close. Confirm closing
+      the last real window returns to menu-bar-only presence without flicker.
+      Trigger the HUD and global right-Command shortcut with no real window open;
+      neither may promote the app or depend on the menu being open.
 - [ ] Select Auto and several entries near the beginning, middle, and end of the
       full 100-choice language catalog, then relaunch and confirm persistence.
       Inject a low-confidence Auto response and confirm the text is preserved
