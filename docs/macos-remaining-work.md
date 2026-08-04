@@ -224,6 +224,14 @@ not fully end-to-end verified.
 These items are genuinely unimplemented because they require product identity,
 credentials, and distribution decisions that this source pass cannot make:
 
+- [ ] Choose the final product name. "SpeakPaste" is a working title; reuse of
+      "Near" was considered and rejected because that name is parked with the
+      Clockwork hardware direction. Rename the display name together with the
+      permanent bundle-identifier work below.
+- [ ] Design the real app icon to replace the placeholder mic artwork in the
+      shared `SpeakPaste/Assets.xcassets` catalog (used by both the iPhone and
+      macOS targets). It should be full-bleed in the macOS squircle and legible
+      at 16 px; direction is open until the name is chosen.
 - [ ] Choose the permanent macOS bundle identifier and Apple Developer team.
 - [ ] Configure the release entitlements, Developer ID signing, hardened runtime,
       versioning, notarization, and stapling; then repeat the physical acceptance
