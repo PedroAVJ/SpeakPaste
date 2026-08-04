@@ -64,6 +64,8 @@ private struct KBKeyButtonStyle: ButtonStyle {
     let fill: Color
     let foreground: Color
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .foregroundStyle(foreground)
@@ -77,8 +79,10 @@ private struct KBKeyButtonStyle: ButtonStyle {
                         y: configuration.isPressed ? 0 : 1.5
                     )
             )
-            .scaleEffect(configuration.isPressed ? 0.96 : 1)
-            .offset(y: configuration.isPressed ? 1 : 0)
+            .scaleEffect(
+                reduceMotion ? 1 : (configuration.isPressed ? 0.96 : 1)
+            )
+            .offset(y: reduceMotion ? 0 : (configuration.isPressed ? 1 : 0))
     }
 }
 
@@ -101,6 +105,8 @@ private struct KBKey: View {
                 } else {
                     Text(text ?? "")
                         .font(font)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.65)
                 }
             }
         }
@@ -112,6 +118,128 @@ private struct KBKey: View {
             maxHeight: 40
         )
         .accessibilityLabel(accessibilityLabel)
+    }
+}
+
+/// A keyboard delete key begins deleting immediately, then repeats while held.
+/// SwiftUI's `Button` only fires on release, so this small control owns the
+/// touch-down lifecycle while retaining an explicit VoiceOver action.
+private struct KBRepeatingKey: View {
+    var width: CGFloat
+    let accessibilityLabel: String
+    let action: () -> Void
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isPressed = false
+    @State private var repeatTask: Task<Void, Never>?
+
+    var body: some View {
+        Image(systemName: "delete.left")
+            .font(.system(size: 17, weight: .medium))
+            .foregroundStyle(KBTheme.ink)
+            .frame(
+                minWidth: width,
+                maxWidth: width,
+                minHeight: 40,
+                maxHeight: 40
+            )
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(KBTheme.utilityKey)
+                    .shadow(
+                        color: .black.opacity(isPressed ? 0.04 : 0.22),
+                        radius: isPressed ? 0 : 0.5,
+                        y: isPressed ? 0 : 1.5
+                    )
+            )
+            .scaleEffect(reduceMotion ? 1 : (isPressed ? 0.96 : 1))
+            .offset(y: reduceMotion ? 0 : (isPressed ? 1 : 0))
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in
+                        guard !isPressed else { return }
+                        beginPress()
+                    }
+                    .onEnded { _ in
+                        endPress()
+                    }
+            )
+            .onDisappear(perform: endPress)
+            .accessibilityElement()
+            .accessibilityLabel(accessibilityLabel)
+            .accessibilityHint("Touch and hold to delete continuously.")
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction {
+                action()
+            }
+    }
+
+    private func beginPress() {
+        isPressed = true
+        action()
+        repeatTask?.cancel()
+        repeatTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(420))
+            guard !Task.isCancelled else { return }
+
+            var repeatCount = 0
+            while !Task.isCancelled {
+                action()
+                repeatCount += 1
+
+                // Character deletion starts deliberately, then catches up to
+                // a long hold without suddenly erasing an entire word.
+                let delay: Duration = if repeatCount < 12 {
+                    .milliseconds(88)
+                } else if repeatCount < 30 {
+                    .milliseconds(58)
+                } else {
+                    .milliseconds(38)
+                }
+                try? await Task.sleep(for: delay)
+            }
+        }
+    }
+
+    private func endPress() {
+        isPressed = false
+        repeatTask?.cancel()
+        repeatTask = nil
+    }
+}
+
+private struct KBCharacterKey: View {
+    let text: String
+    let alternatives: [String]
+    let accessibilityLabel: String
+    let action: () -> Void
+    let alternativeAction: (String) -> Void
+
+    var body: some View {
+        Menu {
+            ForEach(alternatives, id: \.self) { alternative in
+                Button(alternative) {
+                    alternativeAction(alternative)
+                }
+                .accessibilityLabel(alternative)
+            }
+        } label: {
+            Text(text)
+                .font(.system(size: 21))
+        } primaryAction: {
+            action()
+        }
+        .buttonStyle(
+            KBKeyButtonStyle(fill: KBTheme.key, foreground: KBTheme.ink)
+        )
+        .frame(minHeight: 40, maxHeight: 40)
+        .accessibilityLabel(accessibilityLabel)
+        .accessibilityHint(
+            alternatives.isEmpty
+                ? ""
+                : "Touch and hold for accented characters."
+        )
     }
 }
 
@@ -136,11 +264,286 @@ private enum KeyPlane {
     case symbols
 }
 
+enum KeyboardShiftState: Equatable {
+    case lowercase
+    case shifted
+    case capsLocked
+
+    var usesUppercase: Bool {
+        self != .lowercase
+    }
+}
+
+enum KeyboardCapitalizationMode: Equatable {
+    case none
+    case words
+    case sentences
+    case allCharacters
+}
+
+enum KeyboardReturnKey: Equatable {
+    case `return`
+    case go
+    case google
+    case join
+    case next
+    case route
+    case search
+    case send
+    case yahoo
+    case done
+    case emergencyCall
+    case `continue`
+
+    var label: String {
+        switch self {
+        case .return: "return"
+        case .go: "go"
+        case .google: "Google"
+        case .join: "join"
+        case .next: "next"
+        case .route: "route"
+        case .search: "search"
+        case .send: "send"
+        case .yahoo: "Yahoo"
+        case .done: "done"
+        case .emergencyCall: "emergency"
+        case .continue: "continue"
+        }
+    }
+
+    var accessibilityLabel: String {
+        self == .emergencyCall ? "Emergency call" : label
+    }
+}
+
+/// The host-specific facts the SwiftUI keyboard needs for field-aware
+/// capitalization and Return labels.
+struct KeyboardDocumentContext: Equatable {
+    var textBeforeInput: String?
+    var capitalization: KeyboardCapitalizationMode
+    var returnKey: KeyboardReturnKey
+
+    static let unavailable = KeyboardDocumentContext(
+        textBeforeInput: nil,
+        capitalization: .sentences,
+        returnKey: .return
+    )
+
+    init(
+        textBeforeInput: String?,
+        capitalization: KeyboardCapitalizationMode = .sentences,
+        returnKey: KeyboardReturnKey = .return
+    ) {
+        self.textBeforeInput = textBeforeInput
+        self.capitalization = capitalization
+        self.returnKey = returnKey
+    }
+
+    init(
+        textBeforeInput: String?,
+        autocapitalizationType: UITextAutocapitalizationType?,
+        returnKeyType: UIReturnKeyType?
+    ) {
+        self.textBeforeInput = textBeforeInput
+        self.capitalization = switch autocapitalizationType ?? .sentences {
+        case .none: .none
+        case .words: .words
+        case .sentences: .sentences
+        case .allCharacters: .allCharacters
+        @unknown default: .sentences
+        }
+        self.returnKey = switch returnKeyType ?? .default {
+        case .default: .return
+        case .go: .go
+        case .google: .google
+        case .join: .join
+        case .next: .next
+        case .route: .route
+        case .search: .search
+        case .send: .send
+        case .yahoo: .yahoo
+        case .done: .done
+        case .emergencyCall: .emergencyCall
+        case .continue: .continue
+        @unknown default: .return
+        }
+    }
+}
+
+struct KeyboardTypingEdit: Equatable {
+    var deletedCharacters = 0
+    var insertedText: String
+}
+
+/// Pure, deterministic typing behavior backed by a bounded suffix of the
+/// host's document context.
+struct KeyboardTypingState: Equatable {
+    private static let maximumTrackedCharacters = 160
+    private static let capsLockTapInterval: TimeInterval = 0.4
+    private static let sentenceTerminators: Set<Character> = [".", "!", "?"]
+    private static let safeDoubleSpaceClosers: Set<Character> = [
+        ")", "]", "}",
+    ]
+
+    private(set) var shiftState: KeyboardShiftState = .shifted
+    private(set) var returnKey: KeyboardReturnKey = .return
+    private(set) var trackedContext = ""
+    private(set) var capitalization: KeyboardCapitalizationMode = .sentences
+
+    private var hasAuthoritativeContext = false
+    private var manualShiftOverride = false
+    private var lastShiftTapAt: Date?
+
+    init(documentContext: KeyboardDocumentContext = .unavailable) {
+        synchronize(with: documentContext)
+    }
+
+    mutating func synchronize(with documentContext: KeyboardDocumentContext) {
+        capitalization = documentContext.capitalization
+        returnKey = documentContext.returnKey
+
+        if let textBeforeInput = documentContext.textBeforeInput {
+            trackedContext = Self.tail(of: textBeforeInput)
+            hasAuthoritativeContext = true
+        }
+
+        applyAutomaticShiftIfAllowed()
+    }
+
+    mutating func tapShift(at date: Date = Date()) {
+        switch shiftState {
+        case .lowercase:
+            shiftState = .shifted
+            manualShiftOverride = true
+            lastShiftTapAt = date
+
+        case .shifted:
+            if
+                manualShiftOverride,
+                let lastShiftTapAt,
+                date.timeIntervalSince(lastShiftTapAt)
+                    <= Self.capsLockTapInterval
+            {
+                shiftState = .capsLocked
+                self.lastShiftTapAt = nil
+            } else {
+                shiftState = .lowercase
+                manualShiftOverride = true
+                lastShiftTapAt = nil
+            }
+
+        case .capsLocked:
+            shiftState = .lowercase
+            manualShiftOverride = true
+            lastShiftTapAt = nil
+        }
+    }
+
+    mutating func letter(_ value: String) -> String {
+        let output = shiftState.usesUppercase
+            ? value.uppercased()
+            : value.lowercased()
+        append(output)
+
+        if shiftState != .capsLocked {
+            manualShiftOverride = false
+            applyAutomaticShiftIfAllowed()
+        }
+        return output
+    }
+
+    mutating func insert(_ text: String) {
+        append(text)
+        if text.contains("\n"), shiftState != .capsLocked {
+            manualShiftOverride = false
+        }
+        applyAutomaticShiftIfAllowed()
+    }
+
+    mutating func space() -> KeyboardTypingEdit {
+        if Self.shouldReplaceDoubleSpace(in: trackedContext) {
+            trackedContext.removeLast()
+            append(". ")
+            if shiftState != .capsLocked {
+                manualShiftOverride = false
+            }
+            applyAutomaticShiftIfAllowed()
+            return KeyboardTypingEdit(
+                deletedCharacters: 1,
+                insertedText: ". "
+            )
+        }
+
+        append(" ")
+        applyAutomaticShiftIfAllowed()
+        return KeyboardTypingEdit(insertedText: " ")
+    }
+
+    mutating func deleteBackward() {
+        if !trackedContext.isEmpty {
+            trackedContext.removeLast()
+        } else if hasAuthoritativeContext {
+            // The tracked suffix was exhausted. Until the host publishes a
+            // fresh context, do not infer punctuation beyond this boundary.
+            hasAuthoritativeContext = false
+        }
+        applyAutomaticShiftIfAllowed()
+    }
+
+    private mutating func append(_ text: String) {
+        trackedContext.append(contentsOf: text)
+        trackedContext = Self.tail(of: trackedContext)
+    }
+
+    private mutating func applyAutomaticShiftIfAllowed() {
+        guard shiftState != .capsLocked, !manualShiftOverride else { return }
+        shiftState = shouldAutomaticallyShift ? .shifted : .lowercase
+    }
+
+    private var shouldAutomaticallyShift: Bool {
+        switch capitalization {
+        case .none:
+            return false
+        case .allCharacters:
+            return true
+        case .words:
+            guard let last = trackedContext.last else { return true }
+            return last.isWhitespace
+        case .sentences:
+            guard !trackedContext.isEmpty else { return true }
+
+            let trailingWhitespace = trackedContext.reversed().prefix {
+                $0 == " " || $0 == "\t"
+            }
+            let beforeTrailingWhitespace = trackedContext.dropLast(
+                trailingWhitespace.count
+            )
+            guard let last = beforeTrailingWhitespace.last else { return true }
+            return last == "\n" || Self.sentenceTerminators.contains(last)
+        }
+    }
+
+    private static func shouldReplaceDoubleSpace(in context: String) -> Bool {
+        guard context.last == " " else { return false }
+        guard let preceding = context.dropLast().last else { return false }
+        return preceding.isLetter
+            || preceding.isNumber
+            || safeDoubleSpaceClosers.contains(preceding)
+    }
+
+    private static func tail(of text: String) -> String {
+        String(text.suffix(maximumTrackedCharacters))
+    }
+}
+
 struct KeyboardView: View {
     @ObservedObject var model: KeyboardModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var isShifted = false
+    @State private var typingState: KeyboardTypingState
     @State private var plane: KeyPlane = .letters
+
+    private let documentContext: () -> KeyboardDocumentContext
 
     private let letterRows = [
         Array("qwertyuiop"),
@@ -156,6 +559,35 @@ struct KeyboardView: View {
         ["_", "\\", "|", "~", "<", ">", "€", "£", "¥", "•"],
     ]
     private let punctuationRow = [".", ",", "?", "!", "'"]
+
+    private let alternateCharacters: [Character: [String]] = [
+        "a": ["á", "à", "â", "ä", "æ", "ã", "å", "ā"],
+        "c": ["ç", "ć", "č"],
+        "e": ["é", "è", "ê", "ë", "ē", "ė", "ę"],
+        "i": ["í", "ì", "î", "ï", "ī", "į"],
+        "l": ["ł"],
+        "n": ["ñ", "ń"],
+        "o": ["ó", "ò", "ô", "ö", "õ", "ø", "œ", "ō"],
+        "s": ["ß", "ś", "š"],
+        "u": ["ú", "ù", "û", "ü", "ū"],
+        "y": ["ý", "ÿ"],
+        "z": ["ž", "ź", "ż"],
+    ]
+
+    init(
+        model: KeyboardModel,
+        documentContext: @escaping () -> KeyboardDocumentContext = {
+            .unavailable
+        }
+    ) {
+        self.model = model
+        self.documentContext = documentContext
+        _typingState = State(
+            initialValue: KeyboardTypingState(
+                documentContext: documentContext()
+            )
+        )
+    }
 
     var body: some View {
         Group {
@@ -180,6 +612,10 @@ struct KeyboardView: View {
             reduceMotion ? nil : .easeInOut(duration: 0.18),
             value: model.snapshot.phase
         )
+        .onAppear(perform: synchronizeTypingContext)
+        .onReceive(model.$snapshot) { _ in
+            synchronizeTypingContext()
+        }
         .onChange(of: model.snapshot.phase) { _, phase in
             announceStatusChange(phaseAnnouncement(for: phase))
         }
@@ -246,29 +682,28 @@ struct KeyboardView: View {
 
             HStack(spacing: 5) {
                 KBKey(
-                    systemImage: isShifted ? "shift.fill" : "shift",
+                    systemImage: shiftSystemImage,
                     width: 44,
-                    fill: isShifted ? KBTheme.key : KBTheme.utilityKey,
-                    accessibilityLabel: isShifted ? "Shift on" : "Shift"
+                    fill: shiftKeyFill,
+                    foreground: shiftKeyForeground,
+                    accessibilityLabel: shiftAccessibilityLabel
                 ) {
-                    isShifted.toggle()
+                    synchronizeTypingContext()
+                    typingState.tapShift()
                 }
 
                 keyRow(letterRows[2])
 
-                KBKey(
-                    systemImage: "delete.left",
+                KBRepeatingKey(
                     width: 44,
-                    fill: KBTheme.utilityKey,
                     accessibilityLabel: "Delete"
                 ) {
-                    model.backspace()
+                    deleteOneCharacter()
                 }
             }
 
             functionalRow(modeLabel: "123") {
                 plane = .numbers
-                isShifted = false
             }
         }
     }
@@ -295,13 +730,11 @@ struct KeyboardView: View {
 
                 textKeyRow(punctuationRow)
 
-                KBKey(
-                    systemImage: "delete.left",
+                KBRepeatingKey(
                     width: 44,
-                    fill: KBTheme.utilityKey,
                     accessibilityLabel: "Delete"
                 ) {
-                    model.backspace()
+                    deleteOneCharacter()
                 }
             }
 
@@ -314,15 +747,29 @@ struct KeyboardView: View {
     private func keyRow(_ characters: [Character]) -> some View {
         HStack(spacing: 5) {
             ForEach(characters, id: \.self) { character in
-                let value = isShifted
-                    ? String(character).uppercased()
-                    : String(character)
-                KBKey(
-                    text: value,
-                    accessibilityLabel: value
-                ) {
-                    model.type(value)
-                    isShifted = false
+                let baseValue = String(character)
+                let value = typingState.shiftState.usesUppercase
+                    ? baseValue.uppercased()
+                    : baseValue
+                let alternatives = (alternateCharacters[character] ?? []).map {
+                    typingState.shiftState.usesUppercase
+                        ? $0.uppercased()
+                        : $0
+                }
+                if alternatives.isEmpty {
+                    KBKey(text: value, accessibilityLabel: value) {
+                        typeLetter(baseValue)
+                    }
+                } else {
+                    KBCharacterKey(
+                        text: value,
+                        alternatives: alternatives,
+                        accessibilityLabel: value
+                    ) {
+                        typeLetter(baseValue)
+                    } alternativeAction: { alternative in
+                        typeLetter(alternative)
+                    }
                 }
             }
         }
@@ -332,7 +779,7 @@ struct KeyboardView: View {
         HStack(spacing: 5) {
             ForEach(values, id: \.self) { value in
                 KBKey(text: value, accessibilityLabel: value) {
-                    model.type(value)
+                    typeText(value)
                 }
             }
         }
@@ -364,7 +811,7 @@ struct KeyboardView: View {
             }
 
             KBKey(text: ",", width: 34, accessibilityLabel: "Comma") {
-                model.type(",")
+                typeText(",")
             }
 
             KBKey(
@@ -372,23 +819,83 @@ struct KeyboardView: View {
                 font: .system(size: 15),
                 accessibilityLabel: "Space"
             ) {
-                model.type(" ")
+                typeSpace()
             }
 
             KBKey(text: ".", width: 34, accessibilityLabel: "Period") {
-                model.type(".")
+                typeText(".")
             }
 
             KBKey(
-                text: "return",
+                text: typingState.returnKey.label,
                 width: 57,
                 fill: KBTheme.utilityKey,
                 font: .system(size: 13, weight: .medium),
-                accessibilityLabel: "Return"
+                accessibilityLabel: typingState.returnKey.accessibilityLabel
             ) {
-                model.type("\n")
+                typeText("\n")
             }
         }
+    }
+
+    private var shiftSystemImage: String {
+        switch typingState.shiftState {
+        case .lowercase: "shift"
+        case .shifted: "shift.fill"
+        case .capsLocked: "capslock.fill"
+        }
+    }
+
+    private var shiftKeyFill: Color {
+        switch typingState.shiftState {
+        case .lowercase: KBTheme.utilityKey
+        case .shifted: KBTheme.key
+        case .capsLocked: KBTheme.accentSoft
+        }
+    }
+
+    private var shiftKeyForeground: Color {
+        typingState.shiftState == .capsLocked
+            ? KBTheme.accent
+            : KBTheme.ink
+    }
+
+    private var shiftAccessibilityLabel: String {
+        switch typingState.shiftState {
+        case .lowercase: "Shift"
+        case .shifted: "Shift on"
+        case .capsLocked: "Caps lock on"
+        }
+    }
+
+    private func synchronizeTypingContext() {
+        typingState.synchronize(with: documentContext())
+    }
+
+    private func typeLetter(_ letter: String) {
+        synchronizeTypingContext()
+        model.type(typingState.letter(letter))
+    }
+
+    private func typeText(_ text: String) {
+        synchronizeTypingContext()
+        model.type(text)
+        typingState.insert(text)
+    }
+
+    private func typeSpace() {
+        synchronizeTypingContext()
+        let edit = typingState.space()
+        for _ in 0..<edit.deletedCharacters {
+            model.backspace()
+        }
+        model.type(edit.insertedText)
+    }
+
+    private func deleteOneCharacter() {
+        synchronizeTypingContext()
+        model.backspace()
+        typingState.deleteBackward()
     }
 
     private var startingPanel: some View {
@@ -536,7 +1043,7 @@ struct KeyboardView: View {
 
             HStack(spacing: 8) {
                 if model.didFail && model.localError == nil {
-                    Button("Retry", action: model.retry)
+                    Button(model.recoveryButtonTitle, action: model.retry)
                         .buttonStyle(
                             KBStatusButtonStyle(
                                 fill: KBTheme.accentSoft,
@@ -544,13 +1051,18 @@ struct KeyboardView: View {
                             )
                         )
                 }
-                Button("Dismiss", action: model.dismissError)
-                    .buttonStyle(
-                        KBStatusButtonStyle(
-                            fill: KBTheme.ink,
-                            foreground: KBTheme.keyboardBackground
-                        )
+                if model.canDismissError {
+                    Button(
+                        model.errorDismissalButtonTitle,
+                        action: model.dismissError
                     )
+                        .buttonStyle(
+                            KBStatusButtonStyle(
+                                fill: KBTheme.ink,
+                                foreground: KBTheme.keyboardBackground
+                            )
+                        )
+                }
             }
         }
     }
@@ -607,6 +1119,8 @@ struct KeyboardView: View {
         case .recording: "Listening"
         case .transcribing: "Transcribing"
         case .completed: "Inserting at the cursor"
+        case .inserting: "Confirm whether the transcript was inserted"
+        case .deliveryBlocked: "Transcript ready for explicit insertion"
         case .inserted: "Inserted at the cursor"
         case .failed: errorMessage ?? "Dictation failed"
         case .cancelled: "Dictation cancelled"

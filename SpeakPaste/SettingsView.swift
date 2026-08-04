@@ -18,6 +18,7 @@ struct SettingsView: View {
                 apiKeySection
                 transcriptionSection
                 clipboardSection
+                HistoryRetentionSection(history: model.history)
                 privacySection
             }
             .scrollContentBackground(.hidden)
@@ -115,12 +116,18 @@ struct SettingsView: View {
 
     private var transcriptionSection: some View {
         Section {
-            Picker("Language", selection: $model.language) {
-                ForEach(TranscriptionLanguage.allCases) { language in
-                    Text(language.title).tag(language)
+            NavigationLink {
+                LanguagePickerView(selection: $model.language)
+            } label: {
+                LabeledContent {
+                    Text(model.language.title)
+                        .foregroundStyle(Theme.inkMuted)
+                } label: {
+                    Text("Language")
+                        .foregroundStyle(Theme.ink)
                 }
             }
-            .pickerStyle(.segmented)
+            .accessibilityHint("Opens the full list of transcription languages.")
 
             Toggle("Clean Speech", isOn: $model.cleanSpeech)
                 .foregroundStyle(Theme.ink)
@@ -166,6 +173,172 @@ struct SettingsView: View {
             apiKeyInput = ""
         } catch {
             apiKeyErrorMessage = error.localizedDescription
+        }
+    }
+}
+
+/// Full Scribe catalog picker. Auto, English, and Spanish stay one tap away at
+/// the top; everything else is reachable by scrolling or searching.
+private struct LanguagePickerView: View {
+    @Binding var selection: TranscriptionLanguage
+    @Environment(\.dismiss) private var dismiss
+    @State private var searchText = ""
+
+    private static let quickChoices: [TranscriptionLanguage] = [
+        .automatic, .english, .spanish,
+    ]
+
+    private var otherLanguages: [TranscriptionLanguage] {
+        TranscriptionLanguage.supportedCases.filter {
+            !Self.quickChoices.contains($0)
+        }
+    }
+
+    private var trimmedQuery: String {
+        searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var searchResults: [TranscriptionLanguage] {
+        TranscriptionLanguage.supportedCases.filter {
+            $0.title.localizedCaseInsensitiveContains(trimmedQuery)
+                || $0.rawValue.localizedCaseInsensitiveContains(trimmedQuery)
+                || ($0.apiCode?.localizedCaseInsensitiveContains(trimmedQuery) ?? false)
+        }
+    }
+
+    var body: some View {
+        List {
+            if trimmedQuery.isEmpty {
+                Section("Quick Choices") {
+                    ForEach(Self.quickChoices) { language in
+                        row(language)
+                    }
+                }
+                .listRowBackground(Theme.surface)
+
+                Section("All Languages") {
+                    ForEach(otherLanguages) { language in
+                        row(language)
+                    }
+                }
+                .listRowBackground(Theme.surface)
+            } else {
+                Section {
+                    ForEach(searchResults) { language in
+                        row(language)
+                    }
+                }
+                .listRowBackground(Theme.surface)
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .background(Theme.background)
+        .overlay {
+            if !trimmedQuery.isEmpty, searchResults.isEmpty {
+                ContentUnavailableView.search(text: trimmedQuery)
+            }
+        }
+        .searchable(
+            text: $searchText,
+            placement: .navigationBarDrawer(displayMode: .always),
+            prompt: "Search languages"
+        )
+        .navigationTitle("Language")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func row(_ language: TranscriptionLanguage) -> some View {
+        Button {
+            selection = language
+            dismiss()
+        } label: {
+            HStack {
+                Text(language.title)
+                    .foregroundStyle(Theme.ink)
+                Spacer()
+                if language == selection {
+                    Image(systemName: "checkmark")
+                        .fontWeight(.semibold)
+                        .foregroundStyle(Theme.accent)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(language == selection ? [.isSelected] : [])
+    }
+}
+
+/// Retention picker that never deletes silently: choosing a policy that would
+/// remove saved transcripts requires an explicit destructive confirmation.
+private struct HistoryRetentionSection: View {
+    @ObservedObject var history: HistoryStore
+    @State private var pendingChange: PendingRetentionChange?
+
+    private struct PendingRetentionChange: Identifiable {
+        let policy: HistoryRetentionPolicy
+        let itemsRemoved: Int
+        var id: String { policy.id }
+    }
+
+    private var retentionBinding: Binding<HistoryRetentionPolicy> {
+        Binding(
+            get: { history.retention },
+            set: { newPolicy in
+                guard newPolicy != history.retention else { return }
+                let removed = history.itemsRemoved(by: newPolicy)
+                if removed > 0 {
+                    pendingChange = PendingRetentionChange(
+                        policy: newPolicy,
+                        itemsRemoved: removed
+                    )
+                } else {
+                    history.setRetention(newPolicy)
+                }
+            }
+        )
+    }
+
+    var body: some View {
+        Section {
+            Picker("Keep History", selection: retentionBinding) {
+                ForEach(HistoryRetentionPolicy.allCases) { policy in
+                    Text(policy.title).tag(policy)
+                }
+            }
+            .pickerStyle(.menu)
+            .foregroundStyle(Theme.ink)
+        } header: {
+            Text("History")
+        } footer: {
+            Text(history.retention.settingsDescription)
+        }
+        .listRowBackground(Theme.surface)
+        .confirmationDialog(
+            "Change history retention?",
+            isPresented: Binding(
+                get: { pendingChange != nil },
+                set: { if !$0 { pendingChange = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: pendingChange
+        ) { change in
+            Button(role: .destructive) {
+                history.setRetention(change.policy)
+            } label: {
+                Text("Delete ^[\(change.itemsRemoved) Transcript](inflect: true)")
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { change in
+            if change.policy == .never {
+                Text(
+                    "History will be turned off, and ^[\(change.itemsRemoved) saved transcript](inflect: true) will be deleted from this iPhone."
+                )
+            } else {
+                Text(
+                    "Transcripts will be kept for \(change.policy.title.lowercased()), and ^[\(change.itemsRemoved) older transcript](inflect: true) will be deleted from this iPhone."
+                )
+            }
         }
     }
 }

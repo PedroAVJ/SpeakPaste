@@ -188,7 +188,8 @@ struct ContentView: View {
         case .recording:
             RecordingLiveView(
                 recorder: model.recorder,
-                isKeyboardDictation: model.isKeyboardDictation
+                isKeyboardDictation: model.isKeyboardDictation,
+                notice: model.recordingNotice
             )
         case .transcribing:
             ProcessingView()
@@ -355,6 +356,7 @@ private struct FlowStep: View {
 private struct RecordingLiveView: View {
     @ObservedObject var recorder: AudioRecorder
     let isKeyboardDictation: Bool
+    let notice: String?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ScaledMetric(relativeTo: .largeTitle) private var timerSize: CGFloat = 60
 
@@ -386,6 +388,19 @@ private struct RecordingLiveView: View {
             MicLevelMeter(level: recorder.level, reduceMotion: reduceMotion)
                 .frame(height: 64)
                 .accessibilityHidden(true)
+
+            if recorder.readiness != .ready {
+                Label("Waiting for microphone audio…", systemImage: "waveform.badge.mic")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(Theme.accent)
+                    .accessibilityLabel("Waiting for microphone audio")
+            } else if let notice {
+                Label(notice, systemImage: "exclamationmark.circle.fill")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(Theme.accent)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             Text(
                 isKeyboardDictation
@@ -562,19 +577,38 @@ private struct ErrorCard: View {
                     .buttonStyle(QuietPillButtonStyle())
                 } else {
                     Button {
-                        model.retry()
+                        model.retryAfterError()
                     } label: {
-                        Label("Retry", systemImage: "arrow.clockwise")
+                        Label(
+                            model.hasRecoverableRecording
+                                ? "Retry Transcription"
+                                : "Try Again",
+                            systemImage: "arrow.clockwise"
+                        )
                     }
                     .buttonStyle(QuietPillButtonStyle())
-                    .accessibilityHint("Sends the kept recording to ElevenLabs again.")
+                    .accessibilityHint(
+                        model.hasRecoverableRecording
+                            ? "Sends the recovered recording to ElevenLabs again."
+                            : "Starts a fresh recording attempt."
+                    )
                 }
 
-                Button("Dismiss") {
-                    model.dismissError()
-                    model.needsMicrophoneSettings = false
+                if model.hasRecoverableRecording {
+                    Button(role: .destructive) {
+                        model.discardRecoverableRecording()
+                    } label: {
+                        Label("Discard Audio", systemImage: "trash")
+                    }
+                    .buttonStyle(QuietPillButtonStyle(tint: Theme.danger))
+                    .accessibilityHint("Permanently deletes the recovered recording.")
+                } else {
+                    Button("Dismiss") {
+                        model.dismissError()
+                        model.needsMicrophoneSettings = false
+                    }
+                    .buttonStyle(QuietPillButtonStyle(tint: Theme.inkMuted))
                 }
-                .buttonStyle(QuietPillButtonStyle(tint: Theme.inkMuted))
             }
         }
         .padding(16)

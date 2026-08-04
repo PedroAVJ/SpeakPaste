@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import UIKit
 
@@ -18,6 +19,8 @@ final class DictationEngine {
         case backgroundCaptureUnavailable
         case backgroundTranscriptionUnavailable
         case backgroundTranscriptionExpired
+        case sharedStateUnavailable
+        case captureBusy
         case pendingTranscript
 
         var errorDescription: String? {
@@ -29,9 +32,13 @@ final class DictationEngine {
             case .backgroundCaptureUnavailable:
                 "iOS refused the microphone in the background. If another app or a screen recording is using audio, stop it and tap again."
             case .backgroundTranscriptionUnavailable:
-                "iOS could not reserve enough background time to transcribe. The recording was discarded safely; try again."
+                "iOS could not reserve enough background time to transcribe. The recording was saved; open SpeakPaste to retry."
             case .backgroundTranscriptionExpired:
-                "iOS ended the background transcription window. The recording was discarded safely; try a shorter dictation."
+                "iOS ended the background transcription window. The recording was saved; open SpeakPaste to retry."
+            case .sharedStateUnavailable:
+                "The transcript finished, but SpeakPaste couldn't deliver it to the keyboard. The recording was saved; open SpeakPaste to retry."
+            case .captureBusy:
+                "SpeakPaste is already recording in the app. Stop that recording before starting another one."
             case .pendingTranscript:
                 "Switch to the SpeakPaste keyboard to insert the previous transcript before starting another dictation."
             }
@@ -44,15 +51,19 @@ final class DictationEngine {
     private let client: ElevenLabsClientProtocol
     private let defaults: UserDefaults
     private let history = HistoryStore()
+    private let recordingJournal: RecordingJournal
 
     private var sessionID: UUID?
     private var recordingURL: URL?
+    private var recordingCapture: RecordingJournalCapture?
+    private var recordingJournalEntry: RecordingJournalEntry?
     private var isStarting = false
     private var isStopping = false
     private var heartbeatTask: Task<Void, Never>?
     private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
     private var transcriptionTask: Task<TranscriptionResult, Error>?
     private var transcriptionAttemptID: UUID?
+    private var recorderEventCancellable: AnyCancellable?
     private let liveActivity = DictationLiveActivity()
 
     init(
@@ -61,10 +72,17 @@ final class DictationEngine {
             requestTimeout: 25,
             maximumConcurrentRequests: 1
         ),
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        recordingJournal: RecordingJournal = RecordingJournal()
     ) {
         self.client = client
         self.defaults = defaults
+        self.recordingJournal = recordingJournal
+        recorderEventCancellable = recorder.events.sink { [weak self] event in
+            Task { @MainActor [weak self] in
+                self?.handleRecorderEvent(event)
+            }
+        }
     }
 
     var isRecording: Bool { sessionID != nil && recorder.isRecording }
@@ -90,7 +108,9 @@ final class DictationEngine {
         defer { isStarting = false }
 
         guard let snapshot = store.beginBackgroundSession() else {
-            throw EngineError.pendingTranscript
+            throw store.isCaptureLeaseActive
+                ? EngineError.captureBusy
+                : EngineError.pendingTranscript
         }
         sessionID = snapshot.sessionID
         // Startup can include permission and Live Activity work. Keep the
@@ -105,7 +125,9 @@ final class DictationEngine {
             store.setPhase(
                 .failed,
                 sessionID: snapshot.sessionID,
-                errorMessage: EngineError.missingAPIKey.localizedDescription
+                errorMessage: EngineError.missingAPIKey.localizedDescription,
+                hasRecoverableAudio: false,
+                recoveryAction: .openContainingApp
             )
             finish()
             throw EngineError.missingAPIKey
@@ -114,7 +136,9 @@ final class DictationEngine {
             store.setPhase(
                 .failed,
                 sessionID: snapshot.sessionID,
-                errorMessage: EngineError.microphoneDenied.localizedDescription
+                errorMessage: EngineError.microphoneDenied.localizedDescription,
+                hasRecoverableAudio: false,
+                recoveryAction: .openContainingApp
             )
             finish()
             throw EngineError.microphoneDenied
@@ -132,20 +156,32 @@ final class DictationEngine {
             store.setPhase(
                 .failed,
                 sessionID: snapshot.sessionID,
-                errorMessage: error.localizedDescription
+                errorMessage: error.localizedDescription,
+                hasRecoverableAudio: false,
+                recoveryAction: .openContainingApp
             )
             finish()
             throw error
         }
 
         do {
-            recordingURL = try await recorder.start()
+            let capture = try recordingJournal.beginCapture(
+                id: snapshot.sessionID
+            )
+            recordingCapture = capture
+            recordingURL = try await recorder.start(
+                capture: capture,
+                in: recordingJournal
+            )
             let recordingStartedAt = Date()
-            store.setPhase(
+            guard store.setPhase(
                 .recording,
                 sessionID: snapshot.sessionID,
+                hasRecoverableAudio: true,
                 startedAt: recordingStartedAt
-            )
+            ) else {
+                throw EngineError.sharedStateUnavailable
+            }
             await liveActivity.update(
                 .recording,
                 sessionID: snapshot.sessionID,
@@ -153,8 +189,30 @@ final class DictationEngine {
             )
         } catch {
             let audioURL = recorder.stop() ?? recordingURL
-            if let audioURL { cleanUpRecording(at: audioURL) }
-            recordingURL = nil
+            var hasRecoverableAudio = false
+            if let recordingCapture {
+                do {
+                    try recordingJournal.abandonCapture(recordingCapture)
+                    self.recordingCapture = nil
+                } catch {
+                    recordingURL = (try? recordingJournal.audioURL(
+                        for: recordingCapture
+                    )) ?? audioURL
+                    recordingURL = finalizeProtectedRecording(
+                        at: recordingURL,
+                        sessionID: snapshot.sessionID,
+                        duration: recorder.duration
+                    )
+                    hasRecoverableAudio = recordingURL != nil
+                }
+            } else if recordingJournalEntry != nil {
+                hasRecoverableAudio = true
+            } else if let audioURL {
+                cleanUpRecording(at: audioURL)
+            }
+            if !hasRecoverableAudio {
+                recordingURL = nil
+            }
             let surfacedError: any Error
             if
                 case let AudioRecorderError.configurationFailed(stage, _) = error,
@@ -169,7 +227,9 @@ final class DictationEngine {
             store.setPhase(
                 .failed,
                 sessionID: snapshot.sessionID,
-                errorMessage: surfacedError.localizedDescription
+                errorMessage: surfacedError.localizedDescription,
+                hasRecoverableAudio: hasRecoverableAudio,
+                recoveryAction: .openContainingApp
             )
             finish()
             throw surfacedError
@@ -190,26 +250,33 @@ final class DictationEngine {
                 transcriptionAttemptID = nil
             }
         }
+        let duration = recorder.duration
+        let finalizedURL = recorder.stop() ?? recordingURL
+        _ = store.releaseCaptureLease(ownerID: sessionID)
+        let audioURL = finalizeProtectedRecording(
+            at: finalizedURL,
+            sessionID: sessionID,
+            duration: duration
+        )
+
         // Recording itself owns background execution through the audio session
         // and Live Activity. Start a fresh finite task at stop so a long
         // dictation cannot consume the transcription window before it begins.
         guard beginBackgroundExecution() else {
-            let audioURL = recorder.stop() ?? recordingURL
-            if let audioURL { cleanUpRecording(at: audioURL) }
             transcriptionAttemptID = nil
             stopHeartbeat()
             store.setPhase(
                 .failed,
                 sessionID: sessionID,
-                errorMessage: EngineError.backgroundTranscriptionUnavailable.localizedDescription
+                errorMessage: EngineError.backgroundTranscriptionUnavailable.localizedDescription,
+                hasRecoverableAudio: true,
+                recoveryAction: .openContainingApp
             )
             UINotificationFeedbackGenerator().notificationOccurred(.error)
             await liveActivity.end(.failed, sessionID: sessionID)
             finish()
             throw EngineError.backgroundTranscriptionUnavailable
         }
-        let audioURL = recorder.stop() ?? recordingURL
-        let duration = recorder.duration
         // Keep the App Group heartbeat alive through the network request. The
         // keyboard treats a silent owner as abandoned after 15 seconds; ending
         // the heartbeat here could erase a legitimate slow transcription.
@@ -229,12 +296,13 @@ final class DictationEngine {
             !key.isEmpty
         else {
             transcriptionAttemptID = nil
-            if let audioURL { cleanUpRecording(at: audioURL) }
             stopHeartbeat()
             store.setPhase(
                 .failed,
                 sessionID: sessionID,
-                errorMessage: EngineError.missingAPIKey.localizedDescription
+                errorMessage: EngineError.missingAPIKey.localizedDescription,
+                hasRecoverableAudio: true,
+                recoveryAction: .openContainingApp
             )
             await liveActivity.end(.failed, sessionID: sessionID)
             finish()
@@ -262,11 +330,10 @@ final class DictationEngine {
             else {
                 throw EngineError.backgroundTranscriptionExpired
             }
-            // Expiration after Scribe has returned must not replace a
-            // transcript being committed with a failure.
+            // The network work is complete. Keep the attempt token live until
+            // the transcript itself has reached durable shared storage.
             transcriptionTask = nil
-            transcriptionAttemptID = nil
-            history.add(
+            let historyPersisted = history.add(
                 TranscriptItem(
                     text: result.text,
                     languageCode: result.languageCode,
@@ -280,13 +347,19 @@ final class DictationEngine {
             // The active keyboard inserts at the cursor on the system's clock.
             // A background pasteboard write was proven to silently no-op on
             // device, so history remains the explicit manual fallback.
-            store.setPhase(
+            guard store.setPhase(
                 .completed,
                 sessionID: sessionID,
-                transcript: result.text
-            )
+                transcript: result.text,
+                historyPersisted: historyPersisted
+            ) else {
+                throw EngineError.sharedStateUnavailable
+            }
+            // Expiration after the durable commit must not replace a completed
+            // transcript with failure while ActivityKit is winding down.
+            transcriptionAttemptID = nil
             UINotificationFeedbackGenerator().notificationOccurred(.success)
-            cleanUpRecording(at: audioURL)
+            consumeProtectedRecording(fallbackURL: audioURL)
             await liveActivity.end(.completed, sessionID: sessionID)
             finish()
         } catch {
@@ -298,12 +371,13 @@ final class DictationEngine {
             }
             transcriptionTask = nil
             transcriptionAttemptID = nil
-            cleanUpRecording(at: audioURL)
             stopHeartbeat()
             store.setPhase(
                 .failed,
                 sessionID: sessionID,
-                errorMessage: error.localizedDescription
+                errorMessage: error.localizedDescription,
+                hasRecoverableAudio: true,
+                recoveryAction: .openContainingApp
             )
             UINotificationFeedbackGenerator().notificationOccurred(.error)
             await liveActivity.end(.failed, sessionID: sessionID)
@@ -316,10 +390,27 @@ final class DictationEngine {
         guard let sessionID, !isStarting, !isStopping else { return }
         isStopping = true
         defer { isStopping = false }
-        recorder.stop()
+        let audioURL = recorder.stop() ?? recordingURL
+        _ = store.releaseCaptureLease(ownerID: sessionID)
+        recordingURL = finalizeProtectedRecording(
+            at: audioURL,
+            sessionID: sessionID,
+            duration: recorder.duration
+        )
+        guard discardProtectedRecording(fallbackURL: recordingURL) else {
+            store.setPhase(
+                .failed,
+                sessionID: sessionID,
+                errorMessage: "SpeakPaste couldn't discard the recording. Open SpeakPaste to recover it.",
+                hasRecoverableAudio: true,
+                recoveryAction: .openContainingApp
+            )
+            await liveActivity.end(.failed, sessionID: sessionID)
+            finish()
+            return
+        }
         stopHeartbeat()
         store.setPhase(.cancelled, sessionID: sessionID)
-        if let recordingURL { cleanUpRecording(at: recordingURL) }
         await liveActivity.end(.cancelled, sessionID: sessionID)
         finish()
     }
@@ -336,9 +427,10 @@ final class DictationEngine {
     private func startHeartbeat(sessionID: UUID) {
         heartbeatTask?.cancel()
         heartbeatTask = Task { [weak self] in
+            var tick = 0
             while !Task.isCancelled {
                 do {
-                    try await Task.sleep(for: .seconds(3))
+                    try await Task.sleep(for: .milliseconds(120))
                 } catch {
                     return
                 }
@@ -349,8 +441,26 @@ final class DictationEngine {
                 else {
                     return
                 }
-                // Without this the keyboard treats the session as abandoned.
-                self.store.touch(sessionID: sessionID)
+
+                tick += 1
+                if tick.isMultiple(of: 25) {
+                    // Without this the keyboard treats the session as abandoned.
+                    self.store.touch(sessionID: sessionID)
+                }
+
+                let acceptedCommands: Set<SharedDictationCommand> =
+                    self.recorder.isRecording ? [.stop, .cancel] : []
+                switch self.store.takePendingCommand(
+                    sessionID: sessionID,
+                    accepting: acceptedCommands
+                ) {
+                case .stop:
+                    Task { try? await self.stop() }
+                case .cancel:
+                    Task { await self.cancel() }
+                case .none, .retry:
+                    break
+                }
             }
         }
     }
@@ -361,13 +471,126 @@ final class DictationEngine {
     }
 
     private func finish() {
+        if let sessionID {
+            _ = store.releaseCaptureLease(ownerID: sessionID)
+        }
         transcriptionTask?.cancel()
         transcriptionTask = nil
         transcriptionAttemptID = nil
         sessionID = nil
         recordingURL = nil
+        recordingCapture = nil
+        recordingJournalEntry = nil
         stopHeartbeat()
         endBackgroundExecution()
+    }
+
+    private func finalizeProtectedRecording(
+        at finalizedURL: URL?,
+        sessionID: UUID,
+        duration: TimeInterval
+    ) -> URL? {
+        guard let finalizedURL else { return nil }
+        if let recordingCapture {
+            do {
+                let entry = try recordingJournal.finalizeCapture(
+                    recordingCapture,
+                    duration: duration
+                )
+                let protectedURL = try recordingJournal.audioURL(for: entry)
+                recordingJournalEntry = entry
+                self.recordingCapture = nil
+                recordingURL = protectedURL
+                return protectedURL
+            } catch {
+                // The audio remains journal-owned in Active and can be adopted
+                // by the containing app after a process exit.
+                recordingURL = finalizedURL
+                return finalizedURL
+            }
+        }
+        if recordingJournalEntry != nil {
+            return recordingURL ?? finalizedURL
+        }
+        do {
+            let entry = try recordingJournal.stageRecording(
+                at: finalizedURL,
+                id: sessionID,
+                duration: duration
+            )
+            let protectedURL = try recordingJournal.audioURL(for: entry)
+            recordingJournalEntry = entry
+            recordingURL = protectedURL
+            if finalizedURL.standardizedFileURL != protectedURL.standardizedFileURL {
+                cleanUpRecording(at: finalizedURL)
+            }
+            return protectedURL
+        } catch {
+            // Keep the original file usable for this attempt. The shared error
+            // path opens the app if transcription fails.
+            recordingURL = finalizedURL
+            return finalizedURL
+        }
+    }
+
+    private func consumeProtectedRecording(fallbackURL: URL) {
+        if let recordingCapture {
+            if let entry = try? recordingJournal.finalizeCapture(
+                recordingCapture,
+                duration: recorder.duration
+            ) {
+                try? recordingJournal.consume(entry)
+            }
+        } else if let recordingJournalEntry {
+            try? recordingJournal.consume(recordingJournalEntry)
+        } else {
+            cleanUpRecording(at: fallbackURL)
+        }
+        recordingJournalEntry = nil
+        recordingCapture = nil
+        recordingURL = nil
+    }
+
+    private func discardProtectedRecording(fallbackURL: URL?) -> Bool {
+        do {
+            if let recordingCapture {
+                let entry = try recordingJournal.finalizeCapture(
+                    recordingCapture,
+                    duration: recorder.duration
+                )
+                try recordingJournal.discard(entry)
+            } else if let recordingJournalEntry {
+                try recordingJournal.discard(recordingJournalEntry)
+            } else if let fallbackURL {
+                try FileManager.default.removeItem(at: fallbackURL)
+            }
+            recordingJournalEntry = nil
+            recordingCapture = nil
+            recordingURL = nil
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private func handleRecorderEvent(_ event: AudioRecorderEvent) {
+        let shouldFinalize: Bool
+        switch event {
+        case .maximumDurationReached,
+             .interruptionBegan,
+             .recordingEndedUnexpectedly:
+            shouldFinalize = true
+        case let .routeChanged(change):
+            shouldFinalize = change.finalizedRecordingURL != nil
+        case .interruptionEnded,
+             .noAudioDetected,
+             .maximumDurationApproaching:
+            shouldFinalize = false
+        }
+        guard shouldFinalize, sessionID != nil, !isStopping else { return }
+        Task { [weak self] in
+            try? await self?.stop()
+        }
     }
 
     private func cleanUpRecording(at url: URL) {
@@ -403,16 +626,18 @@ final class DictationEngine {
         transcriptionTask?.cancel()
         transcriptionTask = nil
         transcriptionAttemptID = nil
-        if let recordingURL { cleanUpRecording(at: recordingURL) }
         stopHeartbeat()
         store.setPhase(
             .failed,
             sessionID: sessionID,
-            errorMessage: EngineError.backgroundTranscriptionExpired.localizedDescription
+            errorMessage: EngineError.backgroundTranscriptionExpired.localizedDescription,
+            hasRecoverableAudio: true,
+            recoveryAction: .openContainingApp
         )
         UINotificationFeedbackGenerator().notificationOccurred(.error)
         self.sessionID = nil
         recordingURL = nil
+        recordingJournalEntry = nil
 
         // ActivityKit closure is session-scoped and best effort after the
         // durable failure. UIKit requires the expired background assertion to

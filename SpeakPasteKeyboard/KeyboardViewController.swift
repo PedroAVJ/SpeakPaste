@@ -1,3 +1,4 @@
+import CryptoKit
 import ObjectiveC.runtime
 import SwiftUI
 import UIKit
@@ -21,6 +22,9 @@ final class KeyboardViewController: UIInputViewController {
             guard let self else { return .failed(attempts: ["controller-deallocated"]) }
             return await self.open(url: url)
         },
+        currentInsertionContextFingerprint: { [weak self] in
+            self?.insertionContextFingerprint() ?? "controller-deallocated"
+        },
         insertTranscript: { [weak self] transcript in
             self?.insert(transcript: transcript)
         },
@@ -40,7 +44,16 @@ final class KeyboardViewController: UIInputViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
 
-        let keyboardView = KeyboardView(model: model)
+        let keyboardView = KeyboardView(model: model) { [weak self] in
+            guard let proxy = self?.textDocumentProxy else {
+                return .unavailable
+            }
+            return KeyboardDocumentContext(
+                textBeforeInput: proxy.documentContextBeforeInput,
+                autocapitalizationType: proxy.autocapitalizationType,
+                returnKeyType: proxy.returnKeyType
+            )
+        }
         let hostingController = UIHostingController(rootView: keyboardView)
         hostingController.view.backgroundColor = .clear
         addChild(hostingController)
@@ -234,5 +247,31 @@ final class KeyboardViewController: UIInputViewController {
         }
         textDocumentProxy.insertText(text)
         UIDevice.current.playInputClick()
+    }
+
+    /// Keep host text out of shared storage while still detecting a field,
+    /// selection, or cursor change during the app switch. `documentIdentifier`
+    /// distinguishes two otherwise-empty fields in the same host.
+    private func insertionContextFingerprint() -> String {
+        let proxy = textDocumentProxy
+        let before = proxy.documentContextBeforeInput.map {
+            String($0.suffix(128))
+        } ?? "<nil>"
+        let after = proxy.documentContextAfterInput.map {
+            String($0.prefix(128))
+        } ?? "<nil>"
+        let selected = proxy.selectedText.map {
+            String($0.prefix(128))
+        } ?? "<nil>"
+        let context = [
+            proxy.documentIdentifier.uuidString,
+            before,
+            after,
+            selected,
+            String(proxy.keyboardType?.rawValue ?? -1),
+        ].joined(separator: "\u{1F}")
+        return SHA256.hash(data: Data(context.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
     }
 }

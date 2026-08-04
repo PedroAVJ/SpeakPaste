@@ -1,8 +1,11 @@
+import Darwin
 import Foundation
 
 enum SharedDictationConstants {
     static let appGroupIdentifier = "group.com.example.SpeakPaste"
     static let storageKey = "active-dictation-session-v1"
+    static let stateFileName = "active-dictation-session-v2.json"
+    static let stateLockFileName = "active-dictation-session-v2.lock"
     /// The App Group container is not reachable over `devicectl`, so each
     /// process also mirrors its session diagnostics into its own Documents
     /// directory. A device-only launch or return failure stays actionable
@@ -18,13 +21,26 @@ enum SharedDictationPhase: String, Codable {
     case recording
     case transcribing
     case completed
+    /// The extension persisted its intent to insert before touching the host
+    /// field. If it dies here, automatic replay would risk duplicate text.
+    case inserting
+    /// Dictation completed, but the host field/cursor changed while the app was
+    /// recording. The transcript remains recoverable for explicit insertion.
+    case deliveryBlocked
     case failed
     case cancelled
     case inserted
     case handled
 }
 
-enum SharedDictationCommand: String, Codable {
+enum SharedDictationRecoveryAction: String, Codable {
+    case openContainingApp
+    case retryTranscription
+    case insertHere
+    case reviewPossibleInsertion
+}
+
+enum SharedDictationCommand: String, Codable, Hashable {
     case none
     case stop
     case cancel
@@ -37,6 +53,26 @@ struct SharedDictationSnapshot: Codable, Equatable {
     var command: SharedDictationCommand
     var transcript: String?
     var errorMessage: String?
+    /// Whether a History row contains this transcript. `false` is expected
+    /// when the user selected the Never retention policy.
+    var historyPersisted: Bool? = nil
+    /// True only when a private, journaled audio file can be retried after the
+    /// process exits. Ordinary setup failures remain safely dismissible.
+    var hasRecoverableAudio: Bool? = nil
+    /// Privacy-safe hash of the host input context at the moment recording was
+    /// requested. The extension compares this before automatic insertion.
+    var insertionContextFingerprint: String? = nil
+    var recoveryAction: SharedDictationRecoveryAction? = nil
+    /// Monotonic counters make cross-process state changes diagnosable and let
+    /// the recorder consume each command at most once.
+    var revision: UInt64? = nil
+    var commandSequence: UInt64? = nil
+    var acknowledgedCommandSequence: UInt64? = nil
+    /// Cross-entry-point microphone lease. Manual in-app recording does not
+    /// need a keyboard-delivery session, but it must still exclude a Back Tap
+    /// or App Intent from opening a second AVAudioSession recorder.
+    var captureOwnerID: UUID? = nil
+    var captureLeaseUpdatedAt: Date? = nil
     var returnBundleIdentifier: String?
     var returnProcessIdentifier: Int32?
     var hostResolutionAttempts: [String]?
@@ -58,6 +94,15 @@ struct SharedDictationSnapshot: Codable, Equatable {
             command: .none,
             transcript: nil,
             errorMessage: nil,
+            historyPersisted: nil,
+            hasRecoverableAudio: nil,
+            insertionContextFingerprint: nil,
+            recoveryAction: nil,
+            revision: 0,
+            commandSequence: 0,
+            acknowledgedCommandSequence: 0,
+            captureOwnerID: nil,
+            captureLeaseUpdatedAt: nil,
             returnBundleIdentifier: nil,
             returnProcessIdentifier: nil,
             hostResolutionAttempts: nil,
@@ -74,50 +119,89 @@ struct SharedDictationSnapshot: Codable, Equatable {
 
 struct SharedDictationStore: @unchecked Sendable {
     private let defaults: UserDefaults?
+    private let storageDirectory: URL?
+    private let requiresSharedContainer: Bool
 
-    init(suiteName: String = SharedDictationConstants.appGroupIdentifier) {
+    init(
+        suiteName: String = SharedDictationConstants.appGroupIdentifier,
+        storageDirectory: URL? = nil
+    ) {
         defaults = UserDefaults(suiteName: suiteName)
+        requiresSharedContainer =
+            suiteName == SharedDictationConstants.appGroupIdentifier
+        if let storageDirectory {
+            self.storageDirectory = storageDirectory
+        } else if suiteName == SharedDictationConstants.appGroupIdentifier {
+            self.storageDirectory = FileManager.default.containerURL(
+                forSecurityApplicationGroupIdentifier: suiteName
+            )
+        } else {
+            // Tests and previews can continue to use isolated UserDefaults.
+            self.storageDirectory = nil
+        }
     }
 
-    var isAvailable: Bool { defaults != nil }
+    var isAvailable: Bool {
+        storageDirectory != nil
+            || (!requiresSharedContainer && defaults != nil)
+    }
+
+    var isCaptureLeaseActive: Bool {
+        let snapshot = load()
+        return hasLiveCaptureLease(snapshot)
+    }
 
     func load() -> SharedDictationSnapshot {
-        // The containing app and keyboard extension are separate processes.
-        // Refresh cfprefsd before polling commands written by the other side.
-        defaults?.synchronize()
-        guard
-            let data = defaults?.data(forKey: SharedDictationConstants.storageKey),
-            let snapshot = try? JSONDecoder().decode(SharedDictationSnapshot.self, from: data)
-        else {
-            return .idle
-        }
-        return snapshot
+        withStateLock { loadUnlocked() } ?? loadUnlocked()
     }
 
     @discardableResult
     func begin(
         returnBundleIdentifier: String?,
-        returnProcessIdentifier: Int32? = nil
-    ) -> SharedDictationSnapshot {
-        let snapshot = SharedDictationSnapshot(
-            sessionID: UUID(),
-            phase: .launching,
-            command: .none,
-            transcript: nil,
-            errorMessage: nil,
-            returnBundleIdentifier: returnBundleIdentifier,
-            returnProcessIdentifier: returnProcessIdentifier,
-            hostResolutionAttempts: nil,
-            launchAttempts: nil,
-            successfulLaunchRoute: nil,
-            returnAttempts: nil,
-            incomingURLDeliveryRoute: nil,
-            incomingURLSourceApplication: nil,
-            startedAt: Date(),
-            updatedAt: Date()
-        )
-        save(snapshot)
-        return snapshot
+        returnProcessIdentifier: Int32? = nil,
+        insertionContextFingerprint: String? = nil
+    ) -> SharedDictationSnapshot? {
+        withStateLock {
+            let previous = loadUnlocked()
+            guard [
+                SharedDictationPhase.idle,
+                .inserted,
+                .handled,
+                .cancelled,
+            ].contains(previous.phase) else {
+                return nil
+            }
+            guard !hasLiveCaptureLease(previous) else { return nil }
+            let sessionID = UUID()
+            let snapshot = SharedDictationSnapshot(
+                sessionID: sessionID,
+                phase: .launching,
+                command: .none,
+                transcript: nil,
+                errorMessage: nil,
+                historyPersisted: nil,
+                hasRecoverableAudio: nil,
+                insertionContextFingerprint: insertionContextFingerprint,
+                recoveryAction: nil,
+                revision: (previous.revision ?? 0) + 1,
+                commandSequence: 0,
+                acknowledgedCommandSequence: 0,
+                captureOwnerID: sessionID,
+                captureLeaseUpdatedAt: Date(),
+                returnBundleIdentifier: returnBundleIdentifier,
+                returnProcessIdentifier: returnProcessIdentifier,
+                hostResolutionAttempts: nil,
+                launchAttempts: nil,
+                successfulLaunchRoute: nil,
+                returnAttempts: nil,
+                incomingURLDeliveryRoute: nil,
+                incomingURLSourceApplication: nil,
+                startedAt: Date(),
+                updatedAt: Date()
+            )
+            guard saveUnlocked(snapshot) else { return nil }
+            return snapshot
+        } ?? nil
     }
 
     /// Start an intent-driven session while iOS grants background capture.
@@ -126,27 +210,44 @@ struct SharedDictationStore: @unchecked Sendable {
     /// that the keyboard has not inserted yet.
     @discardableResult
     func beginBackgroundSession() -> SharedDictationSnapshot? {
-        let current = load()
-        let hasPendingTranscript = current.phase == .completed
-            && current.transcript?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .isEmpty == false
-        guard !hasPendingTranscript else { return nil }
+        withStateLock {
+            let current = loadUnlocked()
+            // A Back Tap/intent and the keyboard can arrive together. Session
+            // creation is a compare-and-swap: only terminal sessions may be
+            // replaced, so neither entry point can steal an active recorder or
+            // a recoverable failed delivery from the other.
+            guard [
+                SharedDictationPhase.idle,
+                .inserted,
+                .handled,
+                .cancelled,
+            ].contains(current.phase) else {
+                return nil
+            }
+            guard !hasLiveCaptureLease(current) else { return nil }
 
-        var snapshot = SharedDictationSnapshot.idle
-        snapshot.phase = .starting
-        save(snapshot)
-        return snapshot
+            var snapshot = SharedDictationSnapshot.idle
+            snapshot.phase = .starting
+            snapshot.revision = (current.revision ?? 0) + 1
+            snapshot.captureOwnerID = snapshot.sessionID
+            snapshot.captureLeaseUpdatedAt = Date()
+            guard saveUnlocked(snapshot) else { return nil }
+            return snapshot
+        } ?? nil
     }
 
+    @discardableResult
     func setPhase(
         _ phase: SharedDictationPhase,
         sessionID: UUID,
         transcript: String? = nil,
         errorMessage: String? = nil,
+        historyPersisted: Bool? = nil,
+        hasRecoverableAudio: Bool? = nil,
+        recoveryAction: SharedDictationRecoveryAction? = nil,
         clipboardLanded: Bool? = nil,
         startedAt: Date? = nil
-    ) {
+    ) -> Bool {
         update(sessionID: sessionID) { snapshot in
             if let startedAt {
                 snapshot.startedAt = startedAt
@@ -154,9 +255,13 @@ struct SharedDictationStore: @unchecked Sendable {
                 snapshot.startedAt = Date()
             }
             snapshot.phase = phase
-            snapshot.command = .none
             snapshot.transcript = transcript
             snapshot.errorMessage = errorMessage
+            snapshot.historyPersisted = historyPersisted
+            if let hasRecoverableAudio {
+                snapshot.hasRecoverableAudio = hasRecoverableAudio
+            }
+            snapshot.recoveryAction = recoveryAction
             snapshot.clipboardLanded = clipboardLanded
         }
     }
@@ -220,6 +325,147 @@ struct SharedDictationStore: @unchecked Sendable {
     func send(_ command: SharedDictationCommand, sessionID: UUID) {
         update(sessionID: sessionID) { snapshot in
             snapshot.command = command
+            snapshot.commandSequence = (snapshot.commandSequence ?? 0) + 1
+        }
+    }
+
+    /// Reserve the microphone for a foreground recording without creating a
+    /// keyboard-delivery session. The lease expires if its owner stops
+    /// heartbeating, so a force-quit cannot block dictation forever.
+    @discardableResult
+    func acquireCaptureLease(ownerID: UUID) -> Bool {
+        withStateLock {
+            var snapshot = loadUnlocked()
+            guard
+                [.idle, .inserted, .handled, .cancelled]
+                    .contains(snapshot.phase),
+                !hasLiveCaptureLease(snapshot)
+                    || snapshot.captureOwnerID == ownerID
+            else {
+                return false
+            }
+            snapshot.captureOwnerID = ownerID
+            snapshot.captureLeaseUpdatedAt = Date()
+            advanceRevision(&snapshot)
+            return saveUnlocked(snapshot)
+        } ?? false
+    }
+
+    @discardableResult
+    func renewCaptureLease(ownerID: UUID) -> Bool {
+        withStateLock {
+            var snapshot = loadUnlocked()
+            guard snapshot.captureOwnerID == ownerID else { return false }
+            snapshot.captureLeaseUpdatedAt = Date()
+            advanceRevision(&snapshot)
+            return saveUnlocked(snapshot)
+        } ?? false
+    }
+
+    @discardableResult
+    func releaseCaptureLease(ownerID: UUID) -> Bool {
+        withStateLock {
+            var snapshot = loadUnlocked()
+            guard snapshot.captureOwnerID == ownerID else { return false }
+            snapshot.captureOwnerID = nil
+            snapshot.captureLeaseUpdatedAt = nil
+            advanceRevision(&snapshot)
+            return saveUnlocked(snapshot)
+        } ?? false
+    }
+
+    /// An App Intent starts outside the keyboard process. If the keyboard is
+    /// already visible, let it bind the current host-field fingerprint during
+    /// the active session. A late keyboard with no fingerprint must require an
+    /// explicit insertion instead of guessing that the field is unchanged.
+    @discardableResult
+    func claimInsertionContext(
+        sessionID: UUID,
+        fingerprint: String
+    ) -> Bool {
+        updateIf(sessionID: sessionID) { snapshot in
+            guard
+                [.launching, .starting, .recording, .transcribing]
+                    .contains(snapshot.phase),
+                snapshot.insertionContextFingerprint == nil
+            else {
+                return false
+            }
+            snapshot.insertionContextFingerprint = fingerprint
+            return true
+        }
+    }
+
+    /// Atomically consumes a keyboard command. Polling the same snapshot twice
+    /// cannot trigger two retries, and a heartbeat can no longer overwrite a
+    /// command written between its read and write.
+    func takePendingCommand(
+        sessionID: UUID,
+        accepting allowedCommands: Set<SharedDictationCommand>
+    ) -> SharedDictationCommand {
+        withStateLock {
+            var snapshot = loadUnlocked()
+            guard
+                snapshot.sessionID == sessionID,
+                snapshot.command != .none,
+                allowedCommands.contains(snapshot.command)
+            else {
+                return .none
+            }
+
+            let command = snapshot.command
+            snapshot.command = .none
+            snapshot.acknowledgedCommandSequence = snapshot.commandSequence
+            advanceRevision(&snapshot)
+            guard saveUnlocked(snapshot) else { return .none }
+            return command
+        } ?? .none
+    }
+
+    /// Persist the insertion boundary before mutating the host document. A
+    /// crash after this point becomes an explicit recovery choice instead of
+    /// silently replaying text into the field.
+    @discardableResult
+    func markInsertionStarted(sessionID: UUID) -> Bool {
+        updateIf(sessionID: sessionID) { snapshot in
+            guard
+                snapshot.phase == .completed,
+                snapshot.transcript?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .isEmpty == false
+            else {
+                return false
+            }
+            snapshot.phase = .inserting
+            snapshot.command = .none
+            snapshot.errorMessage = "SpeakPaste may already have inserted this dictation. Review the field before inserting again."
+            snapshot.recoveryAction = .reviewPossibleInsertion
+            return true
+        }
+    }
+
+    func blockDelivery(sessionID: UUID, message: String) {
+        update(sessionID: sessionID) { snapshot in
+            guard snapshot.phase == .completed else { return }
+            snapshot.phase = .deliveryBlocked
+            snapshot.command = .none
+            snapshot.errorMessage = message
+            snapshot.recoveryAction = .insertHere
+        }
+    }
+
+    /// Explicit recovery after a context change or uncertain prior insertion.
+    /// It deliberately returns to `completed`; the caller immediately records
+    /// `inserting` again before touching the document proxy.
+    func allowExplicitInsertion(sessionID: UUID) {
+        update(sessionID: sessionID) { snapshot in
+            guard [.deliveryBlocked, .inserting].contains(snapshot.phase) else {
+                return
+            }
+            snapshot.phase = .completed
+            snapshot.errorMessage = nil
+            snapshot.recoveryAction = nil
+            snapshot.hasRecoverableAudio = nil
         }
     }
 
@@ -229,6 +475,8 @@ struct SharedDictationStore: @unchecked Sendable {
             snapshot.command = .none
             snapshot.transcript = nil
             snapshot.errorMessage = nil
+            snapshot.recoveryAction = nil
+            snapshot.hasRecoverableAudio = nil
         }
     }
 
@@ -240,30 +488,167 @@ struct SharedDictationStore: @unchecked Sendable {
             snapshot.command = .none
             snapshot.transcript = nil
             snapshot.errorMessage = nil
+            snapshot.recoveryAction = nil
         }
     }
 
-    func reset() {
-        save(.idle)
+    @discardableResult
+    func reset(sessionID: UUID) -> Bool {
+        withStateLock {
+            let current = loadUnlocked()
+            guard current.sessionID == sessionID else { return false }
+            var idle = SharedDictationSnapshot.idle
+            idle.revision = (current.revision ?? 0) + 1
+            return saveUnlocked(idle)
+        } ?? false
     }
 
+    @discardableResult
     private func update(
         sessionID: UUID,
         mutation: (inout SharedDictationSnapshot) -> Void
-    ) {
-        var snapshot = load()
-        guard snapshot.sessionID == sessionID else { return }
-        mutation(&snapshot)
-        snapshot.updatedAt = Date()
-        save(snapshot)
+    ) -> Bool {
+        withStateLock {
+            var snapshot = loadUnlocked()
+            guard snapshot.sessionID == sessionID else { return false }
+            mutation(&snapshot)
+            if snapshot.captureOwnerID == sessionID {
+                snapshot.captureLeaseUpdatedAt = Date()
+            }
+            advanceRevision(&snapshot)
+            return saveUnlocked(snapshot)
+        } ?? false
     }
 
-    private func save(_ snapshot: SharedDictationSnapshot) {
-        guard let data = try? JSONEncoder().encode(snapshot) else { return }
+    @discardableResult
+    private func updateIf(
+        sessionID: UUID,
+        mutation: (inout SharedDictationSnapshot) -> Bool
+    ) -> Bool {
+        withStateLock {
+            var snapshot = loadUnlocked()
+            guard snapshot.sessionID == sessionID, mutation(&snapshot) else {
+                return false
+            }
+            if snapshot.captureOwnerID == sessionID {
+                snapshot.captureLeaseUpdatedAt = Date()
+            }
+            advanceRevision(&snapshot)
+            return saveUnlocked(snapshot)
+        } ?? false
+    }
+
+    private func loadUnlocked() -> SharedDictationSnapshot {
+        // The JSON file plus flock is the source of truth in production. The
+        // defaults value remains a migration/fallback path for older installs
+        // and isolated unit-test suites.
+        if
+            let stateURL,
+            let data = try? Data(contentsOf: stateURL),
+            let snapshot = try? JSONDecoder().decode(
+                SharedDictationSnapshot.self,
+                from: data
+            )
+        {
+            // Once the locked app-group file exists it is authoritative. The
+            // defaults mirror is written second and may legitimately lag if a
+            // process dies between the two writes.
+            return snapshot
+        }
+
+        defaults?.synchronize()
+        guard
+            let data = defaults?.data(
+                forKey: SharedDictationConstants.storageKey
+            ),
+            let snapshot = try? JSONDecoder().decode(
+                SharedDictationSnapshot.self,
+                from: data
+            )
+        else {
+            return .idle
+        }
+        return snapshot
+    }
+
+    @discardableResult
+    private func saveUnlocked(_ snapshot: SharedDictationSnapshot) -> Bool {
+        guard let data = try? JSONEncoder().encode(snapshot) else {
+            return false
+        }
+        if let stateURL {
+            do {
+                try FileManager.default.createDirectory(
+                    at: stateURL.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+                try data.write(to: stateURL, options: [.atomic])
+            } catch {
+                return false
+            }
+        } else {
+            guard defaults != nil else { return false }
+        }
         defaults?.set(data, forKey: SharedDictationConstants.storageKey)
         // Ensure Stop/Cancel is visible immediately to a background recorder.
         defaults?.synchronize()
         mirrorDiagnostics(snapshot)
+        return true
+    }
+
+    private var stateURL: URL? {
+        storageDirectory?.appendingPathComponent(
+            SharedDictationConstants.stateFileName,
+            isDirectory: false
+        )
+    }
+
+    private var lockURL: URL? {
+        storageDirectory?.appendingPathComponent(
+            SharedDictationConstants.stateLockFileName,
+            isDirectory: false
+        )
+    }
+
+    private func advanceRevision(_ snapshot: inout SharedDictationSnapshot) {
+        snapshot.revision = (snapshot.revision ?? 0) + 1
+        snapshot.updatedAt = Date()
+    }
+
+    private func hasLiveCaptureLease(
+        _ snapshot: SharedDictationSnapshot,
+        now: Date = Date()
+    ) -> Bool {
+        guard
+            snapshot.captureOwnerID != nil,
+            let updatedAt = snapshot.captureLeaseUpdatedAt
+        else {
+            return false
+        }
+        return now.timeIntervalSince(updatedAt) < 15
+    }
+
+    private func withStateLock<T>(_ operation: () -> T) -> T? {
+        guard let lockURL else { return operation() }
+        do {
+            try FileManager.default.createDirectory(
+                at: lockURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+        } catch {
+            return nil
+        }
+
+        let descriptor = Darwin.open(
+            lockURL.path,
+            O_CREAT | O_RDWR | O_EXLOCK,
+            S_IRUSR | S_IWUSR
+        )
+        guard descriptor >= 0 else { return nil }
+        // `O_EXLOCK` acquires the advisory lock atomically with open; closing
+        // the descriptor releases it on every Darwin platform.
+        defer { Darwin.close(descriptor) }
+        return operation()
     }
 
     private func mirrorDiagnostics(_ snapshot: SharedDictationSnapshot) {

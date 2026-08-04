@@ -68,10 +68,10 @@ final class SharedDictationStoreTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let store = SharedDictationStore(suiteName: suiteName)
 
-        let session = store.begin(
+        let session = try XCTUnwrap(store.begin(
             returnBundleIdentifier: "com.openai.chat",
             returnProcessIdentifier: 4_281
-        )
+        ))
         XCTAssertEqual(store.load().phase, .launching)
         XCTAssertEqual(store.load().returnBundleIdentifier, "com.openai.chat")
         XCTAssertEqual(store.load().returnProcessIdentifier, 4_281)
@@ -122,6 +122,13 @@ final class SharedDictationStoreTests: XCTestCase {
         store.setPhase(.recording, sessionID: session.sessionID)
         store.send(.stop, sessionID: session.sessionID)
         XCTAssertEqual(store.load().command, .stop)
+        XCTAssertEqual(
+            store.takePendingCommand(
+                sessionID: session.sessionID,
+                accepting: [.stop]
+            ),
+            .stop
+        )
 
         store.setPhase(.completed, sessionID: session.sessionID, transcript: "Hello world")
         XCTAssertEqual(store.load().transcript, "Hello world")
@@ -138,8 +145,11 @@ final class SharedDictationStoreTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let store = SharedDictationStore(suiteName: suiteName)
 
-        let stale = store.begin(returnBundleIdentifier: nil)
-        let current = store.begin(returnBundleIdentifier: "com.apple.MobileSMS")
+        let stale = try XCTUnwrap(store.begin(returnBundleIdentifier: nil))
+        store.setPhase(.cancelled, sessionID: stale.sessionID)
+        let current = try XCTUnwrap(
+            store.begin(returnBundleIdentifier: "com.apple.MobileSMS")
+        )
         store.setPhase(.failed, sessionID: stale.sessionID, errorMessage: "Stale")
 
         XCTAssertEqual(store.load().sessionID, current.sessionID)
@@ -159,6 +169,78 @@ final class SharedDictationStoreTests: XCTestCase {
         store.setPhase(.recording, sessionID: session.sessionID)
         XCTAssertEqual(store.load().phase, .recording)
         XCTAssertGreaterThanOrEqual(store.load().startedAt, session.startedAt)
+    }
+
+    func testBackgroundSessionCannotReplaceKeyboardOwnedSession() throws {
+        let suiteName = "SharedDictationStoreTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = SharedDictationStore(suiteName: suiteName)
+
+        let keyboardSession = try XCTUnwrap(store.begin(
+            returnBundleIdentifier: "com.apple.mobilenotes"
+        ))
+        XCTAssertNil(store.beginBackgroundSession())
+        XCTAssertEqual(store.load().sessionID, keyboardSession.sessionID)
+
+        store.setPhase(.recording, sessionID: keyboardSession.sessionID)
+        XCTAssertNil(store.beginBackgroundSession())
+        XCTAssertEqual(store.load().phase, .recording)
+    }
+
+    func testKeyboardSessionCannotReplaceIntentOwnedSession() throws {
+        let suiteName = "SharedDictationStoreTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = SharedDictationStore(suiteName: suiteName)
+
+        let intentSession = try XCTUnwrap(store.beginBackgroundSession())
+        XCTAssertNil(
+            store.begin(returnBundleIdentifier: "com.apple.mobilenotes")
+        )
+        XCTAssertEqual(store.load().sessionID, intentSession.sessionID)
+        XCTAssertEqual(store.load().phase, .starting)
+    }
+
+    func testForegroundCaptureLeaseExcludesKeyboardAndIntentRecorders() throws {
+        let suiteName = "SharedDictationStoreTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = SharedDictationStore(suiteName: suiteName)
+        let foregroundOwner = UUID()
+
+        XCTAssertTrue(store.acquireCaptureLease(ownerID: foregroundOwner))
+        XCTAssertTrue(store.isCaptureLeaseActive)
+        XCTAssertNil(store.begin(returnBundleIdentifier: "com.openai.chat"))
+        XCTAssertNil(store.beginBackgroundSession())
+        XCTAssertFalse(store.releaseCaptureLease(ownerID: UUID()))
+
+        XCTAssertTrue(store.releaseCaptureLease(ownerID: foregroundOwner))
+        let keyboard = try XCTUnwrap(
+            store.begin(returnBundleIdentifier: "com.openai.chat")
+        )
+        XCTAssertEqual(store.load().captureOwnerID, keyboard.sessionID)
+        XCTAssertTrue(store.isCaptureLeaseActive)
+    }
+
+    func testExpiredCaptureLeaseCannotBlockANewRecorder() throws {
+        let suiteName = "SharedDictationStoreTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        var stale = SharedDictationSnapshot.idle
+        stale.captureOwnerID = UUID()
+        stale.captureLeaseUpdatedAt = Date().addingTimeInterval(-60)
+        defaults.set(
+            try JSONEncoder().encode(stale),
+            forKey: SharedDictationConstants.storageKey
+        )
+
+        let session = try XCTUnwrap(
+            SharedDictationStore(suiteName: suiteName)
+                .beginBackgroundSession()
+        )
+        XCTAssertEqual(session.phase, .starting)
+        XCTAssertEqual(session.captureOwnerID, session.sessionID)
     }
 
     func testBackgroundSessionPreservesTranscriptUntilInsertion() throws {
@@ -187,13 +269,286 @@ final class SharedDictationStoreTests: XCTestCase {
         XCTAssertEqual(next.phase, .starting)
     }
 
+    func testTwoProcessesPreserveCommandAcrossHeartbeatAndConsumeItOnce() throws {
+        let suiteName = "SharedDictationStoreTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        let keyboard = SharedDictationStore(
+            suiteName: suiteName,
+            storageDirectory: directory
+        )
+        let containingApp = SharedDictationStore(
+            suiteName: suiteName,
+            storageDirectory: directory
+        )
+        let session = try XCTUnwrap(
+            keyboard.begin(returnBundleIdentifier: "com.apple.mobilenotes")
+        )
+
+        keyboard.send(.stop, sessionID: session.sessionID)
+        containingApp.touch(sessionID: session.sessionID)
+
+        XCTAssertEqual(containingApp.load().command, .stop)
+        XCTAssertEqual(
+            containingApp.takePendingCommand(
+                sessionID: session.sessionID,
+                accepting: [.stop]
+            ),
+            .stop
+        )
+        XCTAssertEqual(
+            containingApp.takePendingCommand(
+                sessionID: session.sessionID,
+                accepting: [.stop]
+            ),
+            .none
+        )
+        let consumed = keyboard.load()
+        XCTAssertEqual(consumed.command, .none)
+        XCTAssertEqual(
+            consumed.acknowledgedCommandSequence,
+            consumed.commandSequence
+        )
+    }
+
+    func testPendingCommandWaitsUntilOwnerCanActOnIt() throws {
+        let suiteName = "SharedDictationStoreTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = SharedDictationStore(suiteName: suiteName)
+        let session = try XCTUnwrap(store.begin(returnBundleIdentifier: nil))
+
+        store.send(.retry, sessionID: session.sessionID)
+        XCTAssertEqual(
+            store.takePendingCommand(
+                sessionID: session.sessionID,
+                accepting: [.stop, .cancel]
+            ),
+            .none
+        )
+        XCTAssertEqual(store.load().command, .retry)
+        XCTAssertEqual(
+            store.takePendingCommand(
+                sessionID: session.sessionID,
+                accepting: [.retry]
+            ),
+            .retry
+        )
+    }
+
+    func testPhasePublicationPreservesUnconsumedColdLaunchRetry() throws {
+        let suiteName = "SharedDictationStoreTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = SharedDictationStore(suiteName: suiteName)
+        let session = try XCTUnwrap(store.begin(returnBundleIdentifier: nil))
+
+        store.setPhase(
+            .failed,
+            sessionID: session.sessionID,
+            errorMessage: "Saved for recovery",
+            recoveryAction: .retryTranscription
+        )
+        store.send(.retry, sessionID: session.sessionID)
+
+        // App startup restores the audio and republishes its recovery status
+        // before the command monitor begins. That metadata write must not eat
+        // the keyboard's already-persisted Retry tap.
+        store.setPhase(
+            .failed,
+            sessionID: session.sessionID,
+            errorMessage: "Recovered recording",
+            recoveryAction: .retryTranscription
+        )
+
+        XCTAssertEqual(store.load().command, .retry)
+        XCTAssertEqual(
+            store.takePendingCommand(
+                sessionID: session.sessionID,
+                accepting: [.retry]
+            ),
+            .retry
+        )
+    }
+
+    func testScopedResetCannotEraseANewerSession() throws {
+        let suiteName = "SharedDictationStoreTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = SharedDictationStore(suiteName: suiteName)
+
+        let first = try XCTUnwrap(store.begin(returnBundleIdentifier: nil))
+        store.setPhase(.cancelled, sessionID: first.sessionID)
+        let second = try XCTUnwrap(store.begin(returnBundleIdentifier: nil))
+
+        XCTAssertFalse(store.reset(sessionID: first.sessionID))
+        XCTAssertEqual(store.load().sessionID, second.sessionID)
+        XCTAssertEqual(store.load().phase, .launching)
+    }
+
+    func testCompletedPublicationFailsClosedWhenSharedStorageIsUnavailable() throws {
+        let suiteName = "SharedDictationStoreTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let session = SharedDictationSnapshot(
+            sessionID: UUID(),
+            phase: .transcribing,
+            command: .none,
+            transcript: nil,
+            errorMessage: nil,
+            returnBundleIdentifier: nil,
+            returnProcessIdentifier: nil,
+            hostResolutionAttempts: nil,
+            launchAttempts: nil,
+            successfulLaunchRoute: nil,
+            returnAttempts: nil,
+            incomingURLDeliveryRoute: nil,
+            incomingURLSourceApplication: nil,
+            startedAt: Date(),
+            updatedAt: Date()
+        )
+        defaults.set(
+            try JSONEncoder().encode(session),
+            forKey: SharedDictationConstants.storageKey
+        )
+
+        let invalidDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try Data("not a directory".utf8).write(to: invalidDirectory)
+        defer { try? FileManager.default.removeItem(at: invalidDirectory) }
+        let store = SharedDictationStore(
+            suiteName: suiteName,
+            storageDirectory: invalidDirectory
+        )
+
+        XCTAssertFalse(
+            store.setPhase(
+                .completed,
+                sessionID: session.sessionID,
+                transcript: "Must stay recoverable",
+                historyPersisted: false
+            )
+        )
+        XCTAssertEqual(store.load().phase, .transcribing)
+        XCTAssertNil(store.load().transcript)
+    }
+
+    func testInsertionBoundaryKeepsTranscriptUntilDeliveryIsAcknowledged() throws {
+        let suiteName = "SharedDictationStoreTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = SharedDictationStore(suiteName: suiteName)
+        let session = try XCTUnwrap(store.begin(
+            returnBundleIdentifier: "com.openai.chat",
+            insertionContextFingerprint: "field-before-recording"
+        ))
+        store.setPhase(
+            .completed,
+            sessionID: session.sessionID,
+            transcript: "Crash-safe text"
+        )
+
+        XCTAssertTrue(store.markInsertionStarted(sessionID: session.sessionID))
+        XCTAssertEqual(store.load().phase, .inserting)
+        XCTAssertEqual(store.load().transcript, "Crash-safe text")
+        XCTAssertEqual(store.load().recoveryAction, .reviewPossibleInsertion)
+        XCTAssertNil(store.beginBackgroundSession())
+
+        store.markInserted(sessionID: session.sessionID)
+        XCTAssertEqual(store.load().phase, .inserted)
+        XCTAssertNil(store.load().transcript)
+    }
+
+    func testChangedFieldBlocksAutomaticDeliveryButAllowsExplicitRecovery() throws {
+        let suiteName = "SharedDictationStoreTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = SharedDictationStore(suiteName: suiteName)
+        let session = try XCTUnwrap(store.begin(returnBundleIdentifier: nil))
+        store.setPhase(
+            .completed,
+            sessionID: session.sessionID,
+            transcript: "Keep this"
+        )
+
+        store.blockDelivery(
+            sessionID: session.sessionID,
+            message: "The text field changed."
+        )
+        XCTAssertEqual(store.load().phase, .deliveryBlocked)
+        XCTAssertEqual(store.load().transcript, "Keep this")
+        XCTAssertEqual(store.load().recoveryAction, .insertHere)
+
+        store.allowExplicitInsertion(sessionID: session.sessionID)
+        XCTAssertEqual(store.load().phase, .completed)
+        XCTAssertEqual(store.load().transcript, "Keep this")
+    }
+
+    func testInsertionContextCanOnlyBeClaimedDuringAnActiveSessionOnce() throws {
+        let suiteName = "SharedDictationStoreTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = SharedDictationStore(suiteName: suiteName)
+        let session = try XCTUnwrap(store.beginBackgroundSession())
+
+        XCTAssertTrue(
+            store.claimInsertionContext(
+                sessionID: session.sessionID,
+                fingerprint: "original-field"
+            )
+        )
+        XCTAssertFalse(
+            store.claimInsertionContext(
+                sessionID: session.sessionID,
+                fingerprint: "different-field"
+            )
+        )
+        XCTAssertEqual(
+            store.load().insertionContextFingerprint,
+            "original-field"
+        )
+    }
+
+    func testSnapshotWithoutNewCoordinationFieldsStillDecodes() throws {
+        let suiteName = "SharedDictationStoreTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let sessionID = UUID()
+        let oldSnapshot: [String: Any] = [
+            "sessionID": sessionID.uuidString,
+            "phase": "completed",
+            "command": "none",
+            "transcript": "From an older build",
+            "startedAt": 0.0,
+            "updatedAt": 1.0,
+        ]
+        defaults.set(
+            try JSONSerialization.data(withJSONObject: oldSnapshot),
+            forKey: SharedDictationConstants.storageKey
+        )
+
+        let decoded = SharedDictationStore(suiteName: suiteName).load()
+        XCTAssertEqual(decoded.sessionID, sessionID)
+        XCTAssertEqual(decoded.transcript, "From an older build")
+        XCTAssertNil(decoded.revision)
+        XCTAssertNil(decoded.recoveryAction)
+    }
+
     func testSourceApplicationCanRepairMissingReturnTarget() throws {
         let suiteName = "SharedDictationStoreTests-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let store = SharedDictationStore(suiteName: suiteName)
 
-        let session = store.begin(returnBundleIdentifier: nil)
+        let session = try XCTUnwrap(store.begin(returnBundleIdentifier: nil))
         store.setReturnBundleIdentifier(
             "com.apple.mobilenotes",
             sessionID: session.sessionID
