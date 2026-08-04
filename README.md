@@ -135,16 +135,18 @@ For local development, `SpeakPasteMac` also accepts the API key through the
 
 ## Run the iPhone app and keyboard
 
-The checked-in identifiers use the `com.example` namespace. Before signing,
-replace these with identifiers owned by your Apple Developer account, keeping
-the app and keyboard App Group values identical in all of these locations:
+The checked-in identifiers use the `com.example` namespace. Override these
+build settings with identifiers owned by your Apple Developer account; source,
+entitlements, and property lists stay in sync automatically:
 
-- the **SpeakPaste**, **SpeakPasteKeyboard**, and **SpeakPasteTests** bundle
-  identifiers in Xcode
-- `SpeakPaste/SpeakPaste.entitlements`
-- `SpeakPasteKeyboard/SpeakPasteKeyboard.entitlements`
-- `SharedDictationConstants.appGroupIdentifier` in
-  `SpeakPaste/SharedDictation.swift`
+- `SPEAKPASTE_APP_BUNDLE_IDENTIFIER`
+- `SPEAKPASTE_KEYBOARD_BUNDLE_IDENTIFIER`
+- `SPEAKPASTE_LIVE_ACTIVITY_BUNDLE_IDENTIFIER`
+- `SPEAKPASTE_TESTS_BUNDLE_IDENTIFIER`
+- `SPEAKPASTE_APP_GROUP_IDENTIFIER`
+
+The app and keyboard must use the same App Group override. The defaults remain
+safe public examples, so a personal sideload no longer requires source edits.
 
 Then:
 

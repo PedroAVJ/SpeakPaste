@@ -15,16 +15,16 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0</string>
+	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
 			<key>CFBundleTypeRole</key>
 			<string>Editor</string>
 			<key>CFBundleURLName</key>
-			<string>com.example.SpeakPaste</string>
+			<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>speakpaste</string>
@@ -88,6 +88,8 @@
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>SpeakPaste records your voice so ElevenLabs can turn it into text.</string>
+	<key>SpeakPasteAppGroupIdentifier</key>
+	<string>$(SPEAKPASTE_APP_GROUP_IDENTIFIER)</string>
 	<key>NSSupportsLiveActivities</key>
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>

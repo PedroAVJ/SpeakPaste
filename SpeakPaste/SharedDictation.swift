@@ -2,7 +2,21 @@ import Darwin
 import Foundation
 
 enum SharedDictationConstants {
-    static let appGroupIdentifier = "group.com.example.SpeakPaste"
+    static let appGroupIdentifier: String = {
+        let configuredIdentifier = Bundle.main.object(
+            forInfoDictionaryKey: "SpeakPasteAppGroupIdentifier"
+        ) as? String
+        let normalizedIdentifier = configuredIdentifier?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard let normalizedIdentifier,
+              !normalizedIdentifier.isEmpty,
+              !normalizedIdentifier.contains("$(") else {
+            return "group.com.example.SpeakPaste"
+        }
+
+        return normalizedIdentifier
+    }()
     static let storageKey = "active-dictation-session-v1"
     static let stateFileName = "active-dictation-session-v2.json"
     static let stateLockFileName = "active-dictation-session-v2.lock"
