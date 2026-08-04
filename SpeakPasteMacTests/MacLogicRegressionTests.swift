@@ -2,6 +2,59 @@ import Foundation
 import XCTest
 @testable import SpeakPaste
 
+final class MacPasteMenuShortcutTests: XCTestCase {
+    func testAcceptsElectronAndNativeCommandVCasing() {
+        XCTAssertTrue(
+            MacPasteMenuShortcut.isPlainPaste(
+                commandCharacter: "V",
+                commandModifiers: 0,
+                isEnabled: true
+            )
+        )
+        XCTAssertTrue(
+            MacPasteMenuShortcut.isPlainPaste(
+                commandCharacter: "v",
+                commandModifiers: 0,
+                isEnabled: true
+            )
+        )
+    }
+
+    func testRejectsPasteAndMatchStyleAndDisabledPaste() {
+        XCTAssertFalse(
+            MacPasteMenuShortcut.isPlainPaste(
+                commandCharacter: "V",
+                commandModifiers: 1,
+                isEnabled: true
+            )
+        )
+        XCTAssertFalse(
+            MacPasteMenuShortcut.isPlainPaste(
+                commandCharacter: "V",
+                commandModifiers: 0,
+                isEnabled: false
+            )
+        )
+    }
+
+    func testRejectsMissingOrUnrelatedAccelerators() {
+        XCTAssertFalse(
+            MacPasteMenuShortcut.isPlainPaste(
+                commandCharacter: nil,
+                commandModifiers: 0,
+                isEnabled: true
+            )
+        )
+        XCTAssertFalse(
+            MacPasteMenuShortcut.isPlainPaste(
+                commandCharacter: "C",
+                commandModifiers: 0,
+                isEnabled: true
+            )
+        )
+    }
+}
+
 final class MacAccessibilityTargetFingerprintTests: XCTestCase {
     private let frame = CGRect(x: 20, y: 30, width: 500, height: 80)
 

@@ -48,6 +48,27 @@ struct MacAccessibilityTargetFingerprint: Equatable, Sendable {
     }
 }
 
+/// Identifies the unmodified Command-V menu item without depending on the
+/// application's localization or on AppKit's accelerator letter casing.
+/// Electron currently exposes the Paste accelerator as uppercase `V`, while
+/// some native applications expose lowercase `v`.
+enum MacPasteMenuShortcut {
+    static func isPlainPaste(
+        commandCharacter: String?,
+        commandModifiers: Int?,
+        isEnabled: Bool
+    ) -> Bool {
+        guard
+            isEnabled,
+            commandModifiers == 0,
+            let commandCharacter
+        else {
+            return false
+        }
+        return commandCharacter.caseInsensitiveCompare("v") == .orderedSame
+    }
+}
+
 /// Counts focus-changing user actions without observing their contents. Bare
 /// Command taps are flags-changed events and deliberately do not increment it.
 private final class MacUserInteractionTracker: @unchecked Sendable {
@@ -498,13 +519,19 @@ enum MacAccessibility {
         for topLevel in children(of: menuBar) {
             for menu in children(of: topLevel) {
                 for item in children(of: menu) {
-                    guard
-                        stringAttribute(kAXMenuItemCmdCharAttribute, of: item) == "v",
+                    guard MacPasteMenuShortcut.isPlainPaste(
+                        commandCharacter: stringAttribute(
+                            kAXMenuItemCmdCharAttribute,
+                            of: item
+                        ),
                         // ⌘V carries no extra modifier; ⇧⌘V is Paste and Match
                         // Style, which would reformat the user's text.
-                        numberAttribute(kAXMenuItemCmdModifiersAttribute, of: item) == 0,
-                        isEnabled(item)
-                    else {
+                        commandModifiers: numberAttribute(
+                            kAXMenuItemCmdModifiersAttribute,
+                            of: item
+                        ),
+                        isEnabled: isEnabled(item)
+                    ) else {
                         continue
                     }
                     // Menu-tree traversal can take up to the AX messaging
