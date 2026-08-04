@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 
@@ -27,6 +28,36 @@ enum SharedDictationConstants {
     static let diagnosticsFileName = "last-dictation-session.json"
     static let diagnosticsHistoryFileName = "dictation-sessions.jsonl"
     static let hostApplicationIdentityKey = "host-application-identity-v1"
+}
+
+/// Privacy-safe identity for the host field and cursor. UIKit inconsistently
+/// reports an absent context as either `nil` or an empty string while a custom
+/// keyboard is removed and restored. Treat those two representations as the
+/// same state, while retaining the document identifier and text around the
+/// cursor so a real field, selection, edit, or cursor change still blocks an
+/// automatic insertion.
+enum InsertionContextFingerprint {
+    static func make(
+        documentIdentifier: UUID,
+        textBeforeInput: String?,
+        textAfterInput: String?,
+        selectedText: String?,
+        keyboardType: Int?
+    ) -> String {
+        let before = String((textBeforeInput ?? "").suffix(128))
+        let after = String((textAfterInput ?? "").prefix(128))
+        let selected = String((selectedText ?? "").prefix(128))
+        let context = [
+            documentIdentifier.uuidString,
+            before,
+            after,
+            selected,
+            String(keyboardType ?? 0),
+        ].joined(separator: "\u{1F}")
+        return SHA256.hash(data: Data(context.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
 }
 
 /// A host identity captured while the keyboard is still embedded in another
@@ -226,8 +257,9 @@ struct SharedDictationSnapshot: Codable, Equatable {
     /// True only when a private, journaled audio file can be retried after the
     /// process exits. Ordinary setup failures remain safely dismissible.
     var hasRecoverableAudio: Bool? = nil
-    /// Privacy-safe hash of the host input context at the moment recording was
-    /// requested. The extension compares this before automatic insertion.
+    /// Privacy-safe proof that the session began from an active keyboard text
+    /// field. Delivery targets the cursor visible when the user taps Stop;
+    /// background sessions without this claim require explicit insertion.
     var insertionContextFingerprint: String? = nil
     var recoveryAction: SharedDictationRecoveryAction? = nil
     /// Monotonic counters make cross-process state changes diagnosable and let
@@ -593,9 +625,8 @@ struct SharedDictationStore: @unchecked Sendable {
     }
 
     /// An App Intent starts outside the keyboard process. If the keyboard is
-    /// already visible, let it bind the current host-field fingerprint during
-    /// the active session. A late keyboard with no fingerprint must require an
-    /// explicit insertion instead of guessing that the field is unchanged.
+    /// already visible, let it claim keyboard-origin delivery during the active
+    /// session. A late keyboard with no claim must require explicit insertion.
     @discardableResult
     func claimInsertionContext(
         sessionID: UUID,

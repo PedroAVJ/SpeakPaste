@@ -215,7 +215,7 @@ final class SharedDictationStoreTests: XCTestCase {
             HostAppSwitcher.anticipatedRoute(
                 for: "com.apple.mobilenotes"
             ),
-            "host-url"
+            "host-bundle"
         )
         XCTAssertEqual(
             HostAppSwitcher.anticipatedRoute(
@@ -223,6 +223,54 @@ final class SharedDictationStoreTests: XCTestCase {
             ),
             "manual-switchback"
         )
+    }
+
+    func testInsertionFingerprintTreatsNilAndEmptyProxyContextAsEquivalent() {
+        let documentID = UUID()
+        let nilContext = InsertionContextFingerprint.make(
+            documentIdentifier: documentID,
+            textBeforeInput: nil,
+            textAfterInput: nil,
+            selectedText: nil,
+            keyboardType: nil
+        )
+        let emptyContext = InsertionContextFingerprint.make(
+            documentIdentifier: documentID,
+            textBeforeInput: "",
+            textAfterInput: "",
+            selectedText: "",
+            keyboardType: 0
+        )
+
+        XCTAssertEqual(nilContext, emptyContext)
+    }
+
+    func testInsertionFingerprintStillDetectsRealCursorAndFieldChanges() {
+        let documentID = UUID()
+        let original = InsertionContextFingerprint.make(
+            documentIdentifier: documentID,
+            textBeforeInput: "hello",
+            textAfterInput: " world",
+            selectedText: nil,
+            keyboardType: 0
+        )
+        let movedCursor = InsertionContextFingerprint.make(
+            documentIdentifier: documentID,
+            textBeforeInput: "hello ",
+            textAfterInput: "world",
+            selectedText: nil,
+            keyboardType: 0
+        )
+        let differentField = InsertionContextFingerprint.make(
+            documentIdentifier: UUID(),
+            textBeforeInput: "hello",
+            textAfterInput: " world",
+            selectedText: nil,
+            keyboardType: 0
+        )
+
+        XCTAssertNotEqual(original, movedCursor)
+        XCTAssertNotEqual(original, differentField)
     }
 
     @MainActor

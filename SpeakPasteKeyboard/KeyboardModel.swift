@@ -355,7 +355,7 @@ final class KeyboardModel: ObservableObject {
         }
         snapshot = latest
 
-        deliverCompletedTranscript(latest, validateOriginalContext: true)
+        deliverCompletedTranscript(latest, requireKeyboardInsertionClaim: true)
     }
 
     private func insertPendingHere() {
@@ -366,12 +366,12 @@ final class KeyboardModel: ObservableObject {
         store.allowExplicitInsertion(sessionID: pending.sessionID)
         let completed = store.load()
         snapshot = completed
-        deliverCompletedTranscript(completed, validateOriginalContext: false)
+        deliverCompletedTranscript(completed, requireKeyboardInsertionClaim: false)
     }
 
     private func deliverCompletedTranscript(
         _ latest: SharedDictationSnapshot,
-        validateOriginalContext: Bool
+        requireKeyboardInsertionClaim: Bool
     ) {
         guard
             latest.phase == .completed,
@@ -383,19 +383,11 @@ final class KeyboardModel: ObservableObject {
             return
         }
 
-        if validateOriginalContext {
-            guard let originalFingerprint = latest.insertionContextFingerprint else {
+        if requireKeyboardInsertionClaim {
+            guard latest.insertionContextFingerprint != nil else {
                 store.blockDelivery(
                     sessionID: latest.sessionID,
-                    message: "SpeakPaste couldn't verify the original text field. Tap Insert Here to place the transcript at the current cursor."
-                )
-                snapshot = store.load()
-                return
-            }
-            guard originalFingerprint == currentInsertionContextFingerprint() else {
-                store.blockDelivery(
-                    sessionID: latest.sessionID,
-                    message: "The text field changed while you were dictating. Tap Insert Here to put the transcript at the current cursor."
+                    message: "SpeakPaste couldn't confirm that this dictation started from the keyboard. Tap Insert Here to place the transcript at the current cursor."
                 )
                 snapshot = store.load()
                 return

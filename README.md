@@ -201,18 +201,19 @@ sideload. Every route persists its real asynchronous result.
 For the return, SpeakPaste follows the architecture exposed by Wispr Flow 1.67's
 signed metadata and Swift symbols. On iOS 26.4 and later, an early keyboard-
 arbiter hook captures the host bundle identifier before the extension opens the
-containing app. The app then looks that identifier up in a fixed catalog and
-reopens supported hosts through their URL schemes. Notes, for example, maps
-`com.apple.mobilenotes` to `mobilenotes://`. Unknown hosts use the manual
-home-bar swipe instead of a generic previous-app or bundle-activation guess.
+containing app. The app then looks that identifier up in a fixed catalog and,
+for this personal sideload, directly activates that exact bundle. Its cataloged
+URL scheme is a fallback when direct activation is unavailable. Unknown hosts
+use the manual home-bar swipe instead of guessing at a generic previous app.
 
-The keyboard-arbiter hook uses private UIKit implementation details for this
-personal sideload. It may change in future iOS releases and is not suitable for
-App Store submission. Apple provides no public generic API for a keyboard to
-identify and return to its host app. Wispr's executable code is FairPlay-
-encrypted, so SpeakPaste reproduces the observable architecture rather than
-copying inaccessible implementation bodies. The adapted hook retains its MIT
-license in `THIRD_PARTY_NOTICES.md`.
+The keyboard-arbiter hook and direct bundle activation use private iOS
+implementation details for this personal sideload. They may change in future
+iOS releases and are not suitable for App Store submission. Apple provides no
+public generic API for a keyboard to identify and return to its host app.
+Wispr's executable code is FairPlay-encrypted, so SpeakPaste reproduces the
+observable behavior rather than claiming knowledge of inaccessible method
+bodies. The adapted hook retains its MIT license in
+`THIRD_PARTY_NOTICES.md`.
 
 The implementation was compared with
 [Wispr Flow's iPhone keyboard guide](https://docs.wisprflow.ai/articles/7453988911-set-up-the-flow-keyboard-on-iphone),

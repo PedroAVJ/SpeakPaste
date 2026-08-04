@@ -18,7 +18,7 @@ the source of truth for the return implementation.
 5. SpeakPaste returns to the originating app while recording continues.
 6. Tap **Stop & Insert** in the keyboard.
 7. The keyboard shows transcription progress, inserts the result exactly once at
-   the current cursor, and restores its typing layout.
+   the cursor where the user taps Stop, and restores its typing layout.
 
 If automatic return is unavailable, SpeakPaste keeps recording and tells the
 user to swipe right along the bottom home bar. That fallback is part of the
@@ -75,8 +75,9 @@ Earlier device runs showed three distinct false positives:
   Home rather than the originating application.
 
 Those results rule out the old generic system-navigation route. The current
-implementation only opens the URL registered for a captured, supported host;
-otherwise it keeps recording and presents the manual-swipe instruction.
+implementation directly activates only an exact captured, supported host
+bundle, with its registered URL as fallback. Otherwise it keeps recording and
+presents the manual-swipe instruction.
 
 ## Implementation
 
@@ -87,7 +88,8 @@ Keyboard Start
   -> open speakpaste://dictate/start
   -> containing app starts verified microphone capture
   -> one-time explanation
-  -> open the supported host's cataloged URL scheme
+  -> directly activate the exact supported host bundle
+     (cataloged URL scheme fallback)
   -> keyboard polls shared recording state
   -> Stop & Insert command
   -> containing app transcribes with ElevenLabs Scribe
@@ -108,8 +110,8 @@ The implementation is split across:
   host and retains older resolution paths as diagnostic fallbacks.
 - `SpeakPaste/AppModel.swift` — microphone capture, one-time explanation,
   background command monitor, and transcription.
-- `SpeakPaste/HostAppSwitcher.swift` — fixed supported-app catalog, URL return,
-  and manual fallback.
+- `SpeakPaste/HostAppSwitcher.swift` — fixed supported-app catalog, exact-bundle
+  return, URL fallback, and manual fallback.
 - `SpeakPaste/SharedDictation.swift` — App Group state and mirrored diagnostics.
 
 The return target validator accepts the arbiter's host bundle identifier, but

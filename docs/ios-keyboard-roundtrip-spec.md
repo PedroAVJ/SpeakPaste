@@ -165,8 +165,10 @@ The reference recording is the acceptance target for the round-trip:
    the audio session active. A manual home-bar swipe is fallback behavior only.
 6. **Keyboard state follows shared state.** It shows listening, processing,
    failure, and normal typing states from the App Group session.
-7. **The transcript is inserted at the original cursor.** Successful completion
-   inserts exactly once and returns the keyboard to its normal layout.
+7. **The transcript is inserted at the active cursor.** Successful completion
+   inserts exactly once at the cursor where the user taps Stop and returns the
+   keyboard to its normal layout. A harmless `nil`/empty proxy transition or a
+   deliberate cursor move must not add a second confirmation tap.
 8. **Failures are diagnosable.** Every launch route and its actual Boolean result
    are persisted in the shared session so a device-only failure is actionable.
    Audio failures must also identify the failed setup stage rather than exposing
@@ -259,9 +261,11 @@ implements the same observable shape:
    and process-local capture is invalidated when the keyboard leaves its host.
 6. The keyboard writes the resolved identifier to the shared session before
    opening the containing app.
-7. The containing app maps only supported bundle identifiers to the URL schemes
-   declared in its property list and uses `UIApplication.open`.
-8. A missing host, an unsupported host, an unavailable scheme, or a failed open
+7. The containing app maps only supported bundle identifiers through its fixed
+   catalog. This personal sideload first activates the exact captured bundle
+   directly, avoiding iOS's custom-URL confirmation sheet. The cataloged URL
+   scheme and `UIApplication.open` remain a fallback.
+8. A missing host, an unsupported host, or failure of both activation routes
    keeps recording alive and shows the manual home-bar swipe.
 
 The host-capture technique is adapted from the MIT-licensed
@@ -300,9 +304,10 @@ The probe therefore:
   ambiguous, or unknown.
 
 That probe remains useful failure evidence, but it is not the return route now.
-For Notes, the current hook must capture `com.apple.mobilenotes` directly; the
-static catalog then uses `mobilenotes://` and persists the asynchronous result as
-`host-url:true` or `host-url:false`.
+For Notes, the current hook must capture `com.apple.mobilenotes` directly. The
+static catalog then attempts that exact bundle as `host-bundle:true` or
+`host-bundle:false`; only a failed direct attempt falls through to
+`mobilenotes://` and the `host-url` diagnostics.
 
 ## Device acceptance matrix
 

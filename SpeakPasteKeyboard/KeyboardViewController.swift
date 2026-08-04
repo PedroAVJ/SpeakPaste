@@ -1,4 +1,3 @@
-import CryptoKit
 import ObjectiveC.runtime
 import SwiftUI
 import UIKit
@@ -276,29 +275,14 @@ final class KeyboardViewController: UIInputViewController {
         UIDevice.current.playInputClick()
     }
 
-    /// Keep host text out of shared storage while still detecting a field,
-    /// selection, or cursor change during the app switch. `documentIdentifier`
-    /// distinguishes two otherwise-empty fields in the same host.
     private func insertionContextFingerprint() -> String {
         let proxy = textDocumentProxy
-        let before = proxy.documentContextBeforeInput.map {
-            String($0.suffix(128))
-        } ?? "<nil>"
-        let after = proxy.documentContextAfterInput.map {
-            String($0.prefix(128))
-        } ?? "<nil>"
-        let selected = proxy.selectedText.map {
-            String($0.prefix(128))
-        } ?? "<nil>"
-        let context = [
-            proxy.documentIdentifier.uuidString,
-            before,
-            after,
-            selected,
-            String(proxy.keyboardType?.rawValue ?? -1),
-        ].joined(separator: "\u{1F}")
-        return SHA256.hash(data: Data(context.utf8))
-            .map { String(format: "%02x", $0) }
-            .joined()
+        return InsertionContextFingerprint.make(
+            documentIdentifier: proxy.documentIdentifier,
+            textBeforeInput: proxy.documentContextBeforeInput,
+            textAfterInput: proxy.documentContextAfterInput,
+            selectedText: proxy.selectedText,
+            keyboardType: proxy.keyboardType?.rawValue
+        )
     }
 }
