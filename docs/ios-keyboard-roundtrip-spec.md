@@ -149,6 +149,20 @@ Notes. The orange microphone indicators show that audio capture remained active
 during the transition, but the destination was wrong. This route is therefore
 not an acceptable implementation of automatic switchback on the test device.
 
+### Regression: a transient system service overwrites the WhatsApp host
+
+Build 10 session `0DB22F15-752E-45FD-8CD9-BFE93A401C5A` captured host PID
+`474`, but accepted `com.apple.SafariViewService` from a later keyboard-arbiter
+callback and persisted it as the return bundle. The live process table showed
+that PID `474` was actually WhatsApp. Since the transient service was outside
+the fixed app catalog, the containing app had no automatic return route.
+
+The repair rejects `*ViewService` callbacks before they enter the Objective-C
+capture cache, requires every Swift capture/cache/persist path to match the
+fixed supported-app catalog, and deletes unsupported durable identities written
+by an older build. This filter is part of host capture; it does not alter the
+protected URL switchback sequence below.
+
 ## Required behavior
 
 The reference recording is the acceptance target for the round-trip:
@@ -261,17 +275,38 @@ implements the same observable shape:
    and process-local capture is invalidated when the keyboard leaves its host.
 6. The keyboard writes the resolved identifier to the shared session before
    opening the containing app.
-7. The containing app maps only supported bundle identifiers through its fixed
-   catalog. This personal sideload first activates the exact captured bundle
-   directly, avoiding iOS's custom-URL confirmation sheet. The cataloged URL
-   scheme and `UIApplication.open` remain a fallback.
-8. A missing host, an unsupported host, or failure of both activation routes
+7. The containing app maps only supported bundle identifiers to the URL schemes
+   declared in its property list and uses `UIApplication.open`.
+8. A missing host, an unsupported host, an unavailable scheme, or a failed open
    keeps recording alive and shows the manual home-bar swipe.
 
 The host-capture technique is adapted from the MIT-licensed
 `KeyboardHostBundleID` project, with its notice retained in
 `THIRD_PARTY_NOTICES.md`. It is a private UIKit dependency suitable for this
 personal sideload, not an App Store-safe contract.
+
+### Protected switchback compatibility path
+
+Do not replace, reorder, or "simplify" the switchback path. It is deliberately
+hacky compatibility code: the early arbiter capture is adapted from
+`KeyboardHostBundleID`, and the fixed bundle-to-scheme catalog plus URL-open
+shape were recovered by inspecting Wispr Flow 1.67/build 1313. The protected
+sequence is:
+
+```text
+early +load arbiter capture
+  -> exact supported bundle identifier
+  -> fixed scraped bundle/scheme catalog
+  -> UIApplication.open(cataloged URL)
+  -> manual home-bar swipe only when that route is unavailable or fails
+```
+
+Do not substitute direct bundle activation, `UISystemNavigationAction`, generic
+suspension, or a guessed "previous app" API. Each has either failed visibly on
+the physical phone or returned success without proving the target opened. A
+future change is permitted only after a fresh inspection of the reference app
+and a complete physical pass of the acceptance matrix below. A simulator,
+successful build, Boolean API result, or unit test is not acceptance evidence.
 
 The recording session uses an input-only audio category without playback-only
 options. In particular, it must not combine `.record` with `.duckOthers`; that
@@ -304,10 +339,9 @@ The probe therefore:
   ambiguous, or unknown.
 
 That probe remains useful failure evidence, but it is not the return route now.
-For Notes, the current hook must capture `com.apple.mobilenotes` directly. The
-static catalog then attempts that exact bundle as `host-bundle:true` or
-`host-bundle:false`; only a failed direct attempt falls through to
-`mobilenotes://` and the `host-url` diagnostics.
+For Notes, the current hook must capture `com.apple.mobilenotes` directly; the
+static catalog then opens `mobilenotes://` and persists the asynchronous result
+as `host-url:true` or `host-url:false`.
 
 ## Device acceptance matrix
 
@@ -317,9 +351,11 @@ the phone:
 - Notes: first launch, explanation, automatic return, stop, and insertion.
   **Verified on iPhone 15/iOS 26.5.2.**
 - Notes: a second launch without the one-time explanation. **Verified.**
-- At least one third-party host such as ChatGPT or WhatsApp.
+- At least one third-party host such as ChatGPT or WhatsApp. **Verified with
+  WhatsApp on build 11.**
 - The first third-party attempt immediately after installing a build or
   restarting the keyboard extension; it must not depend on a warmed process.
+  **Verified with WhatsApp immediately after installing build 11.**
 - Switching from Notes to that third-party host in the same keyboard process;
   the persisted PID guard must prevent a stale Notes return.
 - Microphone permission denied, then enabled.
@@ -337,3 +373,11 @@ Two consecutive Notes runs now satisfy the core acceptance path. Sessions
 `host-catalog:com.apple.mobilenotes`, and `host-url:true`. Both keyboard-side
 mirrors ended at `phase: inserted`; the second run did not show the first-use
 explanation.
+
+Build 11 session `35BA1D18-0308-41DA-8B6B-C569DA02F38B` passed the cold
+third-party path on the first physical attempt after installation. It captured
+`net.whatsapp.WhatsApp` with PID `474`, which matched the live WhatsApp process,
+then recorded `host-url-can-open:true` and `host-url:true`. The containing-app
+mirror completed with no error, and the keyboard mirror made exactly one
+`inserting` transition followed by exactly one `inserted` transition. No
+transcript text is retained in this evidence.

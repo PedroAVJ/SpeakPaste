@@ -75,9 +75,8 @@ Earlier device runs showed three distinct false positives:
   Home rather than the originating application.
 
 Those results rule out the old generic system-navigation route. The current
-implementation directly activates only an exact captured, supported host
-bundle, with its registered URL as fallback. Otherwise it keeps recording and
-presents the manual-swipe instruction.
+implementation opens only the cataloged URL for an exact captured, supported
+host. Otherwise it keeps recording and presents the manual-swipe instruction.
 
 ## Implementation
 
@@ -88,8 +87,7 @@ Keyboard Start
   -> open speakpaste://dictate/start
   -> containing app starts verified microphone capture
   -> one-time explanation
-  -> directly activate the exact supported host bundle
-     (cataloged URL scheme fallback)
+  -> open the supported host's cataloged URL scheme
   -> keyboard polls shared recording state
   -> Stop & Insert command
   -> containing app transcribes with ElevenLabs Scribe
@@ -110,12 +108,13 @@ The implementation is split across:
   host and retains older resolution paths as diagnostic fallbacks.
 - `SpeakPaste/AppModel.swift` — microphone capture, one-time explanation,
   background command monitor, and transcription.
-- `SpeakPaste/HostAppSwitcher.swift` — fixed supported-app catalog, exact-bundle
-  return, URL fallback, and manual fallback.
+- `SpeakPaste/HostAppSwitcher.swift` — fixed supported-app catalog, URL return,
+  and manual fallback.
 - `SpeakPaste/SharedDictation.swift` — App Group state and mirrored diagnostics.
 
-The return target validator accepts the arbiter's host bundle identifier, but
-rejects SpeakPaste itself and system brokers such as SpringBoard and Spotlight.
+The return target validator accepts a cataloged arbiter host identifier, but
+rejects SpeakPaste itself and system brokers such as SpringBoard, Spotlight,
+and SafariViewService.
 
 ## Optional global trigger
 

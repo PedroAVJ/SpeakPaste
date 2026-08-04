@@ -45,7 +45,19 @@ final class HostApplicationResolver {
         self.identityCache = identityCache
         self.arbiterRetryCount = max(1, arbiterRetryCount)
         self.arbiterRetryDelay = arbiterRetryDelay
-        lastAcceptedIdentity = identityCache.load()
+        lastAcceptedIdentity = nil
+        if let cached = identityCache.load() {
+            if let supported = HostApplicationCapturePolicy.supportedIdentity(
+                cached,
+                supportedBundleIdentifiers: Self.knownHostBundleIdentifiers
+            ) {
+                lastAcceptedIdentity = supported
+            } else {
+                // Self-heal records written by builds that trusted transient
+                // UIKit brokers such as SafariViewService as keyboard hosts.
+                identityCache.clear()
+            }
+        }
     }
 
     /// Establishes a trust boundary for this visible keyboard. The first
@@ -262,15 +274,16 @@ final class HostApplicationResolver {
                 )
             }
 
-            // SpringBoardServices refuses to name the host process from inside
-            // a keyboard extension, but its executable path still leads to the
-            // host's own bundle. Reading that Info.plist is authoritative
-            // rather than a guess, so it does not need the curated allowlist.
+            // SpringBoardServices may refuse to name the host process from
+            // inside a keyboard extension, but its executable path can still
+            // lead to the host's bundle. Keep even that authoritative result
+            // inside the protected Wispr catalog: only cataloged hosts have a
+            // verified return URL.
             let pathValue = bundleIdentifier(fromExecutablePathFor: processID)
             attempts.append(
                 "controller-host-path:\(processID)=\(diagnosticValue(pathValue))"
             )
-            if let identifier = plausibleBundleIdentifier(pathValue) {
+            if let identifier = knownBundleIdentifier(exactValue: pathValue) {
                 return resolution(
                     identifier,
                     attempts,
@@ -390,7 +403,9 @@ final class HostApplicationResolver {
             let cached = identityCache.matchingIdentity(
                 processIdentifier: currentAppearance.processIdentifier
             ),
-            let identifier = plausibleBundleIdentifier(cached.bundleIdentifier)
+            let identifier = knownBundleIdentifier(
+                exactValue: cached.bundleIdentifier
+            )
         {
             attempts.append(
                 "durable-host-cache:\(identifier);pid=\(cached.processIdentifier)"
@@ -771,13 +786,10 @@ final class HostApplicationResolver {
     }
 
     private func knownBundleIdentifier(exactValue: String?) -> String? {
-        guard let exactValue else { return nil }
-        let value = exactValue
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        return Self.knownHostBundleIdentifiers.first {
-            $0.lowercased() == value
-        }
+        HostApplicationCapturePolicy.canonicalSupportedBundleIdentifier(
+            exactValue,
+            supportedBundleIdentifiers: Self.knownHostBundleIdentifiers
+        )
     }
 
     private func knownBundleIdentifier(
@@ -1024,8 +1036,8 @@ final class HostApplicationResolver {
     ) -> String? {
         guard
             appearance?.identifier == expected.identifier,
-            let identifier = plausibleBundleIdentifier(
-                snapshot.bundleIdentifier
+            let identifier = knownBundleIdentifier(
+                exactValue: snapshot.bundleIdentifier
             ),
             HostApplicationCapturePolicy.accepts(
                 candidateBundleIdentifier: identifier,
@@ -1096,7 +1108,9 @@ final class HostApplicationResolver {
         guard
             let processIdentifier,
             processIdentifier > 1,
-            let identifier = plausibleBundleIdentifier(bundleIdentifier)
+            let identifier = knownBundleIdentifier(
+                exactValue: bundleIdentifier
+            )
         else {
             return
         }

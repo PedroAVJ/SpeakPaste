@@ -5,10 +5,13 @@
 #import <objc/runtime.h>
 #import <os/lock.h>
 
+// PROTECTED COMPATIBILITY PATH — DO NOT REPLACE OR MOVE OUT OF +load.
 // iOS 26.4 moved keyboard-host identity into this arbiter callback. Installing
 // from +load is intentional: the initial focus event can precede Swift view
 // controller initialization. The technique is adapted from the MIT-licensed
-// KeyboardHostBundleID project; its notice is retained in THIRD_PARTY_NOTICES.
+// KeyboardHostBundleID project and forms the capture half of the switchback
+// recovered from Wispr Flow 1.67/build 1313. Any change requires the physical
+// device matrix in docs/ios-keyboard-roundtrip-spec.md.
 
 static NSString *const SPArbiterClientClassName = @"_UIKeyboardArbiterClient";
 static NSString *const SPDestinationClassName =
@@ -62,6 +65,7 @@ static BOOL SPIsAcceptableHostBundleIdentifier(NSString *_Nullable value) {
     if ([lowercased isEqualToString:@"com.apple.springboard"] ||
         [lowercased isEqualToString:@"com.apple.spotlight"] ||
         [lowercased isEqualToString:@"com.apple.uikitsystemapp"] ||
+        [lowercased hasSuffix:@"viewservice"] ||
         [lowercased hasPrefix:@"com.apple.inputmethod."]) {
         return NO;
     }

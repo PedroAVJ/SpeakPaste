@@ -73,6 +73,35 @@ struct HostApplicationIdentity: Codable, Equatable, Sendable {
 /// Keeping this policy in the shared target makes the stale-host boundary
 /// directly testable without loading UIKit's private keyboard classes.
 enum HostApplicationCapturePolicy {
+    static func canonicalSupportedBundleIdentifier(
+        _ candidate: String?,
+        supportedBundleIdentifiers: [String]
+    ) -> String? {
+        guard let candidate else { return nil }
+        let normalized = candidate
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return supportedBundleIdentifiers.first {
+            $0.lowercased() == normalized
+        }
+    }
+
+    static func supportedIdentity(
+        _ identity: HostApplicationIdentity?,
+        supportedBundleIdentifiers: [String]
+    ) -> HostApplicationIdentity? {
+        guard
+            let identity,
+            canonicalSupportedBundleIdentifier(
+                identity.bundleIdentifier,
+                supportedBundleIdentifiers: supportedBundleIdentifiers
+            ) != nil
+        else {
+            return nil
+        }
+        return identity
+    }
+
     static func baselineGeneration(
         currentGeneration: UInt64,
         cleanBoundaryGeneration: UInt64?,

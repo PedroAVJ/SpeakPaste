@@ -1,4 +1,3 @@
-import ObjectiveC.runtime
 import UIKit
 
 struct KeyboardReturnPrompt: Identifiable, Equatable {
@@ -19,10 +18,15 @@ struct HostAppInfo: Equatable, Sendable {
     let launchURL: URL
 }
 
-/// Wispr-style switchback: identify the keyboard host before leaving the
-/// extension, then reopen that exact app. This personal sideload prefers a
-/// direct activation of the captured bundle so iOS does not interpose a
-/// custom-URL confirmation sheet. The curated URL scheme remains a fallback.
+/// PROTECTED COMPATIBILITY PATH — DO NOT REPLACE OR REORDER.
+///
+/// This is the switchback shape recovered from Wispr Flow 1.67/build 1313:
+/// capture the keyboard host early, resolve it through the fixed scraped app
+/// catalog, then open that app's cataloged URL. Private bundle activation,
+/// generic suspension, and system-navigation substitutions have all produced
+/// failures, false positives, or unverified success. Any future change requires
+/// a fresh reference-app inspection plus the full physical-device acceptance
+/// matrix in `docs/ios-keyboard-roundtrip-spec.md`.
 @MainActor
 enum HostAppSwitcher {
     struct ReturnTargetResolution: Equatable, Sendable {
@@ -61,7 +65,7 @@ enum HostAppSwitcher {
         )
         return appInfo(for: target.bundleIdentifier) == nil
             ? "manual-switchback"
-            : "host-bundle"
+            : "host-url"
     }
 
     static func anticipatedAttempts(
@@ -75,7 +79,7 @@ enum HostAppSwitcher {
         var attempts = target.attempts
         if let app = appInfo(for: target.bundleIdentifier) {
             attempts.append("host-catalog:\(app.bundleIdentifier)")
-            attempts.append("host-bundle:pending")
+            attempts.append("host-url:pending")
         } else if target.bundleIdentifier == nil {
             attempts.append("manual-switchback:missing-host")
         } else {
@@ -134,15 +138,6 @@ enum HostAppSwitcher {
         }
 
         attempts.append("host-catalog:\(app.bundleIdentifier)")
-        let didOpenBundle = openApplication(
-            withBundleIdentifier: app.bundleIdentifier
-        )
-        attempts.append("host-bundle:\(didOpenBundle)")
-        onAttemptsChanged?(attempts)
-        if didOpenBundle {
-            return HostAppSwitchOutcome(didOpen: true, attempts: attempts)
-        }
-
         let canOpen = UIApplication.shared.canOpenURL(app.launchURL)
         attempts.append("host-url-can-open:\(canOpen)")
         onAttemptsChanged?(attempts)
@@ -164,73 +159,6 @@ enum HostAppSwitcher {
         return HostAppSwitchOutcome(didOpen: didOpen, attempts: attempts)
     }
 
-    /// The matching fallback already used by the keyboard to launch its
-    /// containing app. It is intentionally restricted to a validated bundle
-    /// captured from the current keyboard host; arbitrary or generic "last
-    /// app" activation is never attempted.
-    private static func openApplication(
-        withBundleIdentifier bundleIdentifier: String
-    ) -> Bool {
-        guard
-            let workspaceClass = NSClassFromString("LSApplicationWorkspace")
-        else {
-            return false
-        }
-        let defaultSelector = NSSelectorFromString("defaultWorkspace")
-        guard
-            let defaultMethod = class_getClassMethod(
-                workspaceClass,
-                defaultSelector
-            ),
-            let defaultEncoding = method_getTypeEncoding(defaultMethod),
-            String(cString: defaultEncoding) == "@16@0:8"
-        else {
-            return false
-        }
-        typealias DefaultWorkspaceFunction = @convention(c) (
-            AnyClass,
-            Selector
-        ) -> Unmanaged<AnyObject>?
-        let defaultWorkspace = unsafeBitCast(
-            method_getImplementation(defaultMethod),
-            to: DefaultWorkspaceFunction.self
-        )
-        guard
-            let workspace = defaultWorkspace(
-                workspaceClass,
-                defaultSelector
-            )?.takeUnretainedValue()
-        else {
-            return false
-        }
-
-        let openSelector = NSSelectorFromString("openApplicationWithBundleID:")
-        guard
-            let openMethod = class_getInstanceMethod(
-                workspaceClass,
-                openSelector
-            ),
-            let openEncoding = method_getTypeEncoding(openMethod),
-            String(cString: openEncoding) == "B24@0:8@16"
-        else {
-            return false
-        }
-        typealias OpenApplicationFunction = @convention(c) (
-            AnyObject,
-            Selector,
-            NSString
-        ) -> Bool
-        let openApplication = unsafeBitCast(
-            method_getImplementation(openMethod),
-            to: OpenApplicationFunction.self
-        )
-        return openApplication(
-            workspace,
-            openSelector,
-            bundleIdentifier as NSString
-        )
-    }
-
     private static func validBundleIdentifier(_ value: String?) -> String? {
         guard let value else { return nil }
         let identifier = value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -250,6 +178,7 @@ enum HostAppSwitcher {
             lowercased != "com.apple.springboard",
             lowercased != "com.apple.spotlight",
             lowercased != "com.apple.uikitsystemapp",
+            !lowercased.hasSuffix("viewservice"),
             lowercased != ownBundleIdentifier,
             lowercased != keyboardBundleIdentifier,
             lowercased != liveActivityBundleIdentifier

@@ -201,15 +201,21 @@ sideload. Every route persists its real asynchronous result.
 For the return, SpeakPaste follows the architecture exposed by Wispr Flow 1.67's
 signed metadata and Swift symbols. On iOS 26.4 and later, an early keyboard-
 arbiter hook captures the host bundle identifier before the extension opens the
-containing app. The app then looks that identifier up in a fixed catalog and,
-for this personal sideload, directly activates that exact bundle. Its cataloged
-URL scheme is a fallback when direct activation is unavailable. Unknown hosts
-use the manual home-bar swipe instead of guessing at a generic previous app.
+containing app. The app then looks that identifier up in the fixed scraped
+bundle/scheme catalog and opens the cataloged URL with `UIApplication.open`.
+Unknown hosts use the manual home-bar swipe instead of guessing at a generic
+previous app.
 
-The keyboard-arbiter hook and direct bundle activation use private iOS
-implementation details for this personal sideload. They may change in future
-iOS releases and are not suitable for App Store submission. Apple provides no
-public generic API for a keyboard to identify and return to its host app.
+This switchback sequence is protected compatibility code. Do not replace,
+reorder, or refactor it without re-inspecting the current reference app and
+passing the complete physical-device matrix in
+`docs/ios-keyboard-roundtrip-spec.md`. Direct host-bundle activation, generic
+suspension, and system-navigation guesses are deliberately excluded.
+
+The keyboard-arbiter hook uses private iOS implementation details for this
+personal sideload. It may change in future iOS releases and is not suitable for
+App Store submission. Apple provides no public generic API for a keyboard to
+identify and return to its host app.
 Wispr's executable code is FairPlay-encrypted, so SpeakPaste reproduces the
 observable behavior rather than claiming knowledge of inaccessible method
 bodies. The adapted hook retains its MIT license in

@@ -72,6 +72,38 @@ final class SharedDictationStoreTests: XCTestCase {
         )
     }
 
+    func testHostCapturePolicyRejectsTransientBrokerAndCorruptedCache() {
+        let supported = [
+            "com.apple.mobilenotes",
+            "net.whatsapp.WhatsApp",
+        ]
+        XCTAssertEqual(
+            HostApplicationCapturePolicy.canonicalSupportedBundleIdentifier(
+                " net.whatsapp.whatsapp ",
+                supportedBundleIdentifiers: supported
+            ),
+            "net.whatsapp.WhatsApp"
+        )
+        XCTAssertNil(
+            HostApplicationCapturePolicy.canonicalSupportedBundleIdentifier(
+                "com.apple.SafariViewService",
+                supportedBundleIdentifiers: supported
+            )
+        )
+
+        let corrupted = HostApplicationIdentity(
+            bundleIdentifier: "com.apple.SafariViewService",
+            processIdentifier: 474,
+            capturedAt: Date()
+        )
+        XCTAssertNil(
+            HostApplicationCapturePolicy.supportedIdentity(
+                corrupted,
+                supportedBundleIdentifiers: supported
+            )
+        )
+    }
+
     func testHostCapturePolicyQuarantinesLatePreviousHostCallback() {
         let now = Date(timeIntervalSince1970: 30_000)
         let previousNotes = HostApplicationIdentity(
@@ -215,7 +247,18 @@ final class SharedDictationStoreTests: XCTestCase {
             HostAppSwitcher.anticipatedRoute(
                 for: "com.apple.mobilenotes"
             ),
-            "host-bundle"
+            "host-url"
+        )
+        XCTAssertEqual(
+            HostAppSwitcher.anticipatedAttempts(
+                for: "net.whatsapp.WhatsApp",
+                processIdentifier: 474
+            ),
+            [
+                "return-target-shared-bundle:net.whatsapp.WhatsApp",
+                "host-catalog:net.whatsapp.WhatsApp",
+                "host-url:pending",
+            ]
         )
         XCTAssertEqual(
             HostAppSwitcher.anticipatedRoute(
@@ -288,6 +331,11 @@ final class SharedDictationStoreTests: XCTestCase {
         XCTAssertFalse(
             HostAppSwitcher.isValidReturnBundleIdentifier(
                 "com.apple.Spotlight"
+            )
+        )
+        XCTAssertFalse(
+            HostAppSwitcher.isValidReturnBundleIdentifier(
+                "com.apple.SafariViewService"
             )
         )
         XCTAssertTrue(
