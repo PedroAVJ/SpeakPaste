@@ -144,6 +144,7 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
     /// remains native and independently recoverable for batch fallback.
     private var realtimeSampleHandler: (@Sendable (Data) -> Void)?
     private var realtimeSampleAccumulator = Data()
+    private let realtimePCMConverter = MacRealtimePCMConverter()
     private static let realtimeChunkByteCount = 6_400
     private static let realtimeMinimumChunkByteCount = 3_200
 
@@ -353,7 +354,7 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
     ) {
         sampleFlow.record(peakAmplitude: Self.peakAmplitude(of: sampleBuffer))
         guard realtimeSampleHandler != nil else { return }
-        guard let data = Self.realtimePCM16Data(of: sampleBuffer) else { return }
+        guard let data = realtimePCMConverter.convert(sampleBuffer) else { return }
         appendRealtimeSamples(data)
     }
 
@@ -363,6 +364,7 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
         _ handler: @escaping @Sendable (Data) -> Void
     ) {
         sampleQueue.sync {
+            realtimePCMConverter.reset()
             realtimeSampleAccumulator.removeAll(keepingCapacity: true)
             realtimeSampleHandler = handler
         }
@@ -373,6 +375,10 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
     /// only after `stop()` has returned and capture is released.
     func finishRealtimeAudioStreaming() {
         sampleQueue.sync {
+            let convertedTail = realtimePCMConverter.finish()
+            if !convertedTail.isEmpty {
+                appendRealtimeSamples(convertedTail)
+            }
             if !realtimeSampleAccumulator.isEmpty {
                 var finalFrame = realtimeSampleAccumulator
                 if finalFrame.count < Self.realtimeMinimumChunkByteCount {
@@ -392,6 +398,7 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
 
     func cancelRealtimeAudioStreaming() {
         sampleQueue.sync {
+            realtimePCMConverter.reset()
             realtimeSampleAccumulator.removeAll(keepingCapacity: false)
             realtimeSampleHandler = nil
         }
@@ -407,50 +414,6 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
             realtimeSampleAccumulator.removeFirst(Self.realtimeChunkByteCount)
             realtimeSampleHandler?(frame)
         }
-    }
-
-    /// The sample tap is configured for this exact format. Validate the ASBD
-    /// before copying because sending device-native floats or stereo bytes as
-    /// pcm_16000 would produce convincing-looking protocol frames but garbage
-    /// recognition.
-    private nonisolated static func realtimePCM16Data(
-        of sampleBuffer: CMSampleBuffer
-    ) -> Data? {
-        guard
-            let description = CMSampleBufferGetFormatDescription(sampleBuffer),
-            let basicPointer = CMAudioFormatDescriptionGetStreamBasicDescription(
-                description
-            )
-        else {
-            return nil
-        }
-        let basic = basicPointer.pointee
-        guard
-            basic.mFormatID == kAudioFormatLinearPCM,
-            basic.mSampleRate == 16_000,
-            basic.mChannelsPerFrame == 1,
-            basic.mBitsPerChannel == 16,
-            basic.mFormatFlags & kAudioFormatFlagIsFloat == 0,
-            basic.mFormatFlags & kAudioFormatFlagIsBigEndian == 0,
-            let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer)
-        else {
-            return nil
-        }
-        let length = CMBlockBufferGetDataLength(blockBuffer)
-        guard length > 0 else { return nil }
-        var data = Data(count: length)
-        let status = data.withUnsafeMutableBytes { bytes in
-            guard let baseAddress = bytes.baseAddress else {
-                return kCMBlockBufferBadCustomBlockSourceErr
-            }
-            return CMBlockBufferCopyDataBytes(
-                blockBuffer,
-                atOffset: 0,
-                dataLength: length,
-                destination: baseAddress
-            )
-        }
-        return status == kCMBlockBufferNoErr ? data : nil
     }
 
     /// Peak absolute amplitude across the buffer, normalized to 0...1. Returns
@@ -683,21 +646,11 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
         }
         session.addOutput(output)
 
-        // A lightweight tap that counts delivered buffers and, when the
-        // experimental mode is armed, supplies Scribe's documented raw audio
-        // format. The file output still writes native WAV in parallel.
+        // A lightweight tap that counts delivered device-native buffers. When
+        // realtime is armed, MacRealtimePCMConverter explicitly produces
+        // Scribe's 16 kHz mono PCM; asking AVCapture to do that conversion here
+        // fails on some Mac and Continuity inputs and silently yields no stream.
         let sampleTap = AVCaptureAudioDataOutput()
-        if preparesRealtimePCM {
-            sampleTap.audioSettings = [
-                AVFormatIDKey: kAudioFormatLinearPCM,
-                AVSampleRateKey: 16_000,
-                AVNumberOfChannelsKey: 1,
-                AVLinearPCMBitDepthKey: 16,
-                AVLinearPCMIsFloatKey: false,
-                AVLinearPCMIsBigEndianKey: false,
-                AVLinearPCMIsNonInterleaved: false,
-            ]
-        }
         sampleTap.setSampleBufferDelegate(self, queue: sampleQueue)
         guard session.canAddOutput(sampleTap) else {
             session.commitConfiguration()

@@ -1,5 +1,6 @@
 import AppKit
 @preconcurrency import ApplicationServices
+import Carbon
 import Foundation
 
 /// A UTF-16 range matching the units used by macOS Accessibility text APIs.
@@ -24,6 +25,26 @@ struct MacRealtimeTextMutation: Equatable, Sendable {
     let replacementText: String
     let resultingSnapshot: MacRealtimeTextSnapshot
     let resultingOwnedRange: MacRealtimeTextRange?
+}
+
+enum MacRealtimeElementOwnershipPolicy {
+    static func permitsResolution(
+        valueMatches: Bool,
+        sameElement: Bool,
+        selectionMatches: Bool,
+        capturedInteractionGeneration: UInt64?,
+        currentInteractionGeneration: UInt64?
+    ) -> Bool {
+        guard valueMatches else { return false }
+        if sameElement && selectionMatches { return true }
+        guard
+            let capturedInteractionGeneration,
+            let currentInteractionGeneration
+        else {
+            return false
+        }
+        return capturedInteractionGeneration == currentInteractionGeneration
+    }
 }
 
 /// Pure compare-and-swap state for one realtime dictation span.
@@ -57,6 +78,10 @@ struct MacRealtimeTextReconciler: Sendable {
     }
 
     var hasProvisionalOutput: Bool { ownedRange != nil }
+
+    func alreadyOwns(text: String) -> Bool {
+        ownedRange != nil && provisionalText == text
+    }
 
     /// Available only at the exact post-rollback state. Carrying this snapshot
     /// into durable delivery prevents a later paste from following a caret move
@@ -169,40 +194,54 @@ struct MacRealtimeTextReconciler: Sendable {
 /// result permanently detaches the session.
 @MainActor
 final class MacRealtimeInlineTextSession {
-    private let element: AXUIElement
+    private var element: AXUIElement
     private let processIdentifier: pid_t
+    /// Right-Command arrives as flagsChanged and does not increment this
+    /// tracker. Real typing/clicking does, which lets us distinguish a user's
+    /// caret move from Electron rebuilding its focused AX proxy.
+    private let interactionGeneration: UInt64?
     private var reconciler: MacRealtimeTextReconciler
     private(set) var isDetached = false
+    private(set) var isFinalized = false
 
     private init(
         element: AXUIElement,
         processIdentifier: pid_t,
+        interactionGeneration: UInt64?,
         reconciler: MacRealtimeTextReconciler
     ) {
         self.element = element
         self.processIdentifier = processIdentifier
+        self.interactionGeneration = interactionGeneration
         self.reconciler = reconciler
     }
 
     static func make(
-        element: AXUIElement,
+        element capturedElement: AXUIElement,
         processIdentifier: pid_t
     ) -> MacRealtimeInlineTextSession? {
+        let interactionGeneration = MacUserInteractionTracker.shared.snapshot
         guard
-            MacAccessibility.exactElementHoldsFocus(
-                element,
-                processIdentifier: processIdentifier
+            !IsSecureEventInputEnabled(),
+            NSWorkspace.shared.frontmostApplication?.processIdentifier
+                == processIdentifier,
+            let focused = MacAccessibility.focusedWritableElement(),
+            let capturedSnapshot = MacAccessibility.realtimeTextSnapshot(
+                of: capturedElement
             ),
-            MacAccessibility.realtimeTextAttributesAreSettable(on: element),
-            let snapshot = MacAccessibility.realtimeTextSnapshot(of: element),
+            MacAccessibility.realtimeTextAttributesAreSettable(on: focused),
+            let snapshot = MacAccessibility.realtimeTextSnapshot(of: focused),
+            (CFEqual(capturedElement, focused) || snapshot == capturedSnapshot),
             snapshot.selection.length == 0,
-            let reconciler = MacRealtimeTextReconciler(originalSnapshot: snapshot)
+            let reconciler = MacRealtimeTextReconciler(originalSnapshot: snapshot),
+            interactionGeneration == MacUserInteractionTracker.shared.snapshot
         else {
             return nil
         }
         return MacRealtimeInlineTextSession(
-            element: element,
+            element: focused,
             processIdentifier: processIdentifier,
+            interactionGeneration: interactionGeneration,
             reconciler: reconciler
         )
     }
@@ -219,8 +258,18 @@ final class MacRealtimeInlineTextSession {
     /// because the service emitted an empty partial.
     @discardableResult
     func update(text: String) -> Bool {
-        guard !isDetached else { return false }
+        guard !isDetached, !isFinalized else { return false }
         if text.isEmpty, !reconciler.hasProvisionalOutput { return true }
+        // Committed and final frames frequently repeat the last full partial.
+        // Verify ownership, but do not make Electron process another identical
+        // AXSelectedText mutation.
+        if reconciler.alreadyOwns(text: text) {
+            guard verifiedCurrentSnapshot() != nil else {
+                isDetached = true
+                return false
+            }
+            return true
+        }
         guard
             let current = verifiedCurrentSnapshot(),
             let mutation = reconciler.planUpdate(
@@ -234,12 +283,23 @@ final class MacRealtimeInlineTextSession {
         return apply(mutation)
     }
 
+    /// Replaces the owned provisional span with the exact post-processed final
+    /// transcript and relinquishes it in place. This is the verified realtime
+    /// delivery boundary; it deliberately avoids erasing visible text and then
+    /// asking an Electron Paste menu to put the same words back.
+    @discardableResult
+    func finalize(text: String) -> Bool {
+        guard !isDetached, !isFinalized, update(text: text) else { return false }
+        isFinalized = true
+        return true
+    }
+
     /// Removes only the exact text this session still proves it owns and
     /// restores the pre-dictation caret. If the user typed, moved the caret,
     /// or changed focus, rollback is refused and nothing is touched.
     @discardableResult
     func rollback() -> Bool {
-        guard !isDetached else { return false }
+        guard !isDetached, !isFinalized else { return false }
         guard let current = verifiedCurrentSnapshot() else {
             isDetached = true
             return false
@@ -269,47 +329,28 @@ final class MacRealtimeInlineTextSession {
     }
 
     private func verifiedCurrentSnapshot() -> MacRealtimeTextSnapshot? {
-        guard
-            MacAccessibility.exactElementHoldsFocus(
-                element,
-                processIdentifier: processIdentifier
-            )
-        else {
-            return nil
-        }
-        return MacAccessibility.realtimeTextSnapshot(of: element)
+        resolveElement(requiring: reconciler.expectedSnapshot)
     }
 
     private func apply(_ mutation: MacRealtimeTextMutation) -> Bool {
         let expectedBeforeMutation = reconciler.expectedSnapshot
         guard
+            resolveElement(requiring: expectedBeforeMutation) != nil,
             MacAccessibility.setRealtimeSelection(
                 mutation.replacementRange,
                 on: element
             ),
-            MacAccessibility.exactElementHoldsFocus(
-                element,
-                processIdentifier: processIdentifier
-            ),
-            MacAccessibility.realtimeTextSnapshot(of: element)
-                == MacRealtimeTextSnapshot(
+            resolveElement(
+                requiring: MacRealtimeTextSnapshot(
                     value: expectedBeforeMutation.value,
                     selection: mutation.replacementRange
-                ),
+                )
+            ) != nil,
             MacAccessibility.replaceRealtimeSelection(
                 with: mutation.replacementText,
                 on: element
             ),
-            MacAccessibility.setRealtimeSelection(
-                mutation.resultingSnapshot.selection,
-                on: element
-            ),
-            MacAccessibility.exactElementHoldsFocus(
-                element,
-                processIdentifier: processIdentifier
-            ),
-            MacAccessibility.realtimeTextSnapshot(of: element)
-                == mutation.resultingSnapshot
+            resolveElement(requiring: mutation.resultingSnapshot) != nil
         else {
             // A setter may have succeeded before a later readback failed. That
             // ambiguity is precisely when another edit would be dangerous.
@@ -318,5 +359,57 @@ final class MacRealtimeInlineTextSession {
         }
         reconciler.accept(mutation)
         return true
+    }
+
+    /// Electron/Chromium may swap the focused AX object or normalize its
+    /// selection after a successful setter. Rebind only when the same process
+    /// remains frontmost, the complete field value is exactly what we own, and
+    /// the global interaction generation proves the user did not type/click.
+    /// When monitoring is unavailable, retain the older strict object/range
+    /// behavior.
+    private func resolveElement(
+        requiring expected: MacRealtimeTextSnapshot
+    ) -> MacRealtimeTextSnapshot? {
+        guard
+            !IsSecureEventInputEnabled(),
+            NSWorkspace.shared.frontmostApplication?.processIdentifier
+                == processIdentifier,
+            let focused = MacAccessibility.focusedWritableElement(),
+            MacAccessibility.realtimeTextAttributesAreSettable(on: focused),
+            var snapshot = MacAccessibility.realtimeTextSnapshot(of: focused),
+            snapshot.value == expected.value
+        else {
+            return nil
+        }
+
+        let sameElement = CFEqual(element, focused)
+        let selectionMatches = snapshot.selection == expected.selection
+        guard MacRealtimeElementOwnershipPolicy.permitsResolution(
+            valueMatches: true,
+            sameElement: sameElement,
+            selectionMatches: selectionMatches,
+            capturedInteractionGeneration: interactionGeneration,
+            currentInteractionGeneration: MacUserInteractionTracker.shared.snapshot
+        ) else {
+            return nil
+        }
+        if !sameElement || !selectionMatches {
+            element = focused
+            if !selectionMatches {
+                guard
+                    MacAccessibility.setRealtimeSelection(
+                        expected.selection,
+                        on: element
+                    ),
+                    let repaired = MacAccessibility.realtimeTextSnapshot(of: element),
+                    repaired == expected
+                else {
+                    return nil
+                }
+                snapshot = repaired
+            }
+        }
+        element = focused
+        return snapshot == expected ? snapshot : nil
     }
 }

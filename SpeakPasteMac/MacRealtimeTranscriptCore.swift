@@ -76,6 +76,7 @@ enum MacRealtimeScribeError: LocalizedError, Sendable {
     case commitTimedOut
     case socketClosed
     case audioBackpressure
+    case noConvertedAudio
     case service(type: String, message: String)
 
     var errorDescription: String? {
@@ -92,6 +93,8 @@ enum MacRealtimeScribeError: LocalizedError, Sendable {
             "The ElevenLabs realtime connection closed unexpectedly."
         case .audioBackpressure:
             "The realtime connection could not keep up with microphone audio."
+        case .noConvertedAudio:
+            "The microphone produced no realtime PCM, so SpeakPaste is using the saved WAV."
         case let .service(_, message):
             "ElevenLabs realtime: \(message)"
         }

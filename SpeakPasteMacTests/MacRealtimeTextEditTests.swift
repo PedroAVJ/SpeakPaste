@@ -2,6 +2,57 @@ import XCTest
 @testable import SpeakPaste
 
 final class MacRealtimeTextEditTests: XCTestCase {
+    func testElectronProxyRebindRequiresUnchangedUserInteractionGeneration() {
+        XCTAssertTrue(
+            MacRealtimeElementOwnershipPolicy.permitsResolution(
+                valueMatches: true,
+                sameElement: false,
+                selectionMatches: false,
+                capturedInteractionGeneration: 12,
+                currentInteractionGeneration: 12
+            )
+        )
+        XCTAssertFalse(
+            MacRealtimeElementOwnershipPolicy.permitsResolution(
+                valueMatches: true,
+                sameElement: false,
+                selectionMatches: true,
+                capturedInteractionGeneration: 12,
+                currentInteractionGeneration: 13
+            )
+        )
+        XCTAssertFalse(
+            MacRealtimeElementOwnershipPolicy.permitsResolution(
+                valueMatches: false,
+                sameElement: true,
+                selectionMatches: true,
+                capturedInteractionGeneration: 12,
+                currentInteractionGeneration: 12
+            )
+        )
+    }
+
+    func testStrictOwnershipStillWorksWithoutInteractionMonitor() {
+        XCTAssertTrue(
+            MacRealtimeElementOwnershipPolicy.permitsResolution(
+                valueMatches: true,
+                sameElement: true,
+                selectionMatches: true,
+                capturedInteractionGeneration: nil,
+                currentInteractionGeneration: nil
+            )
+        )
+        XCTAssertFalse(
+            MacRealtimeElementOwnershipPolicy.permitsResolution(
+                valueMatches: true,
+                sameElement: false,
+                selectionMatches: true,
+                capturedInteractionGeneration: nil,
+                currentInteractionGeneration: nil
+            )
+        )
+    }
+
     func testPartialCorrectionsReplaceOnlyTheOwnedCaretRangeAndRollbackExactly() throws {
         let original = MacRealtimeTextSnapshot(
             value: "Start  end",
@@ -17,6 +68,8 @@ final class MacRealtimeTextEditTests: XCTestCase {
         )
         XCTAssertEqual(first.resultingSnapshot.value, "Start hel end")
         reconciler.accept(first)
+        XCTAssertTrue(reconciler.alreadyOwns(text: "hel"))
+        XCTAssertFalse(reconciler.alreadyOwns(text: "hello"))
         XCTAssertNil(reconciler.exactDeliverySnapshot)
 
         let corrected = try XCTUnwrap(

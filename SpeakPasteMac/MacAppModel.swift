@@ -25,6 +25,9 @@ private struct MacFinishedDictation {
     /// Capture/import time, not the later instant when the network finished.
     let createdAt: Date
     let target: MacDeliveryTarget?
+    /// Present only when provisional realtime text still owns an exact AX
+    /// range and should become the final durable delivery in place.
+    let realtimeEditor: MacRealtimeInlineTextSession?
     let deviceName: String
     let recordingDuration: TimeInterval
     let transcriptionDuration: TimeInterval
@@ -57,11 +60,16 @@ private struct MacActiveRealtimeDictation {
 
 private enum MacRealtimeStopResolution {
     case inactive
-    case completed(result: TranscriptionResult, target: MacDeliveryTarget)
+    case completed(
+        result: TranscriptionResult,
+        target: MacDeliveryTarget,
+        editor: MacRealtimeInlineTextSession
+    )
     case batchFallback(
         target: MacDeliveryTarget?,
         requiresManualOutput: Bool,
-        precomputedResult: TranscriptionResult?
+        precomputedResult: TranscriptionResult?,
+        editor: MacRealtimeInlineTextSession?
     )
 }
 
@@ -2431,67 +2439,45 @@ final class MacAppModel: ObservableObject {
 
     /// Called only after the recorder has returned its release receipt. Audio
     /// frames are drained in order, then the manual commit is awaited. The
-    /// provisional AX range is rolled back before ordinary durable delivery is
-    /// allowed to run, preventing interim-plus-final duplication.
+    /// provisional AX range remains owned until History/escrow are durable and
+    /// the final processed text replaces that range in place.
     private func finalizeRealtimeAfterRecorderRelease() async -> MacRealtimeStopResolution {
         guard let active = activeRealtimeDictation else { return .inactive }
         recorder.finishRealtimeAudioStreaming()
         do {
-            try await active.pump.finish()
+            let sentByteCount = try await active.pump.finish()
+            guard sentByteCount >= 3_200 else {
+                throw MacRealtimeScribeError.noConvertedAudio
+            }
             let result = try await active.session.finish()
             activeRealtimeDictation = nil
-            let rollbackSucceeded = active.editor.rollback()
-            let guardedTarget = exactRealtimeDeliveryTarget(
-                for: active,
-                rollbackSucceeded: rollbackSucceeded
-            )
             releaseRealtimeDeliveryBarrier(for: active.id)
             realtimeCaretFrame = nil
-            if let guardedTarget {
-                return .completed(result: result, target: guardedTarget)
-            }
-            realtimeModeNotice = "Realtime finalized, but SpeakPaste could not prove it still owned the provisional range. The field was left untouched and the final text will be held for manual placement."
-            return .batchFallback(
+            return .completed(
+                result: result,
                 target: active.target,
-                requiresManualOutput: true,
-                precomputedResult: result
+                editor: active.editor
             )
         } catch {
             active.pump.cancel()
             await active.session.cancel()
             activeRealtimeDictation = nil
-            let rollbackSucceeded = active.editor.rollback()
-            let guardedTarget = exactRealtimeDeliveryTarget(
-                for: active,
-                rollbackSucceeded: rollbackSucceeded
-            )
             releaseRealtimeDeliveryBarrier(for: active.id)
             realtimeCaretFrame = nil
-            realtimeModeNotice = "Realtime failed, so SpeakPaste is using the saved WAV with batch Scribe: \(diagnosticMessage(for: error))"
+            realtimeModeNotice = "Realtime failed, so SpeakPaste is finishing the saved WAV with batch Scribe without erasing the live text: \(diagnosticMessage(for: error))"
             return .batchFallback(
-                target: guardedTarget ?? active.target,
-                requiresManualOutput: guardedTarget == nil,
-                precomputedResult: nil
+                target: active.target,
+                requiresManualOutput: false,
+                precomputedResult: nil,
+                editor: active.editor
             )
         }
-    }
-
-    private func exactRealtimeDeliveryTarget(
-        for active: MacActiveRealtimeDictation,
-        rollbackSucceeded: Bool
-    ) -> MacDeliveryTarget? {
-        guard
-            rollbackSucceeded,
-            let snapshot = active.editor.exactDeliverySnapshot
-        else {
-            return nil
-        }
-        return active.target.requiringRealtimeSnapshot(snapshot)
     }
 
     /// Invalidates the socket/audio producer and returns the detached editor so
-    /// callers can preserve the required hardware-release-before-rollback
-    /// ordering for cancel, quit, and recorder failure.
+    /// callers can preserve hardware-release ordering. Explicit cancel and
+    /// unrecoverable no-audio failures roll back; recoverable batch fallback
+    /// keeps this editor and finalizes its owned range in place.
     private func detachActiveRealtimeForCancellation() -> MacActiveRealtimeDictation? {
         recorder.cancelRealtimeAudioStreaming()
         guard let active = activeRealtimeDictation else {
@@ -2618,23 +2604,12 @@ final class MacAppModel: ObservableObject {
         } catch {
             let realtime = detachActiveRealtimeForCancellation()
             if let realtime { await realtime.session.cancel() }
-            // A generic recorder error is not itself a teardown receipt. Make
-            // the release explicit before touching any provisional field text.
+            // A generic recorder error is not itself a teardown receipt.
             await recorder.disconnectAndWait()
-            let realtimeRollbackSucceeded = realtime?.editor.rollback() ?? true
-            let guardedRealtimeTarget = realtime.flatMap {
-                exactRealtimeDeliveryTarget(
-                    for: $0,
-                    rollbackSucceeded: realtimeRollbackSucceeded
-                )
-            }
             if let realtime {
                 releaseRealtimeDeliveryBarrier(for: realtime.id)
             } else {
                 releaseRealtimeDeliveryBarrier()
-            }
-            if !realtimeRollbackSucceeded {
-                realtimeModeNotice = "The recorder failed after the destination changed. SpeakPaste left the provisional field text untouched; any recovered result will require manual placement."
             }
             isMicrophoneConnected = false
             connectedDeviceID = nil
@@ -2646,9 +2621,7 @@ final class MacAppModel: ObservableObject {
                 sounds.playRecordingStopped()
                 recordingWarning = nil
                 automaticStopInProgress = false
-                let target = guardedRealtimeTarget
-                    ?? realtime?.target
-                    ?? deliveryTarget
+                let target = realtime?.target ?? deliveryTarget
                 deliveryTarget = nil
                 // Teardown completed before the recorder surfaced this error,
                 // so the Continuity microphone is already free. Preserve and
@@ -2661,8 +2634,7 @@ final class MacAppModel: ObservableObject {
                     deviceName: deviceName,
                     recordingDuration: recordingDuration,
                     interruption: interruption ?? diagnosticMessage(for: salvaged.underlying),
-                    requiresManualOutput: realtime != nil
-                        && guardedRealtimeTarget == nil,
+                    realtimeEditor: realtime?.editor,
                     hudCardID: hudCapture?.id,
                     hudOrdinal: hudCapture?.ordinal
                 )
@@ -2674,6 +2646,10 @@ final class MacAppModel: ObservableObject {
                 }
                 return
             }
+            // No recoverable audio means no final result can replace the live
+            // hypothesis. Explicitly restore the original field when it is
+            // still safe; otherwise leave the user's field untouched.
+            if let realtime { _ = realtime.editor.rollback() }
             deliveryTarget = nil
             recordFailure(
                 diagnosticMessage(for: error),
@@ -2716,7 +2692,7 @@ final class MacAppModel: ObservableObject {
                 hudCardID: hudCapture?.id,
                 hudOrdinal: hudCapture?.ordinal
             )
-        case let .completed(result, target):
+        case let .completed(result, target, editor):
             handoffIsDurable = startTranscription(
                 audioURL: segment.url,
                 target: target,
@@ -2724,10 +2700,11 @@ final class MacAppModel: ObservableObject {
                 recordingDuration: recordingDuration,
                 interruption: interruption,
                 precomputedResult: result,
+                realtimeEditor: editor,
                 hudCardID: hudCapture?.id,
                 hudOrdinal: hudCapture?.ordinal
             )
-        case let .batchFallback(target, requiresManualOutput, precomputedResult):
+        case let .batchFallback(target, requiresManualOutput, precomputedResult, editor):
             handoffIsDurable = startTranscription(
                 audioURL: segment.url,
                 target: target ?? capturedTarget,
@@ -2736,6 +2713,7 @@ final class MacAppModel: ObservableObject {
                 interruption: interruption,
                 requiresManualOutput: requiresManualOutput,
                 precomputedResult: precomputedResult,
+                realtimeEditor: editor,
                 hudCardID: hudCapture?.id,
                 hudOrdinal: hudCapture?.ordinal
             )
@@ -2781,6 +2759,7 @@ final class MacAppModel: ObservableObject {
         isImport: Bool = false,
         requiresManualOutput: Bool = false,
         precomputedResult: TranscriptionResult? = nil,
+        realtimeEditor: MacRealtimeInlineTextSession? = nil,
         hudCardID: UUID? = nil,
         hudOrdinal: Int? = nil
     ) -> Bool {
@@ -2888,6 +2867,7 @@ final class MacAppModel: ObservableObject {
                 isImport: isImport,
                 requiresManualOutput: requiresManualOutput,
                 precomputedResult: precomputedResult,
+                realtimeEditor: realtimeEditor,
                 networkGenerationAtRequestStart: networkGenerationAtRequestStart,
                 workloadID: workloadID,
                 hudCardID: resolvedHUDCardID,
@@ -2914,6 +2894,7 @@ final class MacAppModel: ObservableObject {
         isImport: Bool,
         requiresManualOutput: Bool,
         precomputedResult: TranscriptionResult?,
+        realtimeEditor: MacRealtimeInlineTextSession?,
         networkGenerationAtRequestStart: UInt64,
         workloadID: UUID,
         hudCardID: UUID,
@@ -3097,6 +3078,7 @@ final class MacAppModel: ObservableObject {
                 deliveryEscrowID: deliveryEscrowID,
                 createdAt: createdAt,
                 target: target,
+                realtimeEditor: realtimeEditor,
                 deviceName: deviceName,
                 recordingDuration: recordingDuration,
                 transcriptionDuration: Date().timeIntervalSince(transcriptionStartedAt),
@@ -3159,6 +3141,7 @@ final class MacAppModel: ObservableObject {
                 deliveryEscrowID: nil,
                 createdAt: createdAt,
                 target: target,
+                realtimeEditor: nil,
                 deviceName: deviceName,
                 recordingDuration: recordingDuration,
                 transcriptionDuration: 0,
@@ -3647,14 +3630,29 @@ final class MacAppModel: ObservableObject {
             createdAt: finished.createdAt,
             sourceText: finished.text
         )
-        let deliveryOutcome = await pasteController.deliver(
-            finished.preparedChunk,
-            capturedTarget: finished.target,
-            autoPaste: autoPaste,
-            policyForTarget: { self.deliveryPolicy(for: $0) },
-            copyOnHold: copyOnHold,
-            heldClipboardOwner: heldClipboardOwner
-        )
+        let deliveryOutcome: MacPasteDeliveryOutcome
+        if let realtimeEditor = finished.realtimeEditor,
+           let target = finished.target {
+            let finalText = MacTranscriptPostProcessor.fit(
+                finished.preparedChunk,
+                after: target.precedingText
+            )
+            deliveryOutcome = await pasteController.deliverRealtime(
+                finalText,
+                editor: realtimeEditor,
+                target: target,
+                heldClipboardOwner: heldClipboardOwner
+            )
+        } else {
+            deliveryOutcome = await pasteController.deliver(
+                finished.preparedChunk,
+                capturedTarget: finished.target,
+                autoPaste: autoPaste,
+                policyForTarget: { self.deliveryPolicy(for: $0) },
+                copyOnHold: copyOnHold,
+                heldClipboardOwner: heldClipboardOwner
+            )
+        }
         let delivery = deliveryOutcome.result
         let deliveredTarget = deliveryOutcome.target
         activeDeliveryEscrowIDs.remove(deliveryEscrowID)
@@ -4694,22 +4692,13 @@ final class MacAppModel: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             if let realtime { await realtime.session.cancel() }
-            // The recorder callback is delivered only after failSession has
-            // stopped the capture session, so rollback now follows hardware
-            // release just as it does on the ordinary stop path.
-            let rollbackSucceeded = realtime?.editor.rollback() ?? true
-            let guardedRealtimeTarget = realtime.flatMap {
-                self.exactRealtimeDeliveryTarget(
-                    for: $0,
-                    rollbackSucceeded: rollbackSucceeded
-                )
-            }
             if let realtime {
                 self.releaseRealtimeDeliveryBarrier(for: realtime.id)
             } else {
                 self.releaseRealtimeDeliveryBarrier()
             }
             guard let salvagedAudioURL else {
+                if let realtime { _ = realtime.editor.rollback() }
                 self.recordFailure(
                     self.diagnosticMessage(for: error),
                     deviceName: deviceName,
@@ -4720,19 +4709,16 @@ final class MacAppModel: ObservableObject {
             }
             // AVFoundation finalized the file before the stream died, so the
             // words already spoken remain recoverable through batch Scribe.
+            // Keep the live owned range so batch can finalize it in place.
             let interruption = self.diagnosticMessage(for: error)
-            if !rollbackSucceeded {
-                self.realtimeModeNotice = "The microphone stream failed after the destination changed. Recovered text will wait for manual placement."
-            }
             self.phase = .ready
             self.startTranscription(
                 audioURL: salvagedAudioURL,
-                target: guardedRealtimeTarget ?? realtime?.target ?? target,
+                target: realtime?.target ?? target,
                 deviceName: deviceName,
                 recordingDuration: recordingDuration,
                 interruption: interruption,
-                requiresManualOutput: realtime != nil
-                    && guardedRealtimeTarget == nil,
+                realtimeEditor: realtime?.editor,
                 hudCardID: hudCapture?.id,
                 hudOrdinal: hudCapture?.ordinal
             )

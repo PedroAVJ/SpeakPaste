@@ -263,6 +263,7 @@ final class MacRealtimeAudioPump: @unchecked Sendable {
     private final class State: @unchecked Sendable {
         private let lock = NSLock()
         private var storedError: Error?
+        private var storedSentByteCount = 0
 
         func record(_ error: Error) {
             lock.lock()
@@ -274,6 +275,18 @@ final class MacRealtimeAudioPump: @unchecked Sendable {
             lock.lock()
             defer { lock.unlock() }
             return storedError
+        }
+
+        func recordSent(byteCount: Int) {
+            lock.lock()
+            storedSentByteCount += max(0, byteCount)
+            lock.unlock()
+        }
+
+        var sentByteCount: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return storedSentByteCount
         }
     }
 
@@ -294,6 +307,7 @@ final class MacRealtimeAudioPump: @unchecked Sendable {
                 for await chunk in stream {
                     try Task.checkCancellation()
                     try await session.sendAudio(chunk)
+                    state.recordSent(byteCount: chunk.count)
                 }
             } catch {
                 state.record(error)
@@ -317,10 +331,11 @@ final class MacRealtimeAudioPump: @unchecked Sendable {
         }
     }
 
-    func finish() async throws {
+    func finish() async throws -> Int {
         continuation.finish()
         await sender.value
         if let error = state.error { throw error }
+        return state.sentByteCount
     }
 
     func cancel() {
