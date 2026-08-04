@@ -189,7 +189,7 @@ struct SpeakPasteMacApp: App {
                     .accessibilityLabel(menuBarAccessibilityLabel(for: model))
                     // The menu bar item exists from launch, so this runs even
                     // when the main window never opens — a login-item start
-                    // with the Dock icon off still gets the HUD and recovery
+                    // with the Dock icon off still gets the indicator and recovery
                     // marker.
                     .onAppear { runtime.start() }
             } else {
@@ -280,18 +280,10 @@ struct MacMenuBarView: View {
                 model.toggleRecording()
             }
             .accessibilityLabel("Stop and transcribe, Right Command key")
-            if let confirmation = model.recordingCancelConfirmation {
-                Text("DISCARD RECORDING? — \(confirmation.message)")
-                Button("Discard Recording Now  \(model.cancelHotKeyLabel)") {
-                    model.requestRecordingCancellation()
-                }
-                .accessibilityLabel("Confirm discard recording, Escape key")
-            } else {
-                Button("Cancel Recording  \(model.cancelHotKeyLabel)") {
-                    model.requestRecordingCancellation()
-                }
-                .accessibilityLabel("Cancel recording, Escape key")
+            Button("Cancel Recording  \(model.cancelHotKeyLabel)") {
+                model.requestRecordingCancellation()
             }
+            .accessibilityLabel("Cancel recording immediately, Escape key")
         case .finalizing:
             Button("RELEASING MICROPHONE…") {}
                 .disabled(true)

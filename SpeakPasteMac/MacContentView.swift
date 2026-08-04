@@ -390,13 +390,7 @@ private struct MacDashboardView: View {
                 .fixedSize(horizontal: false, vertical: true)
             }
 
-            if let confirmation = model.recordingCancelConfirmation {
-                Label(confirmation.message, systemImage: "exclamationmark.triangle.fill")
-                    .font(.callout.weight(.semibold))
-                    .foregroundStyle(.orange)
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else if let warning = model.recordingWarning {
+            if let warning = model.recordingWarning {
                 Label(warning, systemImage: "exclamationmark.triangle.fill")
                     .font(.callout.weight(.medium))
                     .foregroundStyle(.orange)
@@ -415,19 +409,11 @@ private struct MacDashboardView: View {
             }
 
             if model.phase == .recording || model.phase == .connecting {
-                Button(
-                    model.recordingCancelConfirmation == nil
-                        ? "Cancel  \(model.cancelHotKeyLabel)"
-                        : "Discard Now  \(model.cancelHotKeyLabel)",
-                    role: .destructive
-                ) {
+                Button("Cancel  \(model.cancelHotKeyLabel)", role: .destructive) {
                     model.requestRecordingCancellation()
                 }
                     .controlSize(.small)
-                    .accessibilityHint(
-                        model.recordingCancelConfirmation?.message
-                            ?? "Abandons this recording without transcribing it."
-                    )
+                    .accessibilityHint("Immediately discards this recording without transcribing it.")
             }
 
             Text(captureHint)
@@ -564,7 +550,7 @@ private struct MacDashboardView: View {
             model.selectedDevice?.isContinuityDevice == true
                 ? "WAIT — do not speak yet. Connecting to your iPhone can take several seconds."
                 : "WAIT — do not speak yet. Connecting to the microphone."
-        case .recording: "SPEAK NOW — press \(model.hotKeyLabel) to stop and transcribe, \(model.cancelHotKeyLabel) to discard."
+        case .recording: "SPEAK NOW — tap \(model.hotKeyLabel) to stop and transcribe; \(model.cancelHotKeyLabel) cancels immediately."
         case .finalizing:
             model.selectedDevice?.isContinuityDevice == true
                 ? "RECORDING STOPPED — releasing the iPhone microphone…"
@@ -1447,7 +1433,7 @@ private struct MacOnboardingView: View {
             Text("Dictate in any app. Your text returns only to the field where you started.")
                 .font(.title3.weight(.semibold))
                 .fixedSize(horizontal: false, vertical: true)
-            Text("Tap \(model.hotKeyLabel) in any app, speak, tap it again. SpeakPaste records — from your iPhone over Continuity when it is nearby — transcribes with ElevenLabs Scribe, and returns the result to the exact field when it is still active. Otherwise, the text waits safely.")
+            Text("Tap \(model.hotKeyLabel) once in any app to start or stop. Tap it twice to switch the sticky input mode between this Mac and your iPhone — even while speaking. SpeakPaste transcribes with ElevenLabs Scribe and returns the result to the exact field when it is still active. Otherwise, the text waits safely.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1706,7 +1692,8 @@ private struct MacOnboardingView: View {
 
             VStack(alignment: .leading, spacing: 8) {
                 shortcutRow(model.hotKeyLabel, spokenKey: "Right Command key", purpose: "Start or stop a dictation")
-                shortcutRow(model.cancelHotKeyLabel, spokenKey: "Escape key", purpose: "Cancel a recording without transcribing it")
+                shortcutRow(model.switchInputHotKeyLabel, spokenKey: "Right Command key twice", purpose: "Switch between Mac and iPhone input — even mid-dictation")
+                shortcutRow(model.cancelHotKeyLabel, spokenKey: "Escape key", purpose: "Cancel immediately — the recording is discarded, nothing is transcribed")
                 shortcutRow(model.releaseHotKeyLabel, spokenKey: "Option Command V", purpose: "Paste held or recovered text at your cursor")
                 shortcutRow(model.pasteLastHotKeyLabel, spokenKey: "Control Command V", purpose: "Paste the last transcript again")
                 shortcutRow(model.copyLastHotKeyLabel, spokenKey: "Control Command C", purpose: "Copy the last transcript")
@@ -1788,7 +1775,7 @@ private struct MacOnboardingView: View {
             .padding(12)
             .background(RoundedRectangle(cornerRadius: 8).fill(.quaternary.opacity(0.4)))
 
-            Text("Try it now: click into any text field, tap \(model.hotKeyLabel), speak a sentence, and tap \(model.hotKeyLabel) again.")
+            Text("Try it now: click into any text field, tap \(model.hotKeyLabel), speak a sentence, and tap \(model.hotKeyLabel) again. Double-tap at any point to switch between Mac and iPhone input.")
                 .font(.callout)
                 .fixedSize(horizontal: false, vertical: true)
 

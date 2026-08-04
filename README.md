@@ -31,17 +31,21 @@ The Xcode project contains four product targets:
 3. Build and run. The product is named **SpeakPaste.app**.
 4. Save your ElevenLabs API key when prompted.
 5. Keep your iPhone nearby and locked and SpeakPaste selects its Continuity
-   microphone automatically. Only a microphone you pick yourself is remembered,
-   and SpeakPaste never substitutes a Mac microphone on its own: if the iPhone
-   is unavailable it says so and waits for you to choose.
-6. Click the record control or tap the **right Command (⌘)** key by itself.
-   The left ⌘ is deliberately untouched, so ⌘C, ⌘V, and ⌘Tab keep their normal
-   behavior and cannot start a dictation by accident.
-7. Wait for the nonactivating floating HUD to change from **WAIT** to
-   **SPEAK NOW**, then begin speaking.
-8. Tap right Command again to stop. SpeakPaste closes the recording, fully
-   releases the microphone, and then moves through **TRANSCRIBING** to **DONE**
-   or **ERROR**.
+   microphone automatically. Your current **Mac** or **iPhone** input mode is
+   remembered across launches. If that source is unavailable, SpeakPaste says
+   so instead of silently substituting the other one.
+6. Click the record control or tap the **right Command (⌘)** key once. A single
+   tap starts or stops dictation after the system double-tap window. The left ⌘
+   is deliberately untouched, so ⌘C, ⌘V, and ⌘Tab keep their normal behavior.
+7. The click-through capture indicator reads **Connecting** while the source is
+   waking and **Listening** when audio is live. It appears only while SpeakPaste
+   is acquiring, using, or releasing the microphone.
+8. Double-tap right Command to switch between **Mac** and **iPhone** input. The
+   choice is sticky. During a recording, SpeakPaste first finalizes and releases
+   the current source, queues that segment, and then starts a new ordered segment
+   on the other source.
+9. Tap right Command once to stop and transcribe, or press **Escape** once to
+   cancel immediately and discard the active segment.
 
 You do not have to wait at the keyboard. If the field you dictated into is no
 longer focused when the transcript arrives, SpeakPaste holds the text instead of
@@ -50,11 +54,11 @@ inserts itself; press **⌥⌘V** to drop it wherever your cursor is instead.
 Delivery is attempted only into the exact element that had focus when recording
 started — never merely the same application.
 
-The second Command press ends the Continuity session before transcription
-starts, allowing macOS to dismiss its system-owned capture surface on the
-iPhone. Each new dictation reconnects and may briefly show **WAIT** or play the
-connection sound again. Automatic paste and the global shortcut require macOS
-Accessibility permission; without it, the transcript remains on the clipboard.
+Stopping ends the Continuity session before transcription starts, allowing
+macOS to dismiss its system-owned capture surface on the iPhone. Each new
+dictation reconnects and may briefly show **Connecting** or play the connection
+sound again. Automatic paste and the global shortcut require macOS Accessibility
+permission; without it, the transcript remains on the clipboard.
 
 You can also build the macOS target from Terminal:
 
@@ -71,7 +75,7 @@ xcodebuild \
 ```
 
 Settings live behind **⌘,** and cover the full Scribe language catalog,
-delivery, sounds, HUD behavior and placement, launch at login, the API key,
+delivery, sounds, capture-indicator placement, launch at login, the API key,
 custom vocabulary, text replacements, per-app rules, transcript history,
 privacy-safe diagnostics, and a live view of every permission the app depends
 on.
@@ -103,8 +107,8 @@ journal. It leaves that journal only after the final transcript and its linked
 consumption receipt are durable; a failed request or write leaves the audio
 available for retry or explicit discard instead of losing what was said. Every
 connectivity-caused failure is also marked for automatic retry: while offline,
-the app, menu bar, and always-visible HUD say that recordings are staying local,
-and the saved queue wakes once when macOS reports that the connection has
+the app and menu bar say that recordings are staying local, and the saved queue
+wakes once when macOS reports that the connection has
 returned. Because an old caret or message draft is not a safe destination, the
 recovered transcript waits for explicit manual placement and never auto-sends.
 All other service and content failures still require an explicit Retry after
@@ -250,25 +254,28 @@ sending sensitive audio.
 
 ## Development status
 
-The macOS target builds with local ad-hoc signing. Its floating HUD exposes
-**WAIT**, **SPEAK NOW**,
-**RECORDING STOPPED**, **TRANSCRIBING**, **DONE**, and **ERROR**, including an
-elapsed timer for busy states. Connecting stays in **WAIT** until the microphone
-proves it is delivering a steady sample stream, so file recording does not begin
-inside the Continuity wake-up gap; if macOS refuses the monitoring tap that
-proves liveness, the connection fails loudly instead of recording unguarded.
+The macOS target builds with local ad-hoc signing. Its floating capture
+indicator is a compact, declarative view of only **Connecting**, **Listening**,
+and **Releasing**, with the active Mac/iPhone source plus a live level and timer
+while listening. It is click-through, has no controls, disappears outside the
+capture lifecycle, and never presents transcription results, offline notices,
+or errors. A stuck Connecting indicator is capped at 20 seconds and Releasing
+at 15 seconds. Connecting normally stays visible until the microphone proves it
+is delivering a steady sample stream, so
+file recording does not begin inside the Continuity wake-up gap; if macOS
+refuses the monitoring tap that proves liveness, the connection fails loudly
+instead of recording unguarded.
 Interrupted startup is retried in place, a stream that dies mid-dictation
 salvages its finalized partial file, and recording startup, WAV finalization,
 network requests, retry concurrency, and long-session limits are bounded.
 
-The HUD docks to all four screen edges, reflows vertically at the left and
-right, and exposes Start while optionally kept visible at idle only when the API
-key, selected microphone, and microphone permission are ready; otherwise it
-shows **SETUP NEEDED**. It exposes Stop and Cancel during capture. A cancel
-request while connecting or before 30 seconds acts immediately. At 30 seconds
-or longer, the first request arms a three-second confirmation window in the HUD,
-dashboard, and menu, and the second discards the recording. All normal builds
-that own SpeakPaste's shared local stores use one product-wide process lease,
+The indicator can be anchored at any screen edge without becoming a second
+control surface. One bare right-Command tap starts or stops; two taps switch the
+persistent Mac/iPhone input mode. A switch during live capture safely finalizes
+the current segment, releases its hardware, then resumes as the next ordered
+segment on the target source. One Escape cancels connecting or recording
+immediately. All normal builds that own SpeakPaste's shared local stores use one
+product-wide process lease,
 independent of bundle identifier; a secondary launch exits without initializing
 app data. While the microphone is recording, SpeakPaste prevents idle display
 and system sleep, and VoiceOver announces the consequential capture phases.

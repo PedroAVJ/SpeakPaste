@@ -16,8 +16,9 @@ These are not claimed as implemented. They are narrower than the excluded
 automation/model/media-control surfaces, but still need product or release work:
 
 - Opt-in macOS notifications for a background failure or newly held output when
-  the HUD is no longer visible. Authorization, categories, and delivery should
-  be tested only after the permanent signed bundle identity exists.
+  the capture indicator is no longer visible. Authorization, categories, and
+  delivery should be tested only after the permanent signed bundle identity
+  exists.
 - Removing a large retained-audio library without ever waiting behind an
   in-progress copy on the main actor. The current lock preserves consistency,
   but a worst-case privacy-toggle cleanup can temporarily make the UI
@@ -26,7 +27,7 @@ automation/model/media-control surfaces, but still need product or release work:
 ## Automated candidate gates
 
 - [ ] Run the complete focused Swift test suite, including persistence failure,
-      pending-audio, pending-transcript ambiguity, cancellation policy,
+      pending-audio, pending-transcript ambiguity, Command gesture/input mode,
       vocabulary boundary, retained-audio quota/free-space, and single-instance
       coverage.
 - [ ] Build `SpeakPasteMac` from a clean candidate checkout with the documented
@@ -59,14 +60,15 @@ TCC grants, or Application Support.
       full 100-choice language catalog, then relaunch and confirm persistence.
       Inject a low-confidence Auto response and confirm the text is preserved
       while the detected-language review warning appears.
-- [ ] Exercise the HUD at top, bottom, left, and right. Confirm left/right use the
-      vertical layout, dragging docks to the nearest edge, the active display is
-      chosen correctly, and no state clips at normal accessibility text sizes.
-- [ ] Turn on the always-visible HUD. Confirm its idle Start button works without
-      activating SpeakPaste or stealing focus; confirm capture exposes Stop and
-      Cancel. In a fresh profile with missing prerequisites, confirm it says
-      SETUP NEEDED and exposes no Start button. Turn the option off and confirm
-      normal delayed hiding returns.
+- [ ] Exercise the capture indicator at top, bottom, left, and right. Confirm the
+      active display is chosen correctly, the pill stays click-through, and no
+      state clips at normal accessibility text sizes.
+- [ ] Exercise Connecting, Listening, and Releasing. Confirm those are the only
+      visible states, the live meter/timer appear only while listening, and the
+      indicator hides at idle, while transcribing, after success, on errors, and
+      while offline. Hold the model in Connecting and Releasing and confirm the
+      indicator hides no later than 20 and 15 seconds after those phases began,
+      respectively.
 - [ ] Verify every vocabulary action: add, search, edit Save/Cancel, paste-list
       Save/Cancel, file-picker Cancel, and remove confirm/Cancel. Check the
       1,000-term ceiling, fewer-than-50-character and five-word limits, forbidden
@@ -131,17 +133,22 @@ for the release evidence.
 
 - [ ] Grant permissions through onboarding, select the Continuity microphone,
       and complete the three-second microphone test.
-- [ ] Focus a Notes field, tap bare right Command, wait for **SPEAK NOW**,
+- [ ] Focus a Notes field, tap bare right Command, wait for **Listening**,
       dictate, and tap it again. Confirm text reaches that exact field and the
-      iPhone's system-owned capture surface dismisses before **TRANSCRIBING**.
+      iPhone's system-owned capture surface dismisses before transcription.
 - [ ] Repeat immediately to prove clean Continuity release and reconnect, not
       merely one successful transcription.
-- [ ] During connecting and during a recording under 30 seconds, press Escape
-      and use the HUD Cancel control; each must cancel immediately. At 30 seconds
-      or longer, confirm the first request preserves audio and shows the
-      three-second warning, the second request inside the window discards, and an
-      expired confirmation requires a new first request. Stop must still
-      transcribe normally.
+- [ ] Start in Mac mode, double-tap bare right Command while idle, and confirm
+      iPhone mode is selected. Relaunch and confirm the mode persists. Double-tap
+      back and verify Mac mode also persists.
+- [ ] While speaking through the Mac, double-tap bare right Command. Confirm the
+      Mac segment is finalized and its input released before iPhone Connecting
+      then Listening begins; continue speaking and confirm both transcripts are
+      delivered in spoken order. Repeat in the opposite direction.
+- [ ] While connecting and while recording, press Escape once. Each must cancel
+      immediately, discard the active segment, release the microphone, and leave
+      no capture indicator behind. A normal single-Command stop must still
+      transcribe.
 - [ ] Start in one field and switch to another before the response returns. No
       text may enter the second field. Returning to the exact original field must
       release only its matching held text.

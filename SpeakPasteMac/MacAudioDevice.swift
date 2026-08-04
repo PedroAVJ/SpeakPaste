@@ -10,6 +10,9 @@ struct MacAudioInputDevice: Identifiable, Hashable, Sendable {
     /// Continuity in English; the transport type is the same on every system
     /// locale, and it does not misfire on, say, a USB mic named "iPhone Mic".
     let isContinuityDevice: Bool
+    var isBuiltInDevice: Bool {
+        transportType == kAudioDeviceTransportTypeBuiltIn
+    }
     /// Nil means Core Audio did not identify the transport. Unknown transport
     /// is never promoted to Continuity based on a localized/device-given name.
     let transportType: UInt32?

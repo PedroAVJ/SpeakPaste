@@ -19,7 +19,7 @@ struct MacSettingsView: View {
             MacGeneralSettings()
                 .tabItem { Label("General", systemImage: "gearshape") }
             MacAudioHUDSettings()
-                .tabItem { Label("Audio & HUD", systemImage: "waveform.badge.mic") }
+                .tabItem { Label("Audio & Indicator", systemImage: "waveform.badge.mic") }
             MacDictionarySettings()
                 .tabItem { Label("Dictionary", systemImage: "text.book.closed") }
             MacAppRulesSettings()
@@ -134,20 +134,15 @@ private struct MacGeneralSettings: View {
     }
 }
 
-// MARK: - Audio & HUD
+// MARK: - Audio & Indicator
 
 private struct MacAudioHUDSettings: View {
     @EnvironmentObject private var model: MacAppModel
 
     var body: some View {
         Form {
-            Section("Status HUD") {
-                Toggle("Show the floating status HUD", isOn: $model.hudEnabled)
-                Toggle("Keep the HUD on screen when idle", isOn: $model.hudAlwaysVisible)
-                    .disabled(!model.hudEnabled)
-                Text("When idle, the HUD stays visible with a Start button instead of disappearing after each dictation. It still never takes focus from the app you are typing in.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            Section("Status indicator") {
+                Toggle("Show the floating capture indicator", isOn: $model.hudEnabled)
                 Picker("Placement", selection: $model.hudPlacement) {
                     Text("Top").tag(MacHUDPlacement.top)
                     Text("Bottom").tag(MacHUDPlacement.bottom)
@@ -155,7 +150,7 @@ private struct MacAudioHUDSettings: View {
                     Text("Right").tag(MacHUDPlacement.right)
                 }
                 .disabled(!model.hudEnabled)
-                Text("The HUD never takes focus. While recording it shows a live level meter with Stop and Cancel buttons, and dragging it docks it to the nearest screen edge. Outside recording it stays click-through unless the idle Start button is enabled above. Top keeps it clear of the text fields most apps put at the bottom of the window.")
+                Text("A small click-through indicator appears only while SpeakPaste is connecting, listening, or releasing the microphone, then disappears. It has no buttons and never takes focus. Errors, offline status, and waiting text appear in the main window and the menu bar. Top keeps it clear of the text fields most apps put at the bottom of the window.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -172,7 +167,8 @@ private struct MacAudioHUDSettings: View {
 
             Section("Shortcuts") {
                 shortcutRow(model.hotKeyLabel, spokenKey: "Right Command key", purpose: "Start or stop a dictation")
-                shortcutRow(model.cancelHotKeyLabel, spokenKey: "Escape key", purpose: "Cancel a recording without transcribing")
+                shortcutRow(model.switchInputHotKeyLabel, spokenKey: "Right Command key twice", purpose: "Switch between Mac and iPhone input — even mid-dictation")
+                shortcutRow(model.cancelHotKeyLabel, spokenKey: "Escape key", purpose: "Cancel immediately — the recording is discarded, nothing is transcribed")
                 shortcutRow(model.releaseHotKeyLabel, spokenKey: "Option Command V", purpose: "Paste held or recovered text at the cursor")
                 shortcutRow(model.pasteLastHotKeyLabel, spokenKey: "Control Command V", purpose: "Paste the last transcript again")
                 shortcutRow(model.copyLastHotKeyLabel, spokenKey: "Control Command C", purpose: "Copy the last transcript")

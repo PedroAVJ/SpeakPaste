@@ -53,7 +53,6 @@
 		D10000000000000000000049 /* MacPendingAudioStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000049 /* MacPendingAudioStore.swift */; };
 		D10000000000000000000050 /* MacPasteVerification.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000050 /* MacPasteVerification.swift */; };
 		F10000000000000000000101 /* MacActiveCaptureRecovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000000000000000000101 /* MacActiveCaptureRecovery.swift */; };
-		G10000000000000000000201 /* MacRecordingCancellationPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = G20000000000000000000201 /* MacRecordingCancellationPolicy.swift */; };
 		H10000000000000000000301 /* MacSingleInstanceLease.swift in Sources */ = {isa = PBXBuildFile; fileRef = H20000000000000000000301 /* MacSingleInstanceLease.swift */; };
 		D10000000000000000000007 /* MacPasteController.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000007 /* MacPasteController.swift */; };
 		D10000000000000000000008 /* MacReliabilityStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000008 /* MacReliabilityStore.swift */; };
@@ -62,6 +61,8 @@
 		D1000000000000000000000B /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000005 /* KeychainStore.swift */; };
 		D1000000000000000000000C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000B /* Assets.xcassets */; };
 		D1000000000000000000000D /* MacStatusHUD.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000009 /* MacStatusHUD.swift */; };
+		D10000000000000000000051 /* MacCommandGesture.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000051 /* MacCommandGesture.swift */; };
+		D10000000000000000000052 /* MacInputMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000052 /* MacInputMode.swift */; };
 		E10000000000000000000001 /* DictationActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000001 /* DictationActivityAttributes.swift */; };
 		E10000000000000000000002 /* DictationLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000002 /* DictationLiveActivity.swift */; };
 		E10000000000000000000003 /* DictationActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000001 /* DictationActivityAttributes.swift */; };
@@ -160,11 +161,12 @@
 		D20000000000000000000049 /* MacPendingAudioStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacPendingAudioStore.swift; sourceTree = "<group>"; };
 		D20000000000000000000050 /* MacPasteVerification.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacPasteVerification.swift; sourceTree = "<group>"; };
 		F20000000000000000000101 /* MacActiveCaptureRecovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacActiveCaptureRecovery.swift; sourceTree = "<group>"; };
-		G20000000000000000000201 /* MacRecordingCancellationPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacRecordingCancellationPolicy.swift; sourceTree = "<group>"; };
 		H20000000000000000000301 /* MacSingleInstanceLease.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacSingleInstanceLease.swift; sourceTree = "<group>"; };
 		D20000000000000000000007 /* MacPasteController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacPasteController.swift; sourceTree = "<group>"; };
 		D20000000000000000000008 /* MacReliabilityStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacReliabilityStore.swift; sourceTree = "<group>"; };
 		D20000000000000000000009 /* MacStatusHUD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacStatusHUD.swift; sourceTree = "<group>"; };
+		D20000000000000000000051 /* MacCommandGesture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacCommandGesture.swift; sourceTree = "<group>"; };
+		D20000000000000000000052 /* MacInputMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacInputMode.swift; sourceTree = "<group>"; };
 		D2000000000000000000000F /* SpeakPaste.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SpeakPaste.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		E20000000000000000000001 /* DictationActivityAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictationActivityAttributes.swift; sourceTree = "<group>"; };
 		E20000000000000000000002 /* DictationLiveActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictationLiveActivity.swift; sourceTree = "<group>"; };
@@ -255,6 +257,8 @@
 				D20000000000000000000004 /* MacAudioDevice.swift */,
 				D20000000000000000000005 /* MacAudioRecorder.swift */,
 				D20000000000000000000006 /* MacGlobalHotKey.swift */,
+				D20000000000000000000051 /* MacCommandGesture.swift */,
+				D20000000000000000000052 /* MacInputMode.swift */,
 				D2000000000000000000000E /* MacDeliveryTarget.swift */,
 				D20000000000000000000031 /* MacKeyboardLayout.swift */,
 				D20000000000000000000040 /* MacVocabularyStore.swift */,
@@ -269,7 +273,6 @@
 				D20000000000000000000049 /* MacPendingAudioStore.swift */,
 				D20000000000000000000050 /* MacPasteVerification.swift */,
 				F20000000000000000000101 /* MacActiveCaptureRecovery.swift */,
-				G20000000000000000000201 /* MacRecordingCancellationPolicy.swift */,
 				H20000000000000000000301 /* MacSingleInstanceLease.swift */,
 				D20000000000000000000007 /* MacPasteController.swift */,
 				D20000000000000000000008 /* MacReliabilityStore.swift */,
@@ -402,7 +405,7 @@
 		};
 		A60000000000000000000003 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A1000000000000000000000C, A1000000000000000000000D, C1000000000000000000000B, ); runOnlyForDeploymentPostprocessing = 0; };
 		C60000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (C10000000000000000000003, C10000000000000000000004, C10000000000000000000005, F10000000000000000000001, C10000000000000000000006, C10000000000000000000007, ); runOnlyForDeploymentPostprocessing = 0; };
-		D60000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (D10000000000000000000001, D10000000000000000000002, D10000000000000000000003, D10000000000000000000004, D10000000000000000000005, D10000000000000000000006, D10000000000000000000007, D1000000000000000000000E, D1000000000000000000000F, D10000000000000000000040, D10000000000000000000041, D10000000000000000000042, D10000000000000000000043, D10000000000000000000044, D10000000000000000000045, D10000000000000000000046, D10000000000000000000047, D10000000000000000000048, D10000000000000000000049, D10000000000000000000050, F10000000000000000000101, G10000000000000000000201, H10000000000000000000301, D10000000000000000000008, D10000000000000000000009, D1000000000000000000000A, D1000000000000000000000B, D1000000000000000000000D, ); runOnlyForDeploymentPostprocessing = 0; };
+		D60000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (D10000000000000000000001, D10000000000000000000002, D10000000000000000000003, D10000000000000000000004, D10000000000000000000005, D10000000000000000000006, D10000000000000000000051, D10000000000000000000052, D10000000000000000000007, D1000000000000000000000E, D1000000000000000000000F, D10000000000000000000040, D10000000000000000000041, D10000000000000000000042, D10000000000000000000043, D10000000000000000000044, D10000000000000000000045, D10000000000000000000046, D10000000000000000000047, D10000000000000000000048, D10000000000000000000049, D10000000000000000000050, F10000000000000000000101, H10000000000000000000301, D10000000000000000000008, D10000000000000000000009, D1000000000000000000000A, D1000000000000000000000B, D1000000000000000000000D, ); runOnlyForDeploymentPostprocessing = 0; };
 		E60000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (E10000000000000000000003, E10000000000000000000004, ); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 

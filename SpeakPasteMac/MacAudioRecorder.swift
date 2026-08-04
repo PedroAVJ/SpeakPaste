@@ -91,7 +91,7 @@ private final class MacRuntimeErrorLatch: @unchecked Sendable {
 /// Counting buffers alone is not enough: a hardware-muted microphone, or an
 /// iPhone that has handed its audio to a phone call, delivers a perfectly
 /// steady stream of digital silence. That passes an arrival-only gate, so the
-/// HUD says SPEAK NOW, the user talks for a minute, and the run ends in an
+/// capture indicator says Listening, the user talks for a minute, and the run ends in an
 /// empty transcript.
 private final class MacSampleFlowCounter: @unchecked Sendable {
     private let lock = NSLock()
@@ -185,17 +185,28 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
     /// Returns true only when a new audio session was created.
     func connect(deviceID: String) async throws -> Bool {
         try await ensurePermission()
-        let createdConnection = try await establishSession(deviceID: deviceID)
+        // Escape may cancel while the first-run permission sheet is open.
+        // Never create a capture session after that canceled sheet resolves.
+        try Task.checkCancellation()
+        let connection = try await establishSession(deviceID: deviceID)
         do {
-            try await waitForSteadyAudio(timeout: steadyAudioTimeout)
+            try await waitForSteadyAudio(
+                timeout: steadyAudioTimeout,
+                generation: connection.generation
+            )
         } catch {
-            await releaseSession(with: error)
+            await releaseSession(with: error, generation: connection.generation)
             throw error
         }
-        return createdConnection
+        return connection.wasCreated
     }
 
-    private func establishSession(deviceID: String) async throws -> Bool {
+    private struct ConnectionReceipt: Sendable {
+        let wasCreated: Bool
+        let generation: UInt64
+    }
+
+    private func establishSession(deviceID: String) async throws -> ConnectionReceipt {
         try await withCheckedThrowingContinuation { continuation in
             captureQueue.async { [weak self] in
                 guard let self else {
@@ -213,7 +224,12 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
                         self.startContinuation == nil,
                         self.stopContinuation == nil
                     {
-                        continuation.resume(returning: false)
+                        continuation.resume(
+                            returning: ConnectionReceipt(
+                                wasCreated: false,
+                                generation: self.sessionGeneration
+                            )
+                        )
                         return
                     }
 
@@ -228,7 +244,12 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
 
                     self.finishSession()
                     try self.configureAndConnect(deviceID: deviceID)
-                    continuation.resume(returning: true)
+                    continuation.resume(
+                        returning: ConnectionReceipt(
+                            wasCreated: true,
+                            generation: self.sessionGeneration
+                        )
+                    )
                 } catch {
                     continuation.resume(throwing: error)
                 }
@@ -239,7 +260,10 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
     /// Waits until the capture session delivers audio buffers in several
     /// consecutive observation windows, proving the stream is live and gapless
     /// right now rather than merely negotiated.
-    private func waitForSteadyAudio(timeout: TimeInterval) async throws {
+    private func waitForSteadyAudio(
+        timeout: TimeInterval,
+        generation: UInt64
+    ) async throws {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: .seconds(timeout))
         var lastCount = sampleFlow.count
@@ -248,7 +272,9 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
         var audibleWindows = 0
         while steadyWindows < Self.requiredSteadyWindows {
             try Task.checkCancellation()
-            if let failure = captureQueue.sync(execute: { currentSessionFailure() }) {
+            if let failure = captureQueue.sync(execute: {
+                currentSessionFailure(generation: generation)
+            }) {
                 throw failure
             }
             guard clock.now < deadline else {
@@ -273,16 +299,24 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
     }
 
     /// Must run on captureQueue.
-    private func currentSessionFailure() -> Error? {
+    private func currentSessionFailure(generation: UInt64) -> Error? {
+        guard sessionGeneration == generation else {
+            return MacAudioRecorderError.connectionFailed
+        }
         if let runtimeError { return runtimeError }
         guard session?.isRunning == true else { return MacAudioRecorderError.connectionFailed }
         return nil
     }
 
-    private func releaseSession(with error: Error) async {
+    /// A canceled connection can finish unwinding after its replacement has
+    /// already been configured. Tear down only the generation that failed;
+    /// otherwise the stale task would stop the new Mac/iPhone session.
+    private func releaseSession(with error: Error, generation: UInt64) async {
         await withCheckedContinuation { continuation in
             captureQueue.async { [weak self] in
-                self?.failSession(with: error)
+                if let self, self.sessionGeneration == generation {
+                    self.failSession(with: error)
+                }
                 continuation.resume()
             }
         }
@@ -582,7 +616,7 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
             preservingPartialRecording: segmentDidStart
         )
         if shouldNotifyRecordingFailure {
-            // Do not surface ERROR until stopRunning() has released Continuity.
+            // Do not surface the error until stopRunning() has released Continuity.
             recordingFailureHandler?(error, salvagedURL)
         }
     }

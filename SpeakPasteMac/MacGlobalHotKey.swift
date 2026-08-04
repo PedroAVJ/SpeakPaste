@@ -19,39 +19,6 @@ enum MacModifierSide {
     }
 }
 
-struct CommandTapRecognizer {
-    private(set) var isCommandDown = false
-    private(set) var isTapCandidate = false
-
-    mutating func modifiersChanged(commandDown: Bool, hasOtherModifiers: Bool) -> Bool {
-        if commandDown {
-            if !isCommandDown {
-                isCommandDown = true
-                isTapCandidate = !hasOtherModifiers
-            } else if hasOtherModifiers {
-                isTapCandidate = false
-            }
-            return false
-        }
-
-        guard isCommandDown else { return false }
-        let recognizedTap = isTapCandidate && !hasOtherModifiers
-        reset()
-        return recognizedTap
-    }
-
-    mutating func keyPressed() {
-        if isCommandDown {
-            isTapCandidate = false
-        }
-    }
-
-    mutating func reset() {
-        isCommandDown = false
-        isTapCandidate = false
-    }
-}
-
 private let macEscapeKeyCode: Int64 = 0x35
 private let macShortcutModifierMask: CGEventFlags = [
     .maskCommand,
@@ -192,6 +159,7 @@ private func speakPasteEventTapCallback(
 @MainActor
 final class MacGlobalHotKey {
     static var toggleLabel: String { "right ⌘" }
+    static var switchInputLabel: String { "right ⌘ twice" }
     static var cancelLabel: String { "Esc" }
     static var releaseLabel: String { MacShortcutChord.releaseHeld.label }
     static var pasteLastLabel: String { MacShortcutChord.pasteLast.label }
@@ -202,21 +170,33 @@ final class MacGlobalHotKey {
     private var localMonitor: Any?
     private var activationObserver: NSObjectProtocol?
     private var toggleAction: (() -> Void)?
+    private var switchInputAction: (() -> Void)?
     private var isRecordingActive: (() -> Bool)?
     private var cancelAction: (() -> Void)?
     private var releaseAction: (() -> Void)?
     private var pasteLastAction: (() -> Void)?
     private var copyLastAction: (() -> Void)?
     private var recognizer = CommandTapRecognizer()
+    private var tapSequenceRecognizer = CommandTapSequenceRecognizer()
+    private var pendingSingleTapTask: Task<Void, Never>?
     private var consumedKeyUps = Set<Int64>()
 
+    /// Honor the user's system double-click preference so a deliberate Command
+    /// double tap is not misread as a stop followed by a new start.
+    private static var commandDoubleTapInterval: Duration {
+        .seconds(NSEvent.doubleClickInterval)
+    }
+
     /// `toggle` starts and stops dictation on a bare right-Command tap.
+    /// `switchInput` changes the persisted Mac/iPhone capture mode on a double
+    /// tap; the first tap is deferred so it never also stops a live recording.
     /// `cancel` abandons it on Escape, but only while `isRecordingActive`
     /// confirms there is an in-flight recording to discard.
     /// `release` drops a held transcript at the current caret.
     /// `pasteLast` and `copyLast` recover the most recent finished transcript.
     func install(
         toggle: @escaping () -> Void,
+        switchInput: @escaping () -> Void,
         isRecordingActive: @escaping () -> Bool,
         cancel: @escaping () -> Void,
         release: @escaping () -> Void,
@@ -225,6 +205,7 @@ final class MacGlobalHotKey {
     ) {
         uninstall()
         toggleAction = toggle
+        switchInputAction = switchInput
         self.isRecordingActive = isRecordingActive
         cancelAction = cancel
         releaseAction = release
@@ -267,12 +248,14 @@ final class MacGlobalHotKey {
         localMonitor = nil
         activationObserver = nil
         toggleAction = nil
+        switchInputAction = nil
         isRecordingActive = nil
         cancelAction = nil
         releaseAction = nil
         pasteLastAction = nil
         copyLastAction = nil
         recognizer.reset()
+        cancelPendingCommandTap()
         consumedKeyUps.removeAll()
     }
 
@@ -308,6 +291,7 @@ final class MacGlobalHotKey {
                     || MacModifierSide.leftCommandDown(rawFlags)
             )
         case .keyDown:
+            cancelPendingCommandTap()
             if isRepeat {
                 recognizer.keyPressed()
                 return consumedKeyUps.contains(keyCode)
@@ -319,6 +303,7 @@ final class MacGlobalHotKey {
         case .keyUp:
             return consumedKeyUps.remove(keyCode) != nil
         case .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel:
+            cancelPendingCommandTap()
             recognizer.keyPressed()
         default:
             break
@@ -357,6 +342,7 @@ final class MacGlobalHotKey {
         eventTapSource = nil
         eventTap = nil
         recognizer.reset()
+        cancelPendingCommandTap()
         consumedKeyUps.removeAll()
     }
 
@@ -408,6 +394,7 @@ final class MacGlobalHotKey {
         }
         localMonitor = nil
         recognizer.reset()
+        cancelPendingCommandTap()
         consumedKeyUps.removeAll()
     }
 
@@ -426,6 +413,7 @@ final class MacGlobalHotKey {
                     || MacModifierSide.leftCommandDown(rawFlags)
             )
         case .keyDown:
+            cancelPendingCommandTap()
             if event.isARepeat {
                 recognizer.keyPressed()
                 return consumedKeyUps.contains(Int64(event.keyCode))
@@ -440,6 +428,7 @@ final class MacGlobalHotKey {
         case .keyUp:
             return consumedKeyUps.remove(Int64(event.keyCode)) != nil
         case .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel:
+            cancelPendingCommandTap()
             recognizer.keyPressed()
         default:
             break
@@ -471,12 +460,56 @@ final class MacGlobalHotKey {
     }
 
     private func recognizeModifierChange(commandDown: Bool, hasOtherModifiers: Bool) {
+        let isBeginningBareCommandPress = commandDown
+            && !recognizer.isCommandDown
+            && !hasOtherModifiers
+        if isBeginningBareCommandPress, tapSequenceRecognizer.hasPendingSingleTap {
+            // The second press began inside the double-tap window. Stop the
+            // single action before it can fire while that key is still held;
+            // the release remains responsible for proving this was a bare tap.
+            pendingSingleTapTask?.cancel()
+            pendingSingleTapTask = nil
+        }
+        if hasOtherModifiers {
+            cancelPendingCommandTap()
+        }
         if recognizer.modifiersChanged(
             commandDown: commandDown,
             hasOtherModifiers: hasOtherModifiers
         ) {
-            toggleAction?()
+            handleRecognizedCommandTap()
         }
+    }
+
+    private func handleRecognizedCommandTap() {
+        switch tapSequenceRecognizer.registerTap() {
+        case let .deferSingle(token):
+            pendingSingleTapTask?.cancel()
+            pendingSingleTapTask = Task { @MainActor [weak self] in
+                do {
+                    try await Task.sleep(for: Self.commandDoubleTapInterval)
+                } catch {
+                    return
+                }
+                guard let self,
+                      self.tapSequenceRecognizer.commitSingleTap(token: token)
+                else {
+                    return
+                }
+                self.pendingSingleTapTask = nil
+                self.toggleAction?()
+            }
+        case .doubleTap:
+            pendingSingleTapTask?.cancel()
+            pendingSingleTapTask = nil
+            switchInputAction?()
+        }
+    }
+
+    private func cancelPendingCommandTap() {
+        pendingSingleTapTask?.cancel()
+        pendingSingleTapTask = nil
+        tapSequenceRecognizer.cancel()
     }
 
     private func eventMask(for type: CGEventType) -> CGEventMask {

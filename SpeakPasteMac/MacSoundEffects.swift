@@ -5,7 +5,7 @@ import Foundation
 /// Audible confirmation for the dictation lifecycle.
 ///
 /// SpeakPaste is driven by a global shortcut from inside whatever app the user
-/// is typing in, so at the moment a key is pressed the HUD is frequently
+/// is typing in, so at the moment a key is pressed the capture indicator is frequently
 /// off-screen, behind another window, or on a different display. Sound is the
 /// only feedback that arrives regardless of where the user is looking, which is
 /// why superwhisper and Wispr Flow both ship it.

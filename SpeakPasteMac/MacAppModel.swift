@@ -162,14 +162,15 @@ final class MacAppModel: ObservableObject {
         didSet {
             guard phase != oldValue else { return }
             phaseStartedAt = Date()
-            if phase != .recording {
-                resetRecordingCancelConfirmation()
-            }
             announceCapturePhase(phase)
         }
     }
     @Published private(set) var phaseStartedAt = Date()
     @Published private(set) var devices: [MacAudioInputDevice] = []
+    /// Semantic source selected by the Command double-tap. Unlike a hardware
+    /// UID, this survives the iPhone disappearing between launches and forbids
+    /// a silent cross-mode fallback.
+    @Published private(set) var inputMode: MacInputMode? = nil
     /// Set only by `selectDevice(_:)` or by `refreshDevices()` choosing a
     /// Continuity microphone. Never by an unrequested fallback.
     @Published private(set) var selectedDeviceID = ""
@@ -205,11 +206,6 @@ final class MacAppModel: ObservableObject {
     @Published var hudPlacement: MacHUDPlacement = .top {
         didSet { UserDefaults.standard.set(hudPlacement.rawValue, forKey: Self.hudPlacementKey) }
     }
-    /// Off by default: a permanently on-screen panel is opt-in presence, not
-    /// something a first launch should impose.
-    @Published var hudAlwaysVisible = false {
-        didSet { UserDefaults.standard.set(hudAlwaysVisible, forKey: Self.hudAlwaysVisibleKey) }
-    }
     @Published var showInDock = true {
         didSet {
             UserDefaults.standard.set(showInDock, forKey: Self.showInDockKey)
@@ -220,10 +216,6 @@ final class MacAppModel: ObservableObject {
     @Published private(set) var elapsed: TimeInterval = 0
     @Published private(set) var inputLevel: Double = 0
     @Published private(set) var recordingWarning: String?
-    /// Nonvisual state exposed for whichever surface presents recording
-    /// controls. Nil means Escape will follow the normal cancellation policy;
-    /// non-nil means a protected recording is awaiting a second Escape.
-    @Published private(set) var recordingCancelConfirmation: MacRecordingCancelConfirmation?
     @Published private(set) var microphoneTestState: MacMicrophoneTestState = .idle
     @Published private(set) var capturedContextTermCount = 0
     @Published var transcript = ""
@@ -298,8 +290,6 @@ final class MacAppModel: ObservableObject {
     /// live microphone window and is balanced across every exit path.
     private var recordingActivity: NSObjectProtocol?
     private var recordingStartedAt: Date?
-    private var recordingCancellationPolicy = MacRecordingCancellationPolicy()
-    private var cancelConfirmationExpirationTask: Task<Void, Never>?
     private var lastDeliveredSampleCount: UInt64 = 0
     private var lastDeliveredSampleAt = Date()
     private var lastAudibleSampleAt = Date()
@@ -332,6 +322,10 @@ final class MacAppModel: ObservableObject {
     /// must never turn the app back to Recording (or overwrite a newer start).
     private var captureRequestID: UUID?
     private var captureStartTask: Task<Void, Never>?
+    /// A double tap during capture finishes the current segment first. The
+    /// pending mode is applied only after AVFoundation has released that input,
+    /// so recording metadata and the active hardware can never disagree.
+    private var pendingInputModeAfterFinalization: MacInputMode?
     private var lastHistoryRecordID: UUID?
     /// Tracks whether the editable "last transcript" is still backed by a
     /// pending delivery entry. If that entry is possibly delivered, the global
@@ -386,6 +380,7 @@ final class MacAppModel: ObservableObject {
 
     private static let chosenDeviceKey = "mac-chosen-device-id"
     private static let preferredDeviceIDsKey = "mac-preferred-device-ids"
+    private static let inputModeKey = "mac-input-mode"
     private static let languageKey = "mac-language"
     private static let cleanSpeechKey = "mac-clean-speech"
     private static let autoPasteKey = "mac-auto-paste"
@@ -393,7 +388,6 @@ final class MacAppModel: ObservableObject {
     private static let spokenFormattingCommandsKey = "mac-spoken-formatting-commands"
     private static let hudEnabledKey = "mac-hud-enabled"
     private static let hudPlacementKey = "mac-hud-placement"
-    private static let hudAlwaysVisibleKey = "mac-hud-always-visible"
     private static let showInDockKey = "mac-show-in-dock"
     private static let retainSuccessfulAudioKey = "mac-retain-successful-audio"
     private static let completedOnboardingKey = "mac-completed-onboarding"
@@ -615,6 +609,9 @@ final class MacAppModel: ObservableObject {
         // Settings were rebuilt at their defaults on every launch, so a chosen
         // language or a disabled auto-paste never survived a restart.
         let defaults = UserDefaults.standard
+        if let stored = defaults.string(forKey: Self.inputModeKey) {
+            inputMode = MacInputMode(rawValue: stored)
+        }
         preferredDeviceIDs = defaults.stringArray(forKey: Self.preferredDeviceIDsKey) ?? []
         if preferredDeviceIDs.isEmpty,
            let legacyChoice = defaults.string(forKey: Self.chosenDeviceKey),
@@ -644,9 +641,6 @@ final class MacAppModel: ObservableObject {
         if let storedPlacement = defaults.string(forKey: Self.hudPlacementKey),
            let placement = MacHUDPlacement(rawValue: storedPlacement) {
             hudPlacement = placement
-        }
-        if defaults.object(forKey: Self.hudAlwaysVisibleKey) != nil {
-            hudAlwaysVisible = defaults.bool(forKey: Self.hudAlwaysVisibleKey)
         }
         if defaults.object(forKey: Self.showInDockKey) != nil {
             showInDock = defaults.bool(forKey: Self.showInDockKey)
@@ -711,6 +705,7 @@ final class MacAppModel: ObservableObject {
         }
         globalHotKey.install(
             toggle: { [weak self] in self?.toggleRecording() },
+            switchInput: { [weak self] in self?.switchInputMode() },
             isRecordingActive: { [weak self] in
                 guard let self else { return false }
                 return self.phase == .recording || self.phase == .connecting
@@ -750,6 +745,7 @@ final class MacAppModel: ObservableObject {
     var isShortcutGlobal: Bool { globalHotKey.isGlobal }
 
     var hotKeyLabel: String { MacGlobalHotKey.toggleLabel }
+    var switchInputHotKeyLabel: String { MacGlobalHotKey.switchInputLabel }
     var cancelHotKeyLabel: String { MacGlobalHotKey.cancelLabel }
     var releaseHotKeyLabel: String { MacGlobalHotKey.releaseLabel }
     var pasteLastHotKeyLabel: String { MacGlobalHotKey.pasteLastLabel }
@@ -763,18 +759,13 @@ final class MacAppModel: ObservableObject {
     /// choice is persisted, so an unavailable-iPhone moment can never write
     /// itself in as a lasting preference.
     func selectDevice(_ deviceID: String) {
-        guard devices.contains(where: { $0.id == deviceID }) else { return }
+        guard let device = devices.first(where: { $0.id == deviceID }) else { return }
         if selectedDeviceID != deviceID {
             microphoneTestSound?.stop()
             microphoneTestState = .idle
             inputLevel = 0
         }
-        selectedDeviceID = deviceID
-        deviceSelectionNotice = nil
-        preferredDeviceIDs.removeAll { $0 == deviceID }
-        preferredDeviceIDs.insert(deviceID, at: 0)
-        UserDefaults.standard.set(preferredDeviceIDs, forKey: Self.preferredDeviceIDsKey)
-        UserDefaults.standard.set(deviceID, forKey: Self.chosenDeviceKey)
+        selectDevice(device, semanticMode: semanticMode(for: device))
     }
 
     func removePreferredDevice(_ deviceID: String) {
@@ -807,16 +798,26 @@ final class MacAppModel: ObservableObject {
     }
 
     private func resolveSelection() {
+        if let inputMode {
+            guard let modeDevice = availableDevice(for: inputMode) else {
+                selectedDeviceID = ""
+                deviceSelectionNotice = unavailableMessage(for: inputMode)
+                return
+            }
+            selectedDeviceID = modeDevice.id
+            deviceSelectionNotice = nil
+            return
+        }
+
         if let preferred = preferredDeviceIDs.first(where: { preferredID in
             devices.contains(where: { $0.id == preferredID })
-        }) {
-            selectedDeviceID = preferred
+        }), let device = devices.first(where: { $0.id == preferred }) {
+            selectDevice(device, semanticMode: semanticMode(for: device))
             deviceSelectionNotice = nil
             return
         }
         if let continuityDevice = devices.first(where: \.isContinuityDevice) {
-            selectedDeviceID = continuityDevice.id
-            deviceSelectionNotice = nil
+            selectDevice(continuityDevice, semanticMode: .iPhone)
             return
         }
 
@@ -833,6 +834,66 @@ final class MacAppModel: ObservableObject {
             deviceSelectionNotice = devices.isEmpty
                 ? "No microphones found. Connect one or bring your iPhone nearby, then refresh."
                 : "No iPhone microphone is available. Bring your iPhone nearby and refresh, or pick a microphone below — SpeakPaste will not choose one for you."
+        }
+    }
+
+    private func semanticMode(for device: MacAudioInputDevice) -> MacInputMode? {
+        if device.isContinuityDevice { return .iPhone }
+        if device.isBuiltInDevice { return .mac }
+        return nil
+    }
+
+    private func availableDevice(for mode: MacInputMode) -> MacAudioInputDevice? {
+        if let selected = selectedDevice,
+           mode.matches(
+               isContinuityDevice: selected.isContinuityDevice,
+               isBuiltInDevice: selected.isBuiltInDevice
+           ) {
+            return selected
+        }
+        if let preferred = preferredDeviceIDs.lazy.compactMap({ [self] preferredID in
+            devices.first(where: { $0.id == preferredID })
+        }).first(where: { device in
+            mode.matches(
+                isContinuityDevice: device.isContinuityDevice,
+                isBuiltInDevice: device.isBuiltInDevice
+            )
+        }) {
+            return preferred
+        }
+        return devices.first { device in
+            mode.matches(
+                isContinuityDevice: device.isContinuityDevice,
+                isBuiltInDevice: device.isBuiltInDevice
+            )
+        }
+    }
+
+    private func selectDevice(
+        _ device: MacAudioInputDevice,
+        semanticMode: MacInputMode?
+    ) {
+        selectedDeviceID = device.id
+        deviceSelectionNotice = nil
+        preferredDeviceIDs.removeAll { $0 == device.id }
+        preferredDeviceIDs.insert(device.id, at: 0)
+        let defaults = UserDefaults.standard
+        defaults.set(preferredDeviceIDs, forKey: Self.preferredDeviceIDsKey)
+        defaults.set(device.id, forKey: Self.chosenDeviceKey)
+        inputMode = semanticMode
+        if let semanticMode {
+            defaults.set(semanticMode.rawValue, forKey: Self.inputModeKey)
+        } else {
+            defaults.removeObject(forKey: Self.inputModeKey)
+        }
+    }
+
+    private func unavailableMessage(for mode: MacInputMode) -> String {
+        switch mode {
+        case .mac:
+            "Mac input mode is selected, but the built-in microphone is unavailable."
+        case .iPhone:
+            "iPhone input mode is selected, but no Continuity microphone is available. Keep the iPhone nearby and locked, then refresh."
         }
     }
 
@@ -873,22 +934,77 @@ final class MacAppModel: ObservableObject {
         guard !microphoneTestState.isRunning else { return }
         switch phase {
         case .recording:
-            resetRecordingCancelConfirmation()
             stopMeter()
             sounds.playRecordingStopped()
             phase = .finalizing
             Task { await stopAndTranscribe() }
         case .ready, .succeeded, .failed:
-            resetRecordingCancelConfirmation()
-            captureStartTask?.cancel()
-            let requestID = UUID()
-            captureRequestID = requestID
-            phase = .connecting
-            captureStartTask = Task { [weak self] in
-                await self?.startRecording(requestID: requestID)
-            }
+            beginRecordingRequest()
         case .connecting, .finalizing:
             break
+        }
+    }
+
+    /// Switches the semantic capture source without letting the first half of
+    /// the Command double-tap also stop dictation. During a live recording the
+    /// existing WAV is finalized and queued first, then capture resumes on the
+    /// other source as the next ordered segment.
+    func switchInputMode() {
+        guard !microphoneTestState.isRunning else { return }
+        let baseMode = pendingInputModeAfterFinalization
+            ?? inputMode
+            ?? selectedDevice.flatMap { semanticMode(for: $0) }
+            ?? .mac
+        let targetMode = baseMode.opposite
+        guard let targetDevice = availableDevice(for: targetMode) else {
+            deviceSelectionNotice = unavailableMessage(for: targetMode)
+            return
+        }
+
+        switch phase {
+        case .recording:
+            pendingInputModeAfterFinalization = targetMode
+            stopMeter()
+            sounds.playRecordingStopped()
+            phase = .finalizing
+            Task { await stopAndTranscribe() }
+        case .connecting:
+            pendingInputModeAfterFinalization = nil
+            captureRequestID = nil
+            captureStartTask?.cancel()
+            captureStartTask = nil
+            recorder.disconnect()
+            isMicrophoneConnected = false
+            connectedDeviceID = nil
+            connectionLatency = nil
+            deliveryTarget = nil
+            selectDevice(targetDevice, semanticMode: targetMode)
+            beginRecordingRequest()
+        case .finalizing:
+            // The stop path reads this only after AVFoundation has released the
+            // active device. Another double-tap before then reverses the pending
+            // target without mutating current recording metadata.
+            pendingInputModeAfterFinalization = targetMode
+        case .ready, .succeeded, .failed:
+            pendingInputModeAfterFinalization = nil
+            selectDevice(targetDevice, semanticMode: targetMode)
+        }
+    }
+
+    private func beginRecordingRequest() {
+        captureStartTask?.cancel()
+        let requestID = UUID()
+        captureRequestID = requestID
+        if phase == .connecting {
+            // Switching sources while an earlier connection is still pending
+            // begins a new bounded attempt even though the enum case is the
+            // same. Reset the indicator lifetime for the target source.
+            phaseStartedAt = Date()
+        } else {
+            phase = .connecting
+        }
+        captureStartTask = Task { [weak self] in
+            await self?.startRecording(requestID: requestID)
         }
     }
 
@@ -1973,7 +2089,6 @@ final class MacAppModel: ObservableObject {
             elapsed = 0
             inputLevel = 0
             recordingWarning = nil
-            resetRecordingCancelConfirmation()
             automaticStopInProgress = false
             lastDeliveredSampleCount = recorder.deliveredSampleCount
             lastDeliveredSampleAt = Date()
@@ -2007,7 +2122,7 @@ final class MacAppModel: ObservableObject {
             isMicrophoneConnected = false
             connectedDeviceID = nil
             connectionLatency = nil
-            resolveSelection()
+            let resumesCapture = settleInputModeAfterFinalization()
             if let salvaged = error as? MacAudioRecorderSalvagedFailure {
                 recordingWarning = nil
                 automaticStopInProgress = false
@@ -2018,15 +2133,17 @@ final class MacAppModel: ObservableObject {
                 // transcribe the finalized portion instead of discarding all
                 // speech because the tail of the file failed.
                 phase = .ready
-                startTranscription(
+                let handoffIsDurable = startTranscription(
                     audioURL: salvaged.audioURL,
                     target: target,
                     deviceName: deviceName,
                     recordingDuration: recordingDuration,
                     interruption: interruption ?? diagnosticMessage(for: salvaged.underlying)
                 )
+                if resumesCapture, handoffIsDurable { beginRecordingRequest() }
                 return
             }
+            deliveryTarget = nil
             recordFailure(
                 diagnosticMessage(for: error),
                 deviceName: deviceName,
@@ -2038,7 +2155,7 @@ final class MacAppModel: ObservableObject {
         isMicrophoneConnected = false
         connectedDeviceID = nil
         connectionLatency = nil
-        resolveSelection()
+        let resumesCapture = settleInputModeAfterFinalization()
 
         // The microphone is released and the audio is on disk, so this dictation
         // no longer needs anything the next one wants. Hand it to a background
@@ -2049,13 +2166,36 @@ final class MacAppModel: ObservableObject {
         phase = .ready
         let target = deliveryTarget
         deliveryTarget = nil
-        startTranscription(
+        let handoffIsDurable = startTranscription(
             audioURL: segment.url,
             target: target,
             deviceName: deviceName,
             recordingDuration: recordingDuration,
             interruption: interruption
         )
+        // Do not let a later segment overtake speech that failed to enter the
+        // private recovery journal. The selected mode remains sticky, but the
+        // user sees and resolves the first segment's failure before recording
+        // continues.
+        if resumesCapture, handoffIsDurable { beginRecordingRequest() }
+    }
+
+    /// Applies a deferred source switch only after the recorder's `stop()` has
+    /// synchronously released its AVCaptureSession. Returns whether capture
+    /// should resume as the next ordered segment.
+    private func settleInputModeAfterFinalization() -> Bool {
+        guard let targetMode = pendingInputModeAfterFinalization else {
+            resolveSelection()
+            return false
+        }
+        pendingInputModeAfterFinalization = nil
+        guard let targetDevice = availableDevice(for: targetMode) else {
+            resolveSelection()
+            deviceSelectionNotice = unavailableMessage(for: targetMode)
+            return false
+        }
+        selectDevice(targetDevice, semanticMode: targetMode)
+        return true
     }
 
     @discardableResult
@@ -2570,43 +2710,17 @@ final class MacAppModel: ObservableObject {
         }
     }
 
-    /// Handles the global Escape shortcut. Connecting and short recordings can
-    /// be abandoned immediately. A recording at least 30 seconds long requires
-    /// a second Escape within three seconds so one stray key cannot destroy a
-    /// substantial dictation.
-    func requestRecordingCancellation(now: Date = Date()) {
+    /// Escape is the direct exit gesture: one press abandons connecting or the
+    /// active recording immediately without transcription.
+    func requestRecordingCancellation() {
         guard phase == .recording || phase == .connecting else { return }
-        guard phase == .recording else {
-            cancelRecording()
-            return
-        }
-
-        let measuredDuration = max(
-            elapsed,
-            now.timeIntervalSince(recordingStartedAt ?? now)
-        )
-        switch recordingCancellationPolicy.requestCancellation(
-            recordingDuration: measuredDuration,
-            now: now
-        ) {
-        case .cancelImmediately:
-            cancelRecording()
-        case let .confirmAgain(expiresAt):
-            recordingCancelConfirmation = MacRecordingCancelConfirmation(
-                message: "Cancel again within 3 seconds to discard this recording.",
-                expiresAt: expiresAt
-            )
-            scheduleRecordingCancelConfirmationReset(expiresAt: expiresAt)
-        }
+        cancelRecording()
     }
 
-    /// Abandons a recording in progress without transcribing it. User-facing
-    /// controls must call `requestRecordingCancellation()` so a substantial
-    /// recording always receives the same confirmation guard. This direct
-    /// primitive remains available for internal teardown and recovery paths.
+    /// Abandons a recording in progress without transcribing it.
     func cancelRecording() {
         guard phase == .recording || phase == .connecting else { return }
-        resetRecordingCancelConfirmation()
+        pendingInputModeAfterFinalization = nil
         captureRequestID = nil
         captureStartTask?.cancel()
         captureStartTask = nil
@@ -2620,28 +2734,6 @@ final class MacAppModel: ObservableObject {
         recordingWarning = nil
         automaticStopInProgress = false
         phase = .ready
-    }
-
-    private func scheduleRecordingCancelConfirmationReset(expiresAt: Date) {
-        cancelConfirmationExpirationTask?.cancel()
-        let delay = max(0, expiresAt.timeIntervalSinceNow)
-        let nanoseconds = UInt64(min(delay * 1_000_000_000, Double(UInt64.max)))
-        cancelConfirmationExpirationTask = Task { @MainActor [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: nanoseconds)
-            } catch {
-                return
-            }
-            guard self?.recordingCancelConfirmation?.expiresAt == expiresAt else { return }
-            self?.resetRecordingCancelConfirmation()
-        }
-    }
-
-    private func resetRecordingCancelConfirmation() {
-        cancelConfirmationExpirationTask?.cancel()
-        cancelConfirmationExpirationTask = nil
-        recordingCancellationPolicy.reset()
-        recordingCancelConfirmation = nil
     }
 
     /// Delivers finished dictations strictly in spoken order, so a short second
@@ -2905,9 +2997,9 @@ final class MacAppModel: ObservableObject {
                     detail: "Stream dropped mid-dictation; partial audio recovered. \(detail). \(interruption)"
                 )
             )
-            // A completed background job never owns the capture HUD. If the
-            // user is already speaking the next dictation, replacing SPEAK NOW
-            // with an older failure also stops the live meter and makes the
+            // A completed background job never owns the live capture phase. If
+            // the user is already speaking the next dictation, replacing
+            // Listening with an older failure also stops the live meter and makes the
             // second Command press look broken.
             if !phase.isBusy {
                 sounds.playFailed()
@@ -2942,7 +3034,7 @@ final class MacAppModel: ObservableObject {
             )
         )
         // Never overwrite a live recording's state with a background job's
-        // result. The microphone owns the HUD while it is running.
+        // result. The microphone owns the capture phase while it is running.
         guard !phase.isBusy else { return }
         if delivery.isDelivered { sounds.playDelivered() }
         phase = .succeeded(detail)
@@ -3466,7 +3558,7 @@ final class MacAppModel: ObservableObject {
             }
             // Held text is only forgotten once it has actually gone somewhere.
             // Anything else — secure input, a refused menu action, a swallowed
-            // keystroke — keeps it queued, because the HUD promises it is safe.
+            // keystroke — keeps it queued, because the app promises it is safe.
             guard result.isDelivered else {
                 self.restoreHeldDeliveryPending(originallyPendingIdentifiers)
                 return
@@ -3504,7 +3596,7 @@ final class MacAppModel: ObservableObject {
     }
 
     func releaseHeldTranscripts(allowUncertain: Bool = false) {
-        // Delivery feedback shares the capture phase/HUD. Releasing while a
+        // Delivery feedback shares the app phase. Releasing while a
         // recording is live could replace `.recording` with success/failure
         // and make the stop shortcut start a second capture instead.
         guard
@@ -3734,7 +3826,7 @@ final class MacAppModel: ObservableObject {
 
     /// Records a transcription/delivery failure that belongs to audio whose
     /// microphone session ended earlier. It may finish while a newer recording
-    /// is live, so it must not stop that recording's meter or replace its HUD.
+    /// is live, so it must not stop that recording's meter or replace its phase.
     private func recordCompletedFailure(
         _ message: String,
         deviceName: String,
@@ -3873,7 +3965,7 @@ final class MacAppModel: ObservableObject {
         self.recordingActivity = nil
     }
 
-    /// The menu item and HUD carry static accessibility labels, but VoiceOver
+    /// The menu item and capture indicator carry static accessibility labels, but VoiceOver
     /// does not announce their changing text automatically. Post only the
     /// consequential transitions so a hands-free user knows when speech is
     /// safe and whether delivery finished without navigating back to the app.
@@ -3883,15 +3975,15 @@ final class MacAppModel: ObservableObject {
         case .ready:
             announcement = nil
         case .connecting:
-            announcement = "SpeakPaste is connecting. Wait before speaking."
+            announcement = "SpeakPaste is connecting."
         case .recording:
-            announcement = "Speak now."
+            announcement = "SpeakPaste is listening."
         case .finalizing:
-            announcement = "Recording stopped. Releasing the microphone."
+            announcement = "SpeakPaste is releasing the microphone."
         case .succeeded:
             announcement = "Dictation complete."
         case .failed:
-            announcement = "SpeakPaste encountered an error."
+            announcement = "SpeakPaste has a dictation error."
         }
         guard let announcement else { return }
         NSAccessibility.post(
