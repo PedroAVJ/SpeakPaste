@@ -4,6 +4,7 @@ import UIKit
 
 struct HostApplicationResolution: Equatable, Sendable {
     let bundleIdentifier: String?
+    let processIdentifier: Int32?
     let attempts: [String]
 }
 
@@ -21,6 +22,33 @@ struct HostApplicationResolver {
     @MainActor
     func resolve(for controller: UIInputViewController) -> HostApplicationResolution {
         var attempts: [String] = []
+        var resolvedProcessIdentifier: Int32?
+
+        // Wispr's iOS 26.4+ shape is an early keyboard-arbiter capture, not a
+        // late attempt to reverse-map a PID. The Objective-C +load hook runs
+        // before UIKit's first focus callback and caches the callback's
+        // `_sourceBundleIdentifier` value.
+        attempts.append(
+            "arbiter-hook-status:\(SPHostApplicationCaptureStatus())"
+        )
+        if let identifier = plausibleBundleIdentifier(
+            SPHostApplicationCaptureLastBundleIdentifier()
+        ) {
+            attempts.append("arbiter-hook-cached:\(identifier)")
+            return resolution(identifier, attempts)
+        }
+        attempts.append("arbiter-hook-cached:<nil>")
+        SPHostApplicationCaptureRefresh()
+        RunLoop.current.run(
+            until: Date(timeIntervalSinceNow: 0.05)
+        )
+        if let identifier = plausibleBundleIdentifier(
+            SPHostApplicationCaptureLastBundleIdentifier()
+        ) {
+            attempts.append("arbiter-hook-refreshed:\(identifier)")
+            return resolution(identifier, attempts)
+        }
+        attempts.append("arbiter-hook-refreshed:<nil>")
 
         let arbiterResolution = keyboardArbiterResolution(for: controller)
         attempts.append(contentsOf: arbiterResolution.attempts)
@@ -35,12 +63,17 @@ struct HostApplicationResolver {
         }
 
         if let processID = hostProcessIdentifier(for: controller) {
+            resolvedProcessIdentifier = processID
             if
                 let processValue = bundleIdentifier(forProcessID: processID),
                 let identifier = knownBundleIdentifier(exactValue: processValue)
             {
                 attempts.append("controller-host-pid:\(processID)=\(identifier)")
-                return resolution(identifier, attempts)
+                return resolution(
+                    identifier,
+                    attempts,
+                    processIdentifier: processID
+                )
             }
 
             // SpringBoardServices refuses to name the host process from inside
@@ -52,7 +85,11 @@ struct HostApplicationResolver {
                 "controller-host-path:\(processID)=\(diagnosticValue(pathValue))"
             )
             if let identifier = plausibleBundleIdentifier(pathValue) {
-                return resolution(identifier, attempts)
+                return resolution(
+                    identifier,
+                    attempts,
+                    processIdentifier: processID
+                )
             }
         } else {
             attempts.append("controller-host-pid:<nil>")
@@ -66,13 +103,20 @@ struct HostApplicationResolver {
         }
 
         let environmentPID = environment["XPCExtensionHostPID"].flatMap(Int32.init)
+        if resolvedProcessIdentifier == nil {
+            resolvedProcessIdentifier = environmentPID
+        }
         if
             let environmentPID,
             let processValue = bundleIdentifier(forProcessID: environmentPID),
             let identifier = knownBundleIdentifier(exactValue: processValue)
         {
             attempts.append("environment-pid:\(environmentPID)=\(identifier)")
-            return resolution(identifier, attempts)
+            return resolution(
+                identifier,
+                attempts,
+                processIdentifier: environmentPID
+            )
         }
         attempts.append(
             "environment-pid:\(environmentPID.map(String.init) ?? "<nil>")"
@@ -108,11 +152,18 @@ struct HostApplicationResolver {
                     continue
                 }
                 let processValue = bundleIdentifier(forProcessID: processID)
+                if resolvedProcessIdentifier == nil {
+                    resolvedProcessIdentifier = processID
+                }
                 attempts.append(
                     "\(candidate.label).\(selectorName):\(processID)=\(diagnosticValue(processValue))"
                 )
                 if let identifier = knownBundleIdentifier(exactValue: processValue) {
-                    return resolution(identifier, attempts)
+                    return resolution(
+                        identifier,
+                        attempts,
+                        processIdentifier: processID
+                    )
                 }
             }
         }
@@ -121,7 +172,8 @@ struct HostApplicationResolver {
         attempts.append("springboard-frontmost:\(diagnosticValue(frontmostValue))")
         return resolution(
             knownBundleIdentifier(exactValue: frontmostValue),
-            attempts
+            attempts,
+            processIdentifier: resolvedProcessIdentifier
         )
     }
 
@@ -508,12 +560,48 @@ struct HostApplicationResolver {
         "com.apple.MobileSMS",
         "com.apple.mobilenotes",
         "com.apple.mobilemail",
+        "net.whatsapp.WhatsApp",
+        "com.burbn.instagram",
+        "com.facebook.Messenger",
+        "com.atebits.Tweetie2",
+        "com.linkedin.LinkedIn",
+        "com.microsoft.onenote",
+        "com.google.Keep",
+        "notion.id",
+        "com.evernote.iPhone.Evernote",
         "com.openai.chat",
         "com.anthropic.claude",
-        "net.whatsapp.WhatsApp",
+        "com.google.gemini",
+        "ai.x.GrokApp",
+        "ai.perplexity.app",
+        "com.goodnotesapp.x",
+        "com.gingerlabs.Notability",
+        "net.shinyfrog.bear-iOS",
+        "md.obsidian",
+        "com.google.chrome.ios",
+        "com.google.calendar",
+        "com.google.Docs",
+        "com.google.Drive",
+        "com.google.Maps",
+        "com.google.GoogleMobile",
+        "com.microsoft.msedge",
+        "com.google.ios.youtube",
+        "com.facebook.Facebook",
+        "com.zhiliaoapp.musically",
+        "com.reddit.Reddit",
+        "com.burbn.barcelona",
+        "xyz.blueskyweb.app",
+        "pinterest",
+        "org.whispersystems.signal",
+        "jp.naver.line",
+        "ph.telegra.Telegraph",
         "com.tinyspeck.chatlyio",
+        "com.hammerandchisel.discord",
         "com.google.Gmail",
-        "com.linkedin.LinkedIn",
+        "com.microsoft.Office.Outlook",
+        "com.yahoo.Aerogram",
+        "com.superhuman.Superhuman",
+        "ch.protonmail.protonmail",
     ]
 
     private func legacyBundleIdentifier(
@@ -653,7 +741,8 @@ struct HostApplicationResolver {
 
     private func resolution(
         _ bundleIdentifier: String?,
-        _ attempts: [String]
+        _ attempts: [String],
+        processIdentifier: Int32? = nil
     ) -> HostApplicationResolution {
         let boundedAttempts: [String]
         if attempts.count <= 160 {
@@ -666,6 +755,7 @@ struct HostApplicationResolver {
         }
         return HostApplicationResolution(
             bundleIdentifier: bundleIdentifier,
+            processIdentifier: processIdentifier,
             attempts: boundedAttempts
         )
     }
@@ -731,12 +821,14 @@ struct HostApplicationResolver {
     private func plausibleBundleIdentifier(_ value: String?) -> String? {
         guard let value else { return nil }
         let identifier = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasBundleShape = identifier.contains(".")
+            || identifier.caseInsensitiveCompare("pinterest") == .orderedSame
         guard
-            identifier.contains("."),
+            hasBundleShape,
             !identifier.contains(" "),
             let ownIdentifier = Bundle.main.bundleIdentifier
         else {
-            return identifier.contains(".") ? identifier : nil
+            return hasBundleShape ? identifier : nil
         }
         let containingIdentifier = ownIdentifier.hasSuffix(".Keyboard")
             ? String(ownIdentifier.dropLast(".Keyboard".count))

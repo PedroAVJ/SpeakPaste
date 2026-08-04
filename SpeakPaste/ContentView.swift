@@ -111,21 +111,21 @@ struct ContentView: View {
             }
         } message: {
             Text(
-                "SpeakPaste will now take you back to your previous app. The first time you do this in a new app, iOS may ask for confirmation."
+                "SpeakPaste will now take you back to your previous app. The first time you do this in a new app, iOS will ask you for confirmation."
             )
         }
         .alert(
-            "Couldn't switch back automatically",
+            "SpeakPaste can’t auto switch back here",
             isPresented: $model.showManualReturnHint
         ) {
-            Button("Try Again") {
-                model.returnToKeyboardHost()
+            if model.canAutomaticallyReturnToKeyboardHost {
+                Button("Try Again") {
+                    model.returnToKeyboardHost()
+                }
             }
             Button("Swipe Back", role: .cancel) {}
         } message: {
-            Text(
-                "Swipe right along the bottom home bar to return to your app. Recording continues while you switch."
-            )
+            Text(model.manualReturnMessage)
         }
     }
 
@@ -135,12 +135,12 @@ struct ContentView: View {
     }
 
     /// The big record/stop button belongs to the manual in-app fallback, so it
-    /// only appears once a manual session or transcript is underway. The idle
-    /// home leads with the Back Tap flow instead.
+    /// only appears once a manual session or transcript is underway.
     private var showsManualControls: Bool {
-        model.isRecording
-            || model.isTranscribing
-            || !model.transcriptText.isEmpty
+        !model.isKeyboardDictation
+            && (model.isRecording
+                || model.isTranscribing
+                || !model.transcriptText.isEmpty)
     }
 
     private var header: some View {
@@ -149,7 +149,7 @@ struct ContentView: View {
                 Text("SpeakPaste")
                     .font(.system(.title2, design: .rounded, weight: .bold))
                     .foregroundStyle(Theme.ink)
-                Text("Back Tap to dictate, anywhere.")
+                Text("Start from the keyboard. Return with your words.")
                     .font(.footnote)
                     .foregroundStyle(Theme.inkMuted)
             }
@@ -186,7 +186,10 @@ struct ContentView: View {
     private var stage: some View {
         switch model.phase {
         case .recording:
-            RecordingLiveView(recorder: model.recorder)
+            RecordingLiveView(
+                recorder: model.recorder,
+                isKeyboardDictation: model.isKeyboardDictation
+            )
         case .transcribing:
             ProcessingView()
         default:
@@ -233,12 +236,12 @@ private struct IdleView: View {
                             .background(Circle().fill(Theme.surface))
                             .overlay(Circle().stroke(Theme.stroke))
                             .accessibilityHidden(true)
-                        Text("Dictate without leaving your app")
+                        Text("Dictate from the keyboard")
                             .font(.system(.title3, design: .rounded, weight: .semibold))
                             .foregroundStyle(Theme.ink)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                    Text("The transcript types itself at your cursor.")
+                    Text("Tap Start, speak, then insert at the same cursor.")
                         .font(.subheadline)
                         .foregroundStyle(Theme.inkMuted)
                 }
@@ -247,23 +250,23 @@ private struct IdleView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     FlowStep(
                         number: 1,
-                        title: "Double-tap the back of your iPhone",
-                        detail: "Recording starts wherever you are. The Live Activity shows it's live."
+                        title: "Choose the SpeakPaste keyboard",
+                        detail: "Open any text field, hold the globe key, and pick SpeakPaste."
                     )
                     FlowStep(
                         number: 2,
-                        title: "Talk",
-                        detail: "Your app keeps the screen the whole time."
+                        title: "Tap Start",
+                        detail: "SpeakPaste briefly opens so the containing app can own the microphone."
                     )
                     FlowStep(
                         number: 3,
-                        title: "Double-tap again to stop",
-                        detail: "No need to wait for the transcription."
+                        title: "Return and talk",
+                        detail: "After the one-time explanation, SpeakPaste switches back while recording continues."
                     )
                     FlowStep(
                         number: 4,
-                        title: "Switch to the SpeakPaste keyboard",
-                        detail: "Hold the globe key and pick SpeakPaste. The transcript inserts at your cursor the moment it's ready — and SpeakPaste stays the last-used keyboard for next time."
+                        title: "Tap Stop & Insert",
+                        detail: "The keyboard transcribes, inserts exactly once at your cursor, and returns to typing."
                     )
                 }
                 .padding(16)
@@ -272,7 +275,7 @@ private struct IdleView: View {
                 .overlay(RoundedRectangle(cornerRadius: 20).stroke(Theme.stroke))
 
                 Text(
-                    "One-time setup: in Shortcuts, create a shortcut with the single action SpeakPaste Toggle Dictation, then assign it to Double Tap in Settings › Accessibility › Touch › Back Tap. Add the SpeakPaste keyboard in Settings › General › Keyboard and turn on Allow Full Access. SpeakPaste can't detect whether these are set up — run a test dictation to confirm."
+                    "One-time setup: add the SpeakPaste keyboard in Settings › General › Keyboard and turn on Allow Full Access. Open SpeakPaste once to save your ElevenLabs key; iOS asks for microphone permission on the first Start. If iOS cannot switch back automatically, swipe right along the bottom home bar; recording keeps going."
                 )
                 .font(.footnote)
                 .foregroundStyle(Theme.inkMuted)
@@ -351,6 +354,7 @@ private struct FlowStep: View {
 
 private struct RecordingLiveView: View {
     @ObservedObject var recorder: AudioRecorder
+    let isKeyboardDictation: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ScaledMetric(relativeTo: .largeTitle) private var timerSize: CGFloat = 60
 
@@ -383,9 +387,14 @@ private struct RecordingLiveView: View {
                 .frame(height: 64)
                 .accessibilityHidden(true)
 
-            Text("Tap the stop button when you're done.")
+            Text(
+                isKeyboardDictation
+                    ? "Return to your previous app, then stop and insert from the keyboard. If needed, swipe right along the bottom home bar; recording keeps going."
+                    : "Tap the stop button when you're done."
+            )
                 .font(.footnote)
                 .foregroundStyle(Theme.inkMuted)
+                .multilineTextAlignment(.center)
         }
         .padding(.horizontal, 24)
     }

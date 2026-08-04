@@ -38,6 +38,7 @@ struct SharedDictationSnapshot: Codable, Equatable {
     var transcript: String?
     var errorMessage: String?
     var returnBundleIdentifier: String?
+    var returnProcessIdentifier: Int32?
     var hostResolutionAttempts: [String]?
     var launchAttempts: [String]?
     var successfulLaunchRoute: String?
@@ -58,6 +59,7 @@ struct SharedDictationSnapshot: Codable, Equatable {
             transcript: nil,
             errorMessage: nil,
             returnBundleIdentifier: nil,
+            returnProcessIdentifier: nil,
             hostResolutionAttempts: nil,
             launchAttempts: nil,
             successfulLaunchRoute: nil,
@@ -93,7 +95,10 @@ struct SharedDictationStore: @unchecked Sendable {
     }
 
     @discardableResult
-    func begin(returnBundleIdentifier: String?) -> SharedDictationSnapshot {
+    func begin(
+        returnBundleIdentifier: String?,
+        returnProcessIdentifier: Int32? = nil
+    ) -> SharedDictationSnapshot {
         let snapshot = SharedDictationSnapshot(
             sessionID: UUID(),
             phase: .launching,
@@ -101,6 +106,7 @@ struct SharedDictationStore: @unchecked Sendable {
             transcript: nil,
             errorMessage: nil,
             returnBundleIdentifier: returnBundleIdentifier,
+            returnProcessIdentifier: returnProcessIdentifier,
             hostResolutionAttempts: nil,
             launchAttempts: nil,
             successfulLaunchRoute: nil,

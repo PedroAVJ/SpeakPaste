@@ -31,6 +31,59 @@
 			</array>
 		</dict>
 	</array>
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>sms</string>
+		<string>whatsapp</string>
+		<string>whatsapp-consumer</string>
+		<string>instagram</string>
+		<string>fb-messenger</string>
+		<string>messenger</string>
+		<string>mailto</string>
+		<string>twitter</string>
+		<string>linkedin</string>
+		<string>mobilenotes</string>
+		<string>onenote</string>
+		<string>keep</string>
+		<string>notion</string>
+		<string>evernote</string>
+		<string>chatgpt</string>
+		<string>claude</string>
+		<string>googlegemini</string>
+		<string>com.grokapp</string>
+		<string>kin</string>
+		<string>perplexity-app</string>
+		<string>goodnotes5</string>
+		<string>notability</string>
+		<string>bear</string>
+		<string>obsidian</string>
+		<string>googlechrome</string>
+		<string>googlecalendar</string>
+		<string>googledocs</string>
+		<string>googledrive</string>
+		<string>comgooglemaps</string>
+		<string>googleapp</string>
+		<string>microsoft-edge</string>
+		<string>youtube</string>
+		<string>fb</string>
+		<string>tiktok</string>
+		<string>reddit</string>
+		<string>barcelona</string>
+		<string>bluesky</string>
+		<string>pinterest</string>
+		<string>sgnl</string>
+		<string>line</string>
+		<string>ichat</string>
+		<string>tg</string>
+		<string>slack</string>
+		<string>discord</string>
+		<string>message</string>
+		<string>googlegmail</string>
+		<string>ms-outlook</string>
+		<string>ymail</string>
+		<string>superhuman</string>
+		<string>protonmail</string>
+	</array>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>

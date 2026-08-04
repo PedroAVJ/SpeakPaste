@@ -14,13 +14,6 @@ final class SpeakPasteAppDelegate: UIResponder, UIApplicationDelegate {
         // Launch is the only safe time to sweep a prior process's exact private
         // upload artifacts, before this process can start a transcription.
         ElevenLabsClient.cleanupAbandonedMultipartUploads()
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(systemNavigationActionDidChange(_:)),
-            name: HostAppSwitcher.systemNavigationActionChangedNotification,
-            object: nil
-        )
-        HostAppSwitcher.probeSystemNavigationAction(route: "application-launch")
 #if DEBUG
         seedAPIKeyFromEnvironmentIfNeeded()
 #endif
@@ -91,10 +84,6 @@ final class SpeakPasteAppDelegate: UIResponder, UIApplicationDelegate {
     }
 #endif
 
-    @objc private func systemNavigationActionDidChange(_ notification: Notification) {
-        HostAppSwitcher.probeSystemNavigationAction(route: "action-changed")
-    }
-
     func application(
         _ application: UIApplication,
         configurationForConnecting connectingSceneSession: UISceneSession,
@@ -127,7 +116,6 @@ final class SpeakPasteSceneDelegate: UIResponder, UIWindowSceneDelegate {
         window.rootViewController = UIHostingController(rootView: rootView)
         self.window = window
         window.makeKeyAndVisible()
-        HostAppSwitcher.probeSystemNavigationAction(route: "scene-will-connect")
 
         for context in connectionOptions.urlContexts {
             handleIncomingURL(
@@ -154,7 +142,6 @@ final class SpeakPasteSceneDelegate: UIResponder, UIWindowSceneDelegate {
     }
 
     func sceneDidBecomeActive(_ scene: UIScene) {
-        HostAppSwitcher.probeSystemNavigationAction(route: "scene-did-become-active")
         model.handleActivation()
     }
 
@@ -163,13 +150,6 @@ final class SpeakPasteSceneDelegate: UIResponder, UIWindowSceneDelegate {
         sourceApplication: String?,
         deliveryRoute: String
     ) {
-        if
-            url.scheme == "speakpaste",
-            url.host == "dictate",
-            url.path == "/start"
-        {
-            HostAppSwitcher.beginReturnSession(probeRoute: deliveryRoute)
-        }
         captureReturnApplication(
             from: url,
             sourceApplication: sourceApplication,

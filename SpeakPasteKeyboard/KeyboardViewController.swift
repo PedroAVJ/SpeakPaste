@@ -11,6 +11,7 @@ final class KeyboardViewController: UIInputViewController {
             guard let self else {
                 return HostApplicationResolution(
                     bundleIdentifier: nil,
+                    processIdentifier: nil,
                     attempts: ["controller-deallocated"]
                 )
             }
@@ -61,6 +62,10 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        // Ask the iOS 26.4+ keyboard arbiter to publish the current host while
+        // the extension is still embedded in it. The Start action repeats the
+        // refresh, but warming the cache here avoids depending on tap timing.
+        SPHostApplicationCaptureRefresh()
         applyKeyboardAppearance()
         model.hasFullAccess = hasFullAccess
         model.startPolling()

@@ -50,7 +50,8 @@ final class AppModel: ObservableObject {
         static let language = "transcription-language"
         static let cleanSpeech = "clean-speech"
         static let autoCopy = "auto-copy"
-        static let didShowSwitchbackExplanation = "did-show-switchback-explanation"
+        static let switchbackExplanationPrefix =
+            "did-show-switchback-explanation."
     }
 
     init(
@@ -87,7 +88,20 @@ final class AppModel: ObservableObject {
 
     var isRecording: Bool { phase == .recording }
     var isTranscribing: Bool { phase == .transcribing }
+    var isKeyboardDictation: Bool { activeSharedSessionID != nil }
     var canStartRecording: Bool { !isTranscribing }
+    var canAutomaticallyReturnToKeyboardHost: Bool {
+        HostAppSwitcher.supportsAutomaticReturn(
+            to: keyboardReturnPrompt?.bundleIdentifier
+        )
+    }
+    var manualReturnMessage: String {
+        let appName = keyboardReturnPrompt?.appName ?? "your previous app"
+        if appName == "your previous app" {
+            return "Swipe right along the bottom home bar to return to your app. Recording continues while you switch."
+        }
+        return "In \(appName), SpeakPaste can’t automatically bring you back. Swipe right along the bottom home bar; recording continues while you switch."
+    }
 
     func toggleRecording() {
         if isRecording {
@@ -113,6 +127,7 @@ final class AppModel: ObservableObject {
         let snapshot = sharedStore.load()
         guard
             snapshot.phase == .launching || snapshot.phase == .failed,
+            Date().timeIntervalSince(snapshot.startedAt) < 30,
             URLComponents(url: url, resolvingAgainstBaseURL: false)?
                 .queryItems?
                 .first(where: { $0.name == "session" })?
@@ -142,12 +157,16 @@ final class AppModel: ObservableObject {
     func returnToKeyboardHost() {
         guard let prompt = keyboardReturnPrompt else { return }
         sharedStore.setReturnDiagnostics(
-            HostAppSwitcher.anticipatedAttempts(for: prompt.bundleIdentifier),
+            HostAppSwitcher.anticipatedAttempts(
+                for: prompt.bundleIdentifier,
+                processIdentifier: prompt.processIdentifier
+            ),
             sessionID: prompt.id
         )
         Task {
             let outcome = await HostAppSwitcher.open(
                 bundleIdentifier: prompt.bundleIdentifier,
+                processIdentifier: prompt.processIdentifier,
                 onAttemptsChanged: { [sharedStore] attempts in
                     sharedStore.setReturnDiagnostics(
                         attempts,
@@ -174,17 +193,58 @@ final class AppModel: ObservableObject {
     }
 
     func confirmSwitchbackExplanation() {
-        defaults.set(true, forKey: Keys.didShowSwitchbackExplanation)
         showSwitchbackExplanation = false
         guard let sessionID = pendingAutomaticReturnSessionID else { return }
         pendingAutomaticReturnSessionID = nil
+        if
+            let prompt = keyboardReturnPrompt,
+            prompt.id == sessionID,
+            let key = switchbackExplanationKey(
+                for: prompt.bundleIdentifier
+            )
+        {
+            defaults.set(true, forKey: key)
+        }
         automaticallyReturnToKeyboardHost(sessionID: sessionID)
     }
 
-    private func startRecording(for sharedSnapshot: SharedDictationSnapshot?) async {
+    private func startRecording(
+        for incomingSharedSnapshot: SharedDictationSnapshot?
+    ) async {
         guard !isRecording, !isTranscribing, !isStartingRecording else { return }
         isStartingRecording = true
         defer { isStartingRecording = false }
+        var sharedSnapshot = incomingSharedSnapshot
+        if var snapshot = sharedSnapshot {
+            let capturedPIDAge = Date().timeIntervalSince(snapshot.startedAt)
+            let canResolveCapturedPID = (-5 ... 30).contains(capturedPIDAge)
+            let resolution = HostAppSwitcher.resolveReturnTarget(
+                bundleIdentifier: snapshot.returnBundleIdentifier,
+                processIdentifier: canResolveCapturedPID
+                    ? snapshot.returnProcessIdentifier
+                    : nil
+            )
+            var diagnostics = resolution.attempts
+            if
+                snapshot.returnBundleIdentifier == nil,
+                snapshot.returnProcessIdentifier != nil,
+                !canResolveCapturedPID
+            {
+                diagnostics.append("return-target-host-pid:stale")
+            }
+            sharedStore.setReturnDiagnostics(
+                diagnostics,
+                sessionID: snapshot.sessionID
+            )
+            if let resolvedBundleIdentifier = resolution.bundleIdentifier {
+                snapshot.returnBundleIdentifier = resolvedBundleIdentifier
+                sharedStore.setReturnBundleIdentifier(
+                    resolvedBundleIdentifier,
+                    sessionID: snapshot.sessionID
+                )
+            }
+            sharedSnapshot = snapshot
+        }
         guard hasAPIKey else {
             showSettings = true
             let message = "Add your ElevenLabs API key before your first dictation."
@@ -225,11 +285,20 @@ final class AppModel: ObservableObject {
                 keyboardReturnPrompt = KeyboardReturnPrompt(
                     id: sharedSnapshot.sessionID,
                     bundleIdentifier: sharedSnapshot.returnBundleIdentifier,
+                    processIdentifier: sharedSnapshot.returnProcessIdentifier,
                     appName: HostAppSwitcher.displayName(
                         for: sharedSnapshot.returnBundleIdentifier
                     )
                 )
-                if defaults.bool(forKey: Keys.didShowSwitchbackExplanation) {
+                showManualReturnHint = false
+                if !HostAppSwitcher.supportsAutomaticReturn(
+                    to: sharedSnapshot.returnBundleIdentifier
+                ) {
+                    pendingAutomaticReturnSessionID = nil
+                    showManualReturnHint = true
+                } else if hasShownSwitchbackExplanation(
+                    for: sharedSnapshot.returnBundleIdentifier
+                ) {
                     automaticallyReturnToKeyboardHost(
                         sessionID: sharedSnapshot.sessionID
                     )
@@ -251,6 +320,28 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func hasShownSwitchbackExplanation(
+        for bundleIdentifier: String?
+    ) -> Bool {
+        guard let key = switchbackExplanationKey(for: bundleIdentifier) else {
+            return false
+        }
+        return defaults.bool(forKey: key)
+    }
+
+    private func switchbackExplanationKey(
+        for bundleIdentifier: String?
+    ) -> String? {
+        guard
+            HostAppSwitcher.supportsAutomaticReturn(to: bundleIdentifier),
+            let bundleIdentifier
+        else {
+            return nil
+        }
+        return Keys.switchbackExplanationPrefix
+            + bundleIdentifier.lowercased()
+    }
+
     private func automaticallyReturnToKeyboardHost(sessionID: UUID) {
         Task { [weak self] in
             guard
@@ -264,13 +355,15 @@ final class AppModel: ObservableObject {
 
             self.sharedStore.setReturnDiagnostics(
                 HostAppSwitcher.anticipatedAttempts(
-                    for: prompt.bundleIdentifier
+                    for: prompt.bundleIdentifier,
+                    processIdentifier: prompt.processIdentifier
                 ),
                 sessionID: sessionID
             )
 
             let outcome = await HostAppSwitcher.open(
                 bundleIdentifier: prompt.bundleIdentifier,
+                processIdentifier: prompt.processIdentifier,
                 onAttemptsChanged: { [sharedStore = self.sharedStore] attempts in
                     sharedStore.setReturnDiagnostics(
                         attempts,
@@ -308,10 +401,11 @@ final class AppModel: ObservableObject {
     func cancelRecording() {
         guard isRecording else { return }
         recorder.stop()
+        let wasKeyboardDictation = activeSharedSessionID != nil
         if let activeSharedSessionID {
             sharedStore.setPhase(.cancelled, sessionID: activeSharedSessionID)
         }
-        finishSharedSession()
+        finishSharedSession(keepSharedResult: wasKeyboardDictation)
         deleteActiveRecording()
         phase = .idle
     }

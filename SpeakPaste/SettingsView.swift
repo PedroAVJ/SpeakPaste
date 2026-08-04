@@ -142,7 +142,7 @@ struct SettingsView: View {
             Text("Clipboard")
         } footer: {
             Text(
-                "Applies only to recordings made here in the app. Back Tap dictations can't reach the clipboard from the background — the SpeakPaste keyboard types them at the cursor instead."
+                "Applies only to recordings started manually in this app. Keyboard dictations return through the SpeakPaste keyboard and type at the cursor instead."
             )
         }
         .listRowBackground(Theme.surface)

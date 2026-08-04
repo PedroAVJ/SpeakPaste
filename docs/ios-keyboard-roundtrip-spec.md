@@ -198,7 +198,9 @@ Launch order:
 
 1. Typed responder-chain `UIScene.open`, or `UIApplication.open` when that is
    the responder.
-2. `NSExtensionContext.open` as the supported extension fallback.
+2. The public `NSExtensionContext.open` method as a best-effort fallback. Apple
+   does not document custom keyboards as an extension point that can open
+   arbitrary URLs, so its asynchronous result must be treated as authoritative.
 3. Direct containing-bundle activation only as a final fallback for this
    private sideload.
 
@@ -213,68 +215,58 @@ origins signed by the same team, so Notes-to-SpeakPaste delivery correctly
 reports `nil` and cannot be the general switchback solution. Both cold-start URL
 contexts and URLs delivered to an existing scene must follow the same path.
 
-### iOS 26.5 system-navigation return
+### Wispr-style iOS 26.4+ return
 
-The primary return path uses the live `UISystemNavigationAction` attached to
-`UIApplication`. This is the same system mechanism that backs the status-bar
-breadcrumb, not a guessed application identifier. Inspection of the exact
-iPhone 15 iOS 26.5.2 UIKitCore, BaseBoard, and SpringBoard binaries established
-the following contract:
+The generic `UISystemNavigationAction` experiment is excluded from the current
+implementation. On the test phone it accepted the primary destination but sent
+SpeakPaste to the Home Screen, so its Boolean result did not identify or prove a
+return to Notes.
 
-- `UIApplication._systemNavigationAction` uses the object-returning encoding
-  `@16@0:8`;
-- `isValid` and `canSendResponse` use `B16@0:8`;
-- `destinations` returns an array of `NSNumber` destination values;
-- destination `0` is SpringBoard's primary/back destination, constructed from
-  the previous application scene; destination `1` is secondary/forward;
-- destination metadata methods use `@24@0:8Q16`; and
-- `sendResponseForDestination:` uses `B24@0:8Q16` and consumes a strict
-  one-shot BaseBoard response.
+The replacement is based on direct inspection of the signed Wispr Flow 1.67,
+build 1313 app package. Its exact `LSApplicationQueriesSchemes` value is a fixed
+50-entry allowlist that includes `mobilenotes`, `chatgpt`, `whatsapp`, `slack`,
+and other supported apps. Exported Swift symbols include:
 
-SpeakPaste resolves each selector through the Objective-C runtime and invokes
-its IMP only when the exact encoding matches. Immediately before sending, it
-re-fetches the current action, requires a real `UISystemNavigationAction`,
-`isValid == true`, `canSendResponse == true`, and destination `0`, and marks the
-object identity attempted before entering the response method. It never creates
-or reuses an action and never substitutes an `NSNumber` for the scalar
-destination argument.
+- `FlowCore.AppInfo.launchURLScheme` and `appInfo(bundleID:)`;
+- `FlowCore.KeyboardSwitchBackScene.url(from:hostBundleID:)` and
+  `hostBundleID(from:)`;
+- `Keyboard.KeyboardInputViewController.legacyHostAppBundleID()`; and
+- presentation and behavior checks parameterized by whether an app supports a
+  URL scheme.
 
-Presence of destination `0` is not sufficient. SpeakPaste additionally resolves
-which application that destination leads to, using `bundleIdForDestination:` and
-falling back to the scheme of `URLForDestination:`. It sends the response only
-when the destination names a real application other than SpeakPaste itself and,
-when the keyboard resolved a host, matches that host. Otherwise the one-shot
-response is left unsent and the return proceeds to the URL route, because an
-unidentified primary destination suspends the app to the Home Screen.
+The app and framework binaries have FairPlay encryption enabled, so those facts
+establish the architecture but do not expose Wispr's method bodies. SpeakPaste
+implements the same observable shape:
 
-A `true` response means the destination existed and BaseBoard accepted the
-response; by itself it does not prove the visible transition completed.
-SpeakPaste therefore installs a scene-specific background observer before
-sending and accepts the system route only if its foreground scene enters the
-background within the short transition window. Otherwise it proceeds to a known public host URL and,
-for this private sideload only, bundle activation. If no fallback host is known,
-the manual home-bar instruction remains available.
+1. An Objective-C `+load` hook installs before the keyboard view controller.
+2. On iOS 26.4+, it enables `_UIKeyboardArbiterClient` and intercepts
+   `_UIKeyboardArbiterClientInputDestination`'s
+   `queue_keyboardChanged:onComplete:` callback.
+3. It reads the callback object's `_sourceBundleIdentifier`, rejects system
+   brokers and SpeakPaste itself, then caches the host bundle identifier.
+4. The keyboard writes that identifier to the App Group before opening the
+   containing app.
+5. The containing app maps only supported bundle identifiers to the URL schemes
+   declared in its property list and uses `UIApplication.open`.
+6. A missing host, an unsupported host, an unavailable scheme, or a failed open
+   keeps recording alive and shows the manual home-bar swipe.
 
-UIKit invalidates a replaced action and clears it when the app backgrounds, so
-retaining an earlier object cannot preserve the capability. SpeakPaste probes
-at launch, URL delivery, activation, and the action-changed notification for
-diagnostics, but always uses the live object at send time.
-
-These private selectors are an implementation choice for SpeakPaste's personal
-sideload. The reference recording proves Wispr's behavior, not that Wispr uses
-the same APIs.
+The host-capture technique is adapted from the MIT-licensed
+`KeyboardHostBundleID` project, with its notice retained in
+`THIRD_PARTY_NOTICES.md`. It is a private UIKit dependency suitable for this
+personal sideload, not an App Store-safe contract.
 
 The recording session uses an input-only audio category without playback-only
 options. In particular, it must not combine `.record` with `.duckOthers`; that
 combination is invalid and produced the `OSStatus -50` evidence above.
 
-### iOS 26.5 scene-identity probe
+### Removed generic and scene-identity routes
 
 The generic private `suspendReturningToLastApp:` route is excluded from the
 implementation. It returned the test phone to the Home Screen and its `Void`
 return value cannot establish that the intended host opened.
 
-For this private diagnostic build, the keyboard now probes the exact iOS 26.5
+An earlier private diagnostic build probed the exact iOS 26.5
 class method
 `+[_UIKeyboardArbiterClient keyboardClientFBSSceneIdentityStringOrIdentifierFromScene:]`
 before it opens SpeakPaste. Runtime inspection of the device's UIKitCore binary
@@ -294,13 +286,10 @@ The probe therefore:
 - fails back to the existing manual return UI when the result is missing,
   ambiguous, or unknown.
 
-For Notes, a direct host-process bundle value or a structurally bounded scene
-component beginning `com.apple.mobilenotes-` maps to the fixed bundle
-`com.apple.mobilenotes`. That mapping is now a fallback after the system
-breadcrumb response. If reached, the fallback uses `mobilenotes://` and
-persists its actual asynchronous Boolean result as `host-url:true` or
-`host-url:false`. The scene probe remains a controlled on-device hypothesis,
-not evidence that Wispr uses the same private method.
+That probe remains useful failure evidence, but it is not the return route now.
+For Notes, the current hook must capture `com.apple.mobilenotes` directly; the
+static catalog then uses `mobilenotes://` and persists the asynchronous result as
+`host-url:true` or `host-url:false`.
 
 ## Device acceptance matrix
 
@@ -308,7 +297,8 @@ Before the round-trip is called complete, exercise these actions directly on
 the phone:
 
 - Notes: first launch, explanation, automatic return, stop, and insertion.
-- Notes: a second launch without the one-time explanation.
+  **Verified on iPhone 15/iOS 26.5.2.**
+- Notes: a second launch without the one-time explanation. **Verified.**
 - At least one third-party host such as ChatGPT or WhatsApp.
 - Microphone permission denied, then enabled.
 - Full Access disabled.
@@ -316,12 +306,12 @@ the phone:
 - Transcription failure and retry.
 - Unknown return target, confirming the manual-swipe fallback remains usable.
 
-The next validation is intentionally one focused Notes run: open a fresh Notes
-cursor, select SpeakPaste, tap Start once, accept the one-time explanation if it
-appears, and record whether the destination is Notes, Home, or SpeakPaste. Keep
-the resulting shared session intact until its host-resolution and return
-diagnostics have been copied. The decisive fields are whether the keyboard resolved a
-host bundle identifier, what `system-navigation-primary-bundle` resolved
-destination `0` to, whether the response was sent or recorded as
-`system-navigation-destination-unconfirmed`, and whether `host-url` ran and
-returned `true`.
+Two consecutive Notes runs now satisfy the core acceptance path. Sessions
+`501FE8BC-816D-48ED-90BD-1A4EF0FE53CB` and
+`7575AD2D-DA7C-48D1-9DEB-57AD11A0C3CB` both reported
+`arbiter-hook-status:installed`,
+`arbiter-hook-cached:com.apple.mobilenotes`,
+`return-target-shared-bundle:com.apple.mobilenotes`,
+`host-catalog:com.apple.mobilenotes`, and `host-url:true`. Both keyboard-side
+mirrors ended at `phase: inserted`; the second run did not show the first-use
+explanation.
