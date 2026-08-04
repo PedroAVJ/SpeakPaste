@@ -173,6 +173,7 @@ final class MacRealtimeInlineTextSession {
     private let processIdentifier: pid_t
     private var reconciler: MacRealtimeTextReconciler
     private(set) var isDetached = false
+    private(set) var isFinalized = false
 
     private init(
         element: AXUIElement,
@@ -219,7 +220,7 @@ final class MacRealtimeInlineTextSession {
     /// because the service emitted an empty partial.
     @discardableResult
     func update(text: String) -> Bool {
-        guard !isDetached else { return false }
+        guard !isDetached, !isFinalized else { return false }
         if text.isEmpty, !reconciler.hasProvisionalOutput { return true }
         guard
             let current = verifiedCurrentSnapshot(),
@@ -234,12 +235,23 @@ final class MacRealtimeInlineTextSession {
         return apply(mutation)
     }
 
+    /// Replaces the owned provisional span with the exact post-processed final
+    /// transcript and relinquishes it in place. This is the verified realtime
+    /// delivery boundary; it deliberately avoids erasing visible text and then
+    /// asking an Electron Paste menu to put the same words back.
+    @discardableResult
+    func finalize(text: String) -> Bool {
+        guard !isDetached, !isFinalized, update(text: text) else { return false }
+        isFinalized = true
+        return true
+    }
+
     /// Removes only the exact text this session still proves it owns and
     /// restores the pre-dictation caret. If the user typed, moved the caret,
     /// or changed focus, rollback is refused and nothing is touched.
     @discardableResult
     func rollback() -> Bool {
-        guard !isDetached else { return false }
+        guard !isDetached, !isFinalized else { return false }
         guard let current = verifiedCurrentSnapshot() else {
             isDetached = true
             return false

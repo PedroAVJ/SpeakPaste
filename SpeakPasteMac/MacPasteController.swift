@@ -4,6 +4,8 @@ import Carbon
 import Foundation
 
 enum MacPasteRoute: String, Equatable {
+    /// The realtime editor replaced and read back its exact owned AX range.
+    case realtime = "realtime"
     /// The target application's own Edit ▸ Paste command was invoked.
     case menuAction = "menu"
     /// A synthesized ⌘V was posted.
@@ -168,6 +170,35 @@ struct MacPasteController {
             policyForTarget: policyForTarget,
             copyOnHold: copyOnHold,
             heldClipboardOwner: heldClipboardOwner
+        )
+    }
+
+    /// Finalizes the exact AX range already owned by a realtime session. The
+    /// shared gate prevents an older clipboard/menu delivery from interleaving
+    /// with this compare-and-swap write. Losing ownership fails closed and
+    /// leaves the final text on the clipboard for explicit placement.
+    func deliverRealtime(
+        _ text: String,
+        editor: MacRealtimeInlineTextSession,
+        target: MacDeliveryTarget,
+        heldClipboardOwner: MacHeldClipboardIdentity
+    ) async -> MacPasteDeliveryOutcome {
+        await deliveryGate.acquire()
+        defer { deliveryGate.release() }
+        guard editor.finalize(text: text) else {
+            return MacPasteDeliveryOutcome(
+                result: heldResult(
+                    .realtimeDestinationChanged,
+                    text: text,
+                    copyOnHold: true,
+                    heldClipboardOwner: heldClipboardOwner
+                ),
+                target: target
+            )
+        }
+        return MacPasteDeliveryOutcome(
+            result: .pasted(route: .realtime, verified: true),
+            target: target
         )
     }
 

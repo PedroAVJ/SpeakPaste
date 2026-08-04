@@ -25,6 +25,9 @@ private struct MacFinishedDictation {
     /// Capture/import time, not the later instant when the network finished.
     let createdAt: Date
     let target: MacDeliveryTarget?
+    /// Present only when provisional realtime text still owns an exact AX
+    /// range and should become the final durable delivery in place.
+    let realtimeEditor: MacRealtimeInlineTextSession?
     let deviceName: String
     let recordingDuration: TimeInterval
     let transcriptionDuration: TimeInterval
@@ -57,7 +60,11 @@ private struct MacActiveRealtimeDictation {
 
 private enum MacRealtimeStopResolution {
     case inactive
-    case completed(result: TranscriptionResult, target: MacDeliveryTarget)
+    case completed(
+        result: TranscriptionResult,
+        target: MacDeliveryTarget,
+        editor: MacRealtimeInlineTextSession
+    )
     case batchFallback(
         target: MacDeliveryTarget?,
         requiresManualOutput: Bool,
@@ -2440,17 +2447,28 @@ final class MacAppModel: ObservableObject {
             try await active.pump.finish()
             let result = try await active.session.finish()
             activeRealtimeDictation = nil
-            let rollbackSucceeded = active.editor.rollback()
-            let guardedTarget = exactRealtimeDeliveryTarget(
-                for: active,
-                rollbackSucceeded: rollbackSucceeded
+            // Make the service's committed result the visible provisional tail
+            // synchronously. The later durable delivery step applies normal
+            // replacements/formatting to this same owned range in place.
+            let previewChunk = MacTranscriptPostProcessor.prepare(
+                result.text,
+                replacements: [],
+                spokenFormattingCommands: false
+            )
+            let preview = MacTranscriptPostProcessor.fit(
+                previewChunk,
+                after: active.target.precedingText
             )
             releaseRealtimeDeliveryBarrier(for: active.id)
             realtimeCaretFrame = nil
-            if let guardedTarget {
-                return .completed(result: result, target: guardedTarget)
+            if active.editor.update(text: preview) {
+                return .completed(
+                    result: result,
+                    target: active.target,
+                    editor: active.editor
+                )
             }
-            realtimeModeNotice = "Realtime finalized, but SpeakPaste could not prove it still owned the provisional range. The field was left untouched and the final text will be held for manual placement."
+            realtimeModeNotice = "Realtime finalized, but the field or caret changed before durable delivery. The field was left untouched and the final text will be held for manual placement."
             return .batchFallback(
                 target: active.target,
                 requiresManualOutput: true,
@@ -2716,7 +2734,7 @@ final class MacAppModel: ObservableObject {
                 hudCardID: hudCapture?.id,
                 hudOrdinal: hudCapture?.ordinal
             )
-        case let .completed(result, target):
+        case let .completed(result, target, editor):
             handoffIsDurable = startTranscription(
                 audioURL: segment.url,
                 target: target,
@@ -2724,6 +2742,7 @@ final class MacAppModel: ObservableObject {
                 recordingDuration: recordingDuration,
                 interruption: interruption,
                 precomputedResult: result,
+                realtimeEditor: editor,
                 hudCardID: hudCapture?.id,
                 hudOrdinal: hudCapture?.ordinal
             )
@@ -2781,6 +2800,7 @@ final class MacAppModel: ObservableObject {
         isImport: Bool = false,
         requiresManualOutput: Bool = false,
         precomputedResult: TranscriptionResult? = nil,
+        realtimeEditor: MacRealtimeInlineTextSession? = nil,
         hudCardID: UUID? = nil,
         hudOrdinal: Int? = nil
     ) -> Bool {
@@ -2888,6 +2908,7 @@ final class MacAppModel: ObservableObject {
                 isImport: isImport,
                 requiresManualOutput: requiresManualOutput,
                 precomputedResult: precomputedResult,
+                realtimeEditor: realtimeEditor,
                 networkGenerationAtRequestStart: networkGenerationAtRequestStart,
                 workloadID: workloadID,
                 hudCardID: resolvedHUDCardID,
@@ -2914,6 +2935,7 @@ final class MacAppModel: ObservableObject {
         isImport: Bool,
         requiresManualOutput: Bool,
         precomputedResult: TranscriptionResult?,
+        realtimeEditor: MacRealtimeInlineTextSession?,
         networkGenerationAtRequestStart: UInt64,
         workloadID: UUID,
         hudCardID: UUID,
@@ -3097,6 +3119,7 @@ final class MacAppModel: ObservableObject {
                 deliveryEscrowID: deliveryEscrowID,
                 createdAt: createdAt,
                 target: target,
+                realtimeEditor: realtimeEditor,
                 deviceName: deviceName,
                 recordingDuration: recordingDuration,
                 transcriptionDuration: Date().timeIntervalSince(transcriptionStartedAt),
@@ -3159,6 +3182,7 @@ final class MacAppModel: ObservableObject {
                 deliveryEscrowID: nil,
                 createdAt: createdAt,
                 target: target,
+                realtimeEditor: nil,
                 deviceName: deviceName,
                 recordingDuration: recordingDuration,
                 transcriptionDuration: 0,
@@ -3647,14 +3671,29 @@ final class MacAppModel: ObservableObject {
             createdAt: finished.createdAt,
             sourceText: finished.text
         )
-        let deliveryOutcome = await pasteController.deliver(
-            finished.preparedChunk,
-            capturedTarget: finished.target,
-            autoPaste: autoPaste,
-            policyForTarget: { self.deliveryPolicy(for: $0) },
-            copyOnHold: copyOnHold,
-            heldClipboardOwner: heldClipboardOwner
-        )
+        let deliveryOutcome: MacPasteDeliveryOutcome
+        if let realtimeEditor = finished.realtimeEditor,
+           let target = finished.target {
+            let finalText = MacTranscriptPostProcessor.fit(
+                finished.preparedChunk,
+                after: target.precedingText
+            )
+            deliveryOutcome = await pasteController.deliverRealtime(
+                finalText,
+                editor: realtimeEditor,
+                target: target,
+                heldClipboardOwner: heldClipboardOwner
+            )
+        } else {
+            deliveryOutcome = await pasteController.deliver(
+                finished.preparedChunk,
+                capturedTarget: finished.target,
+                autoPaste: autoPaste,
+                policyForTarget: { self.deliveryPolicy(for: $0) },
+                copyOnHold: copyOnHold,
+                heldClipboardOwner: heldClipboardOwner
+            )
+        }
         let delivery = deliveryOutcome.result
         let deliveredTarget = deliveryOutcome.target
         activeDeliveryEscrowIDs.remove(deliveryEscrowID)
