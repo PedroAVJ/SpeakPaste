@@ -92,6 +92,7 @@ final class KeyboardModel: ObservableObject {
 
     func startDictation() {
         localError = nil
+        guard isIdle else { return }
         guard hasFullAccess else {
             localError = "Enable Allow Full Access for SpeakPaste in Keyboard Settings."
             return
@@ -103,7 +104,8 @@ final class KeyboardModel: ObservableObject {
 
         let hostResolution = resolveHostApplication()
         let newSnapshot = store.begin(
-            returnBundleIdentifier: hostResolution.bundleIdentifier
+            returnBundleIdentifier: hostResolution.bundleIdentifier,
+            returnProcessIdentifier: hostResolution.processIdentifier
         )
         store.setHostResolutionDiagnostics(
             hostResolution.attempts,

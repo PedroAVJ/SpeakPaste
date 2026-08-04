@@ -3,7 +3,43 @@ import XCTest
 
 final class SharedDictationStoreTests: XCTestCase {
     @MainActor
-    func testReturnTargetsRejectSystemBrokers() {
+    func testWisprStyleCatalogUsesStaticHostURLs() throws {
+        let notes = try XCTUnwrap(
+            HostAppSwitcher.appInfo(for: "com.apple.mobilenotes")
+        )
+        XCTAssertEqual(notes.displayName, "Notes")
+        XCTAssertEqual(notes.launchURL.absoluteString, "mobilenotes://")
+        XCTAssertTrue(
+            HostAppSwitcher.supportsAutomaticReturn(
+                to: "com.openai.chat"
+            )
+        )
+        XCTAssertTrue(
+            HostAppSwitcher.supportsAutomaticReturn(
+                to: "ch.protonmail.protonmail"
+            )
+        )
+        XCTAssertFalse(
+            HostAppSwitcher.supportsAutomaticReturn(
+                to: "com.example.unsupported"
+            )
+        )
+        XCTAssertEqual(
+            HostAppSwitcher.anticipatedRoute(
+                for: "com.apple.mobilenotes"
+            ),
+            "host-url"
+        )
+        XCTAssertEqual(
+            HostAppSwitcher.anticipatedRoute(
+                for: "com.example.unsupported"
+            ),
+            "manual-switchback"
+        )
+    }
+
+    @MainActor
+    func testReturnTargetsRejectSystemBrokersWithoutRestrictingRealApps() {
         XCTAssertTrue(
             HostAppSwitcher.isValidReturnBundleIdentifier(
                 "com.apple.mobilenotes"
@@ -19,7 +55,7 @@ final class SharedDictationStoreTests: XCTestCase {
                 "com.apple.Spotlight"
             )
         )
-        XCTAssertFalse(
+        XCTAssertTrue(
             HostAppSwitcher.isValidReturnBundleIdentifier(
                 "com.example.unknown"
             )
@@ -32,9 +68,13 @@ final class SharedDictationStoreTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let store = SharedDictationStore(suiteName: suiteName)
 
-        let session = store.begin(returnBundleIdentifier: "com.openai.chat")
+        let session = store.begin(
+            returnBundleIdentifier: "com.openai.chat",
+            returnProcessIdentifier: 4_281
+        )
         XCTAssertEqual(store.load().phase, .launching)
         XCTAssertEqual(store.load().returnBundleIdentifier, "com.openai.chat")
+        XCTAssertEqual(store.load().returnProcessIdentifier, 4_281)
 
         store.setHostResolutionDiagnostics(
             ["environment-host:<nil>", "scene.hostBundleIdentifier:com.openai.chat"],
