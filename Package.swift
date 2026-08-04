@@ -89,6 +89,7 @@ let package = Package(
                 "MacPendingTranscriptStore.swift",
                 "MacPasteVerification.swift",
                 "MacCommandGesture.swift",
+                "MacHUDActivity.swift",
                 "MacInputMode.swift",
                 "MacSingleInstanceLease.swift",
                 "MacTranscriptPostProcessor.swift",

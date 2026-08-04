@@ -37,9 +37,12 @@ The Xcode project contains four product targets:
 6. Click the record control or tap the **right Command (⌘)** key once. A single
    tap starts or stops dictation after the system double-tap window. The left ⌘
    is deliberately untouched, so ⌘C, ⌘V, and ⌘Tab keep their normal behavior.
-7. The click-through capture indicator reads **Connecting** while the source is
-   waking and **Listening** when audio is live. It appears only while SpeakPaste
-   is acquiring, using, or releasing the microphone.
+7. The click-through Liquid Glass indicator reads **Connecting** while the
+   source is waking, **Listening** when audio is live, **Releasing** while the
+   microphone is being freed, and **Transcribing** while spoken audio still
+   awaits text. It disappears when that work finishes; success, errors, model
+   details, and offline notices stay in the app instead of becoming floating
+   notifications.
 8. Double-tap right Command to switch between **Mac** and **iPhone** input. The
    choice is sticky. During a recording, SpeakPaste first finalizes and releases
    the current source, queues that segment, and then starts a new ordered segment
@@ -263,13 +266,14 @@ sending sensitive audio.
 
 ## Development status
 
-The macOS target builds with local ad-hoc signing. Its floating capture
-indicator is a compact, declarative view of only **Connecting**, **Listening**,
-and **Releasing**, with the active Mac/iPhone source plus a live level and timer
-while listening. It is click-through, has no controls, disappears outside the
-capture lifecycle, and never presents transcription results, offline notices,
-or errors. A stuck Connecting indicator is capped at 20 seconds and Releasing
-at 15 seconds. Connecting normally stays visible until the microphone proves it
+The macOS target builds with local ad-hoc signing. Its floating Liquid Glass
+indicator is a compact, declarative view of **Connecting**, **Listening**,
+**Releasing**, and **Transcribing**, with the active Mac/iPhone source plus a
+live level and timer only while listening. It is click-through, has no controls,
+disappears after the last active capture or transcription finishes, and never
+presents results, offline notices, or errors. A stuck Connecting indicator is
+capped at 20 seconds and Releasing at 15 seconds. Connecting normally stays
+visible until the microphone proves it
 is delivering a steady sample stream, so
 file recording does not begin inside the Continuity wake-up gap; if macOS
 refuses the monitoring tap that proves liveness, the connection fails loudly

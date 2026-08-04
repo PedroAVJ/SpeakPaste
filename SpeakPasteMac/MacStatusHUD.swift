@@ -19,7 +19,8 @@ final class MacStatusHUDController: ObservableObject {
 
     private let model: MacAppModel
     private let panel: MacStatusPanel
-    private var stateCancellable: AnyCancellable?
+    private var stateCancellables = Set<AnyCancellable>()
+    private var currentActivity: MacHUDActivity = .hidden
     private var delayedHideTask: Task<Void, Never>?
 
     init(model: MacAppModel) {
@@ -62,16 +63,33 @@ final class MacStatusHUDController: ObservableObject {
     /// Starts mirroring the app model into the floating panel. Safe to call
     /// repeatedly from a SwiftUI scene lifecycle callback.
     func start() {
-        guard stateCancellable == nil else {
-            present(model.phase)
+        guard stateCancellables.isEmpty else {
+            currentActivity = resolvedActivity
+            present(currentActivity)
             return
         }
 
-        // Only the capture phase can show the indicator; the enabled flag,
-        // placement, and device identity are merged in so a settings or
-        // source change applies to a HUD that is already on screen.
-        stateCancellable = Publishers.MergeMany(
-            model.$phase.map { _ in () }.eraseToAnyPublisher(),
+        currentActivity = resolvedActivity
+
+        // Consume the emitted activity itself. Published values arrive before
+        // their backing property finishes mutating, so throwing the value away
+        // and immediately re-reading the model can present the previous state.
+        MacHUDActivity.publisher(
+            capture: model.$phase.map(\.hudCaptureActivity),
+            inFlightTranscriptionCount: model.$inFlightCount
+        )
+        .sink { [weak self] activity in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.currentActivity = activity
+                self.present(activity)
+            }
+        }
+        .store(in: &stateCancellables)
+
+        // These values affect chrome, placement, or visibility caps without
+        // changing the semantic activity. Re-present the last emitted state.
+        Publishers.MergeMany(
             model.$phaseStartedAt.map { _ in () }.eraseToAnyPublisher(),
             model.$hudEnabled.map { _ in () }.eraseToAnyPublisher(),
             model.$hudPlacement.map { _ in () }.eraseToAnyPublisher(),
@@ -83,17 +101,19 @@ final class MacStatusHUDController: ObservableObject {
             // the main actor before touching AppKit or the main-actor model.
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                self.present(self.model.phase)
+                self.present(self.currentActivity)
             }
         }
-        present(model.phase)
+        .store(in: &stateCancellables)
+        present(currentActivity)
     }
 
-    /// The indicator exists only while SpeakPaste holds (or is acquiring or
-    /// releasing) the microphone. Every other state — ready, background
-    /// transcription, success, failure, offline, setup, held text — is hidden
-    /// here and reported by the dashboard and menu bar instead.
-    private func present(_ phase: MacCapturePhase) {
+    /// The indicator exists while SpeakPaste holds (or is acquiring or
+    /// releasing) the microphone, and stays up as a quiet "Transcribing"
+    /// state while spoken dictations still await text. Every other state —
+    /// ready, success, failure, offline, setup, held text — is hidden here
+    /// and reported by the dashboard and menu bar instead.
+    private func present(_ activity: MacHUDActivity) {
         delayedHideTask?.cancel()
         delayedHideTask = nil
 
@@ -102,7 +122,7 @@ final class MacStatusHUDController: ObservableObject {
             return
         }
 
-        switch phase {
+        switch activity {
         case .connecting:
             showPanel()
             scheduleHide(
@@ -110,9 +130,9 @@ final class MacStatusHUDController: ObservableObject {
                     within: Self.connectingVisibilityCap
                 )
             )
-        case .recording:
+        case .listening:
             showPanel()
-        case .finalizing:
+        case .releasing:
             showPanel()
             // Device-list refreshes can call `present` repeatedly. Measure the
             // cap from the phase transition so those refreshes can never keep
@@ -122,9 +142,18 @@ final class MacStatusHUDController: ObservableObject {
                     within: Self.finalizingVisibilityCap
                 )
             )
-        case .ready, .succeeded, .failed:
+        case .transcribing:
+            showPanel()
+        case .hidden:
             panel.orderOut(nil)
         }
+    }
+
+    private var resolvedActivity: MacHUDActivity {
+        MacHUDActivity.resolve(
+            capture: model.phase.hudCaptureActivity,
+            inFlightTranscriptionCount: model.inFlightCount
+        )
     }
 
     private func showPanel() {
@@ -254,6 +283,13 @@ private struct MacStatusHUDView: View {
             if state.showsInputLevel {
                 MacInputLevelMeter(level: model.inputLevel)
             }
+            if state.showsActivity {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .controlSize(.small)
+                    .tint(.secondary)
+                    .accessibilityHidden(true)
+            }
             if let date {
                 Text(elapsedText(at: date))
                     .font(.system(size: 11, weight: .semibold, design: .monospaced))
@@ -261,29 +297,22 @@ private struct MacStatusHUDView: View {
                     .monospacedDigit()
             }
         }
-        .padding(.horizontal, 13)
+        .padding(.horizontal, 16)
         .frame(width: 260, height: 44)
-        .background(
-            .regularMaterial,
-            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.12), lineWidth: 1)
-        }
+        .modifier(MacHUDSurface())
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityText(for: state))
     }
 
     private var displayState: MacStatusHUDDisplayState {
-        switch model.phase {
+        switch activity {
         case .connecting:
             MacStatusHUDDisplayState(
                 title: "Connecting",
                 source: sourceName,
                 color: .orange
             )
-        case .recording:
+        case .listening:
             MacStatusHUDDisplayState(
                 title: "Listening",
                 source: sourceName,
@@ -291,21 +320,37 @@ private struct MacStatusHUDView: View {
                 showsTimer: true,
                 showsInputLevel: true
             )
-        case .finalizing:
+        case .releasing:
             MacStatusHUDDisplayState(
                 title: "Releasing",
                 source: sourceName,
                 color: .orange
             )
-        case .ready, .succeeded, .failed:
-            // The panel controller never shows these; a neutral placeholder
-            // keeps the view total if a redraw races a phase change.
+        case .transcribing:
+            // No source line: a background request may belong to a different
+            // microphone than the currently selected sticky input mode.
+            MacStatusHUDDisplayState(
+                title: "Transcribing",
+                source: nil,
+                color: .blue,
+                showsActivity: true
+            )
+        case .hidden:
+            // The panel controller never shows this; a neutral placeholder
+            // keeps the view total if a redraw races a state transition.
             MacStatusHUDDisplayState(
                 title: "SpeakPaste",
                 source: nil,
                 color: .secondary
             )
         }
+    }
+
+    private var activity: MacHUDActivity {
+        MacHUDActivity.resolve(
+            capture: model.phase.hudCaptureActivity,
+            inFlightTranscriptionCount: model.inFlightCount
+        )
     }
 
     private var sourceName: String? {
@@ -370,4 +415,42 @@ private struct MacStatusHUDDisplayState {
     let color: Color
     var showsTimer = false
     var showsInputLevel = false
+    var showsActivity = false
+}
+
+private extension MacCapturePhase {
+    var hudCaptureActivity: MacHUDCaptureActivity {
+        switch self {
+        case .connecting: .connecting
+        case .recording: .listening
+        case .finalizing: .releasing
+        case .ready, .succeeded, .failed: .inactive
+        }
+    }
+}
+
+/// The HUD chrome: native Liquid Glass on macOS 26 and later, with a plain
+/// material capsule standing in down to the macOS 14 deployment target. The
+/// compiler guard keeps the file building under pre-26 SDKs, where the glass
+/// API does not exist even behind a runtime availability check.
+private struct MacHUDSurface: ViewModifier {
+    func body(content: Content) -> some View {
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, *) {
+            content.glassEffect(.regular, in: Capsule())
+        } else {
+            materialFallback(content)
+        }
+        #else
+        materialFallback(content)
+        #endif
+    }
+
+    private func materialFallback(_ content: Content) -> some View {
+        content
+            .background(.regularMaterial, in: Capsule())
+            .overlay {
+                Capsule().strokeBorder(Color.primary.opacity(0.12), lineWidth: 1)
+            }
+    }
 }

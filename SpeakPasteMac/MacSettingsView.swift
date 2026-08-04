@@ -142,7 +142,7 @@ private struct MacAudioHUDSettings: View {
     var body: some View {
         Form {
             Section("Status indicator") {
-                Toggle("Show the floating capture indicator", isOn: $model.hudEnabled)
+                Toggle("Show the floating status indicator", isOn: $model.hudEnabled)
                 Picker("Placement", selection: $model.hudPlacement) {
                     Text("Top").tag(MacHUDPlacement.top)
                     Text("Bottom").tag(MacHUDPlacement.bottom)
@@ -150,7 +150,7 @@ private struct MacAudioHUDSettings: View {
                     Text("Right").tag(MacHUDPlacement.right)
                 }
                 .disabled(!model.hudEnabled)
-                Text("A small click-through indicator appears only while SpeakPaste is connecting, listening, or releasing the microphone, then disappears. It has no buttons and never takes focus. Errors, offline status, and waiting text appear in the main window and the menu bar. Top keeps it clear of the text fields most apps put at the bottom of the window.")
+                Text("A small click-through Liquid Glass indicator shows Connecting, Listening, Releasing, or Transcribing, then disappears when the work finishes. It has no buttons and never takes focus. Errors, offline status, and waiting text appear in the main window and the menu bar. Top keeps it clear of the text fields most apps put at the bottom of the window.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

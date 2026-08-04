@@ -63,12 +63,15 @@ TCC grants, or Application Support.
 - [ ] Exercise the capture indicator at top, bottom, left, and right. Confirm the
       active display is chosen correctly, the pill stays click-through, and no
       state clips at normal accessibility text sizes.
-- [ ] Exercise Connecting, Listening, and Releasing. Confirm those are the only
-      visible states, the live meter/timer appear only while listening, and the
-      indicator hides at idle, while transcribing, after success, on errors, and
-      while offline. Hold the model in Connecting and Releasing and confirm the
-      indicator hides no later than 20 and 15 seconds after those phases began,
-      respectively.
+- [ ] Exercise Connecting, Listening, Releasing, and Transcribing. Confirm the
+      native Liquid Glass surface is used on macOS 26, the live meter/timer
+      appear only while listening, and a restrained activity indicator appears
+      only while transcribing. The indicator must hide at idle and after the
+      last in-flight transcription, success, errors, and offline state. Start a
+      new capture while an earlier request is transcribing and confirm the
+      capture state wins. Hold the model in Connecting and Releasing and confirm
+      the indicator hides no later than 20 and 15 seconds after those phases
+      began, respectively.
 - [ ] Verify every vocabulary action: add, search, edit Save/Cancel, paste-list
       Save/Cancel, file-picker Cancel, and remove confirm/Cancel. Check the
       1,000-term ceiling, fewer-than-50-character and five-word limits, forbidden
