@@ -105,6 +105,10 @@ struct MacDeliveryTarget {
     /// This is captured at the delivery boundary, not at record start. It is
     /// used only to keep a multi-step side effect from following later input.
     private let interactionGeneration: UInt64?
+    /// Opt-in realtime delivery alone retains the full, local post-rollback
+    /// value/caret snapshot. It is never uploaded or persisted and makes the
+    /// final durable paste fail closed if that exact state changes.
+    private let requiredRealtimeSnapshot: MacRealtimeTextSnapshot?
 
     init(
         processIdentifier: pid_t,
@@ -113,7 +117,8 @@ struct MacDeliveryTarget {
         contextKeyterms: [String] = [],
         precedingText: String? = nil,
         element: AXUIElement?,
-        interactionGeneration: UInt64? = nil
+        interactionGeneration: UInt64? = nil,
+        requiredRealtimeSnapshot: MacRealtimeTextSnapshot? = nil
     ) {
         self.processIdentifier = processIdentifier
         self.applicationName = applicationName
@@ -122,6 +127,7 @@ struct MacDeliveryTarget {
         self.precedingText = precedingText
         self.element = element
         self.interactionGeneration = interactionGeneration
+        self.requiredRealtimeSnapshot = requiredRealtimeSnapshot
     }
 
     /// Captures the current destination. Returns nil when SpeakPaste itself is
@@ -178,6 +184,35 @@ struct MacDeliveryTarget {
     /// accessibility support — Electron among them — often expose nothing, and
     /// the two cases must be treated differently.
     var hasElement: Bool { element != nil }
+
+    /// Realtime partials are allowed only when the exact captured AX element
+    /// exposes a readable and settable text value/range. Opaque fields retain
+    /// the ordinary batch path rather than receiving synthetic repeated pastes.
+    @MainActor
+    func makeRealtimeInlineTextSession() -> MacRealtimeInlineTextSession? {
+        guard let element else { return nil }
+        return MacRealtimeInlineTextSession.make(
+            element: element,
+            processIdentifier: processIdentifier
+        )
+    }
+
+    /// Returns the same destination with one stronger, realtime-only side-
+    /// effect guard. Ordinary batch targets remain privacy-neutral.
+    func requiringRealtimeSnapshot(
+        _ snapshot: MacRealtimeTextSnapshot
+    ) -> MacDeliveryTarget {
+        MacDeliveryTarget(
+            processIdentifier: processIdentifier,
+            applicationName: applicationName,
+            bundleIdentifier: bundleIdentifier,
+            contextKeyterms: contextKeyterms,
+            precedingText: precedingText,
+            element: element,
+            interactionGeneration: interactionGeneration,
+            requiredRealtimeSnapshot: snapshot
+        )
+    }
 
     /// Revalidation for explicit output. A replacement AX node is valid when
     /// the same live application still owns a writable, non-secure focus and
@@ -249,6 +284,45 @@ struct MacDeliveryTarget {
             interactionGeneration: interactionGeneration,
             currentInteractionGeneration: MacUserInteractionTracker.shared.snapshot
         )
+    }
+    /// Ordinary batch delivery is intentionally unconstrained by record-start
+    /// identity and resolves whichever writable editor is live inside the
+    /// serialized delivery gate. Only a realtime-finalized target carries this
+    /// exact post-rollback exception.
+    @MainActor
+    func permitsAutomaticDelivery(to liveTarget: MacDeliveryTarget) -> Bool {
+        guard let requiredRealtimeSnapshot else { return true }
+        guard let element, let liveElement = liveTarget.element else {
+            return false
+        }
+        let sameProcess = processIdentifier == liveTarget.processIdentifier
+        let sameElement = CFEqual(element, liveElement)
+        let snapshotMatches = sameProcess
+            && sameElement
+            && MacAccessibility.exactElementHoldsFocus(
+                element,
+                processIdentifier: processIdentifier
+            )
+            && MacAccessibility.realtimeTextSnapshot(of: element)
+                == requiredRealtimeSnapshot
+        return MacRealtimeFinalDeliveryGuardPolicy.permitsAutomaticDelivery(
+            requiresExactSnapshot: true,
+            sameProcess: sameProcess,
+            sameElement: sameElement,
+            snapshotMatches: snapshotMatches
+        )
+    }
+}
+
+enum MacRealtimeFinalDeliveryGuardPolicy {
+    static func permitsAutomaticDelivery(
+        requiresExactSnapshot: Bool,
+        sameProcess: Bool,
+        sameElement: Bool,
+        snapshotMatches: Bool
+    ) -> Bool {
+        guard requiresExactSnapshot else { return true }
+        return sameProcess && sameElement && snapshotMatches
     }
 }
 
@@ -370,6 +444,136 @@ enum MacAccessibility {
         return textBeforeCursor(in: element)
     }
 
+    static func exactElementHoldsFocus(
+        _ element: AXUIElement,
+        processIdentifier: pid_t
+    ) -> Bool {
+        guard
+            !IsSecureEventInputEnabled(),
+            !isSecureTextElement(element),
+            NSWorkspace.shared.frontmostApplication?.processIdentifier
+                == processIdentifier,
+            let focused = systemFocusedElement()
+        else {
+            return false
+        }
+        return CFEqual(element, focused)
+    }
+
+    static func realtimeTextAttributesAreSettable(on element: AXUIElement) -> Bool {
+        guard !IsSecureEventInputEnabled(), !isSecureTextElement(element) else {
+            return false
+        }
+        AXUIElementSetMessagingTimeout(element, messagingTimeout)
+        var selectedTextIsSettable = DarwinBoolean(false)
+        var selectedRangeIsSettable = DarwinBoolean(false)
+        guard
+            AXUIElementIsAttributeSettable(
+                element,
+                kAXSelectedTextAttribute as CFString,
+                &selectedTextIsSettable
+            ) == .success,
+            AXUIElementIsAttributeSettable(
+                element,
+                kAXSelectedTextRangeAttribute as CFString,
+                &selectedRangeIsSettable
+            ) == .success
+        else {
+            return false
+        }
+        return selectedTextIsSettable.boolValue && selectedRangeIsSettable.boolValue
+    }
+
+    static func realtimeTextSnapshot(
+        of element: AXUIElement
+    ) -> MacRealtimeTextSnapshot? {
+        guard !IsSecureEventInputEnabled(), !isSecureTextElement(element) else {
+            return nil
+        }
+        AXUIElementSetMessagingTimeout(element, messagingTimeout)
+        guard
+            let value = stringAttribute(kAXValueAttribute, of: element),
+            let selection = selectedTextRange(in: element)
+        else {
+            return nil
+        }
+        let range = MacRealtimeTextRange(
+            location: selection.location,
+            length: selection.length
+        )
+        guard Range(range.asNSRange, in: value) != nil else { return nil }
+        return MacRealtimeTextSnapshot(value: value, selection: range)
+    }
+
+    @discardableResult
+    static func setRealtimeSelection(
+        _ range: MacRealtimeTextRange,
+        on element: AXUIElement
+    ) -> Bool {
+        guard
+            !IsSecureEventInputEnabled(),
+            !isSecureTextElement(element),
+            var value = Optional(range.asCFRange),
+            let axValue = AXValueCreate(.cfRange, &value)
+        else {
+            return false
+        }
+        AXUIElementSetMessagingTimeout(element, messagingTimeout)
+        return AXUIElementSetAttributeValue(
+            element,
+            kAXSelectedTextRangeAttribute as CFString,
+            axValue
+        ) == .success
+    }
+
+    @discardableResult
+    static func replaceRealtimeSelection(
+        with text: String,
+        on element: AXUIElement
+    ) -> Bool {
+        guard !IsSecureEventInputEnabled(), !isSecureTextElement(element) else {
+            return false
+        }
+        AXUIElementSetMessagingTimeout(element, messagingTimeout)
+        return AXUIElementSetAttributeValue(
+            element,
+            kAXSelectedTextAttribute as CFString,
+            text as CFString
+        ) == .success
+    }
+
+    static func realtimeBounds(
+        for range: MacRealtimeTextRange,
+        in element: AXUIElement
+    ) -> CGRect? {
+        guard
+            !IsSecureEventInputEnabled(),
+            !isSecureTextElement(element),
+            var cfRange = Optional(range.asCFRange),
+            let rangeValue = AXValueCreate(.cfRange, &cfRange)
+        else {
+            return nil
+        }
+        AXUIElementSetMessagingTimeout(element, messagingTimeout)
+        var result: CFTypeRef?
+        guard
+            AXUIElementCopyParameterizedAttributeValue(
+                element,
+                kAXBoundsForRangeParameterizedAttribute as CFString,
+                rangeValue,
+                &result
+            ) == .success,
+            let result,
+            CFGetTypeID(result) == AXValueGetTypeID()
+        else {
+            return frame(of: element)
+        }
+        let axValue = result as! AXValue
+        guard AXValueGetType(axValue) == .cgRect else { return frame(of: element) }
+        var rect = CGRect.zero
+        return AXValueGetValue(axValue, .cgRect, &rect) ? rect : frame(of: element)
+    }
+
     static func textBeforeCursor(in element: AXUIElement) -> String? {
         // Check role/subrole before any value access. Even when recognition
         // context is disabled, cursor-aware formatting must never read a
@@ -381,6 +585,54 @@ enum MacAccessibility {
         let utf16Offset = min(range.location, text.utf16.count)
         let cursor = String.Index(utf16Offset: utf16Offset, in: text)
         return String(text[..<cursor].suffix(256))
+    }
+
+    private static func frame(of element: AXUIElement) -> CGRect? {
+        guard
+            let origin = pointAttribute(kAXPositionAttribute, of: element),
+            let size = sizeAttribute(kAXSizeAttribute, of: element)
+        else {
+            return nil
+        }
+        return CGRect(origin: origin, size: size)
+    }
+
+    private static func pointAttribute(
+        _ attribute: String,
+        of element: AXUIElement
+    ) -> CGPoint? {
+        var value: CFTypeRef?
+        guard
+            AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
+                == .success,
+            let value,
+            CFGetTypeID(value) == AXValueGetTypeID()
+        else {
+            return nil
+        }
+        let axValue = value as! AXValue
+        guard AXValueGetType(axValue) == .cgPoint else { return nil }
+        var point = CGPoint.zero
+        return AXValueGetValue(axValue, .cgPoint, &point) ? point : nil
+    }
+
+    private static func sizeAttribute(
+        _ attribute: String,
+        of element: AXUIElement
+    ) -> CGSize? {
+        var value: CFTypeRef?
+        guard
+            AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
+                == .success,
+            let value,
+            CFGetTypeID(value) == AXValueGetTypeID()
+        else {
+            return nil
+        }
+        let axValue = value as! AXValue
+        guard AXValueGetType(axValue) == .cgSize else { return nil }
+        var size = CGSize.zero
+        return AXValueGetValue(axValue, .cgSize, &size) ? size : nil
     }
 
     /// Extracts only recognition hints rather than transmitting free-form

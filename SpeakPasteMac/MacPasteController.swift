@@ -17,6 +17,9 @@ enum MacHoldReason: Equatable {
     /// No writable, non-secure editor owns focus at the delivery boundary.
     case noWritableEditor
     case destinationNotFrontmost
+    /// Realtime rolled its provisional text back, but the exact field value or
+    /// collapsed caret changed before the durable final paste could begin.
+    case realtimeDestinationChanged
     /// A password field or Terminal's Secure Keyboard Entry owns the keyboard.
     case secureInput
     /// Every delivery route failed outright.
@@ -26,6 +29,8 @@ enum MacHoldReason: Equatable {
         switch self {
         case .noWritableEditor: "no writable editor is focused"
         case .destinationNotFrontmost: "you moved away"
+        case .realtimeDestinationChanged:
+            "the realtime field or caret changed before final delivery"
         case .secureInput: "a password field is capturing the keyboard"
         case .deliveryFailed: "the destination refused it"
         }
@@ -339,6 +344,21 @@ struct MacPasteController {
                     payload.fallbackText,
                     copyOnHold: true,
                     copied: .clipboardFallback(.noWritableEditor),
+                    notCopied: .clipboardFailed
+                )
+            )
+        }
+
+        // The record-start target is metadata for ordinary batch delivery and
+        // never outranks this live editor. A realtime-finalized target is the
+        // sole exception: its provisional range was rolled back only after an
+        // exact full-field/caret snapshot, which must still hold now.
+        guard capturedTarget?.permitsAutomaticDelivery(to: target) ?? true else {
+            return outcome(
+                fallbackResult(
+                    payload.fallbackText,
+                    copyOnHold: true,
+                    copied: .clipboardFallback(.realtimeDestinationChanged),
                     notCopied: .clipboardFailed
                 )
             )

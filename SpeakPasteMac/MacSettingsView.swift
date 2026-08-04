@@ -55,9 +55,19 @@ private struct MacGeneralSettings: View {
                 }
                 Toggle("Clean up filler words and stumbles", isOn: $model.cleanSpeech)
                 Toggle("Spoken formatting commands", isOn: $model.spokenFormattingCommands)
-                Text("Saying “new line”, “new paragraph”, or a punctuation name produces the formatting instead of the words. Every dictation uses ElevenLabs Scribe — there is no model to choose.")
+                Toggle(
+                    "Experimental realtime text at the cursor",
+                    isOn: $model.realtimeDictationEnabled
+                )
+                .disabled(model.phase.isBusy)
+                Text("Saying “new line”, “new paragraph”, or a punctuation name produces the formatting instead of the words. Batch Scribe remains the default. The realtime experiment streams microphone audio to Scribe while you speak only at a collapsed caret in a safely editable field; otherwise it automatically uses batch. Its ownership check reads and compares that full active field locally for each hypothesis, but never uploads or writes the field text to disk.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if let notice = model.realtimeModeNotice {
+                    Text(notice)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Section("Delivery") {

@@ -193,6 +193,53 @@ for the release evidence.
       iPhone's system-owned capture surface dismisses before transcription.
 - [ ] Repeat immediately to prove clean Continuity release and reconnect, not
       merely one successful transcription.
+- [ ] Turn on **Experimental realtime text at the cursor**. In Notes and TextEdit,
+      test an empty caret and a collapsed caret in the middle of existing text.
+      Confirm changing hypotheses replace one live span rather than append
+      duplicates, preserve all prefix/suffix text, and show only the tiny caret
+      mic marker — never transcript words in the top HUD. Then start with a
+      nonempty selection and confirm the run stays on batch: no provisional text
+      appears, and ordinary final batch delivery replaces the captured selection
+      exactly once.
+- [ ] Dictate text that makes the hypothesis grow, shrink, and rewrite. Stop
+      normally and confirm the iPhone capture surface dismisses before realtime
+      commit finishes, the provisional span does not flash into a duplicate, and
+      exactly one fully post-processed final transcript remains at the original
+      cursor.
+- [ ] After stopping, move the caret, select text, or type while the final result
+      is passing through History. The final paste must not follow the moved caret
+      or replace the new selection; it must wait for explicit manual placement.
+- [ ] During a live hypothesis, type a character, move the caret, change fields,
+      switch apps, and close the target window in separate runs. Each run must
+      permanently stop live editing without erasing the user's change; the final
+      text must wait for manual placement rather than auto-paste elsewhere.
+- [ ] Press Escape after several live hypotheses. When exact ownership still
+      holds, the original value and collapsed caret must return. When ownership
+      was disturbed, SpeakPaste must touch nothing further. Repeat from a
+      nonempty selection and confirm the batch-only run leaves that selection and
+      its text unchanged. No run may commit or deliver a final transcript.
+- [ ] Disable the network or invalidate the realtime session while speaking.
+      Stop normally and confirm the private WAV takes the batch fallback path.
+      Safe rollback may yield one automatic batch insertion; unsafe rollback must
+      leave the field untouched and hold one result manually. No run may contain
+      both provisional text and a second automatic final copy.
+- [ ] With realtime enabled, test a secure field, an opaque Electron/browser
+      editor, disabled auto-paste, and per-app clipboard-only, type-out, explicit
+      Paste-menu, and auto-send rules. Each must stay on batch without synthetic
+      interim paste attempts or Return-key side effects.
+- [ ] Run a dictation beyond 55 seconds to cross two 25-second manual-commit
+      boundaries, then stop during active speech. Confirm every committed segment
+      appears once, the trailing speech is present, and the resulting order
+      matches speech.
+- [ ] Repeat live editing in a very large Notes or TextEdit document. Confirm the
+      full-field ownership comparisons do not produce unacceptable caret lag; if
+      they do, treat large fields as an experiment limitation rather than release
+      acceptance.
+- [ ] Quit normally, force-quit a disposable candidate, sleep/wake, switch input
+      mode, and trigger a mid-stream microphone loss while realtime is active.
+      Confirm hardware release, safe provisional rollback or manual-only hold,
+      one recoverable WAV where applicable, and no unattended replay after
+      relaunch.
 - [ ] Start in Mac mode, double-tap bare right Command while idle, and confirm
       iPhone mode is selected. Relaunch and confirm the mode persists. Double-tap
       back and verify Mac mode also persists.

@@ -129,12 +129,23 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
     private var session: AVCaptureSession?
     private var output: AVCaptureAudioFileOutput?
     private var activeDeviceID: String?
+    /// Whether the liveness tap for this capture generation is also configured
+    /// as Scribe's 16 kHz PCM producer. Default batch sessions keep the tap in
+    /// the device-native format and do not alter the established capture graph.
+    private var preparesRealtimePCM = false
     private var sessionGeneration: UInt64 = 0
     private var runtimeErrorObserver: NSObjectProtocol?
     private var runtimeErrorLatch: MacRuntimeErrorLatch?
     private var runtimeError: NSError?
     private var recordingFailureHandler: (@Sendable (Error, URL?) -> Void)?
     private let sampleFlow = MacSampleFlowCounter()
+    /// Realtime Scribe consumes 200 ms frames of raw mono PCM16 at 16 kHz.
+    /// These members are confined to `sampleQueue`; the ordinary WAV output
+    /// remains native and independently recoverable for batch fallback.
+    private var realtimeSampleHandler: (@Sendable (Data) -> Void)?
+    private var realtimeSampleAccumulator = Data()
+    private static let realtimeChunkByteCount = 6_400
+    private static let realtimeMinimumChunkByteCount = 3_200
 
     private var segmentURL: URL?
     private var segmentGeneration: UInt64?
@@ -183,12 +194,18 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
     /// flows, and recording across that wake-up gap kills the file output
     /// with AVError -11812 (media discontinuity).
     /// Returns true only when a new audio session was created.
-    func connect(deviceID: String) async throws -> Bool {
+    func connect(
+        deviceID: String,
+        preparesRealtimePCM: Bool = false
+    ) async throws -> Bool {
         try await ensurePermission()
         // Escape may cancel while the first-run permission sheet is open.
         // Never create a capture session after that canceled sheet resolves.
         try Task.checkCancellation()
-        let connection = try await establishSession(deviceID: deviceID)
+        let connection = try await establishSession(
+            deviceID: deviceID,
+            preparesRealtimePCM: preparesRealtimePCM
+        )
         do {
             try await waitForSteadyAudio(
                 timeout: steadyAudioTimeout,
@@ -206,7 +223,10 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
         let generation: UInt64
     }
 
-    private func establishSession(deviceID: String) async throws -> ConnectionReceipt {
+    private func establishSession(
+        deviceID: String,
+        preparesRealtimePCM: Bool
+    ) async throws -> ConnectionReceipt {
         try await withCheckedThrowingContinuation { continuation in
             captureQueue.async { [weak self] in
                 guard let self else {
@@ -219,6 +239,7 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
                         self.activeDeviceID == deviceID,
                         self.session?.isRunning == true,
                         self.output != nil,
+                        self.preparesRealtimePCM == preparesRealtimePCM,
                         self.runtimeError == nil,
                         self.segmentURL == nil,
                         self.startContinuation == nil,
@@ -243,7 +264,10 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
                     }
 
                     self.finishSession()
-                    try self.configureAndConnect(deviceID: deviceID)
+                    try self.configureAndConnect(
+                        deviceID: deviceID,
+                        preparesRealtimePCM: preparesRealtimePCM
+                    )
                     continuation.resume(
                         returning: ConnectionReceipt(
                             wasCreated: true,
@@ -328,6 +352,105 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
         from connection: AVCaptureConnection
     ) {
         sampleFlow.record(peakAmplitude: Self.peakAmplitude(of: sampleBuffer))
+        guard realtimeSampleHandler != nil else { return }
+        guard let data = Self.realtimePCM16Data(of: sampleBuffer) else { return }
+        appendRealtimeSamples(data)
+    }
+
+    /// Starts forwarding only future sample-tap buffers. The liveness samples
+    /// consumed while Continuity warms up are deliberately excluded.
+    func beginRealtimeAudioStreaming(
+        _ handler: @escaping @Sendable (Data) -> Void
+    ) {
+        sampleQueue.sync {
+            realtimeSampleAccumulator.removeAll(keepingCapacity: true)
+            realtimeSampleHandler = handler
+        }
+    }
+
+    /// Drains the sample queue and emits the final tail, padding only with PCM
+    /// silence when needed to meet the service's 100 ms minimum chunk. Call this
+    /// only after `stop()` has returned and capture is released.
+    func finishRealtimeAudioStreaming() {
+        sampleQueue.sync {
+            if !realtimeSampleAccumulator.isEmpty {
+                var finalFrame = realtimeSampleAccumulator
+                if finalFrame.count < Self.realtimeMinimumChunkByteCount {
+                    finalFrame.append(
+                        Data(
+                            repeating: 0,
+                            count: Self.realtimeMinimumChunkByteCount - finalFrame.count
+                        )
+                    )
+                }
+                realtimeSampleHandler?(finalFrame)
+            }
+            realtimeSampleAccumulator.removeAll(keepingCapacity: false)
+            realtimeSampleHandler = nil
+        }
+    }
+
+    func cancelRealtimeAudioStreaming() {
+        sampleQueue.sync {
+            realtimeSampleAccumulator.removeAll(keepingCapacity: false)
+            realtimeSampleHandler = nil
+        }
+    }
+
+    private nonisolated func appendRealtimeSamples(_ data: Data) {
+        guard realtimeSampleHandler != nil else { return }
+        realtimeSampleAccumulator.append(data)
+        while realtimeSampleAccumulator.count >= Self.realtimeChunkByteCount {
+            let frame = Data(
+                realtimeSampleAccumulator.prefix(Self.realtimeChunkByteCount)
+            )
+            realtimeSampleAccumulator.removeFirst(Self.realtimeChunkByteCount)
+            realtimeSampleHandler?(frame)
+        }
+    }
+
+    /// The sample tap is configured for this exact format. Validate the ASBD
+    /// before copying because sending device-native floats or stereo bytes as
+    /// pcm_16000 would produce convincing-looking protocol frames but garbage
+    /// recognition.
+    private nonisolated static func realtimePCM16Data(
+        of sampleBuffer: CMSampleBuffer
+    ) -> Data? {
+        guard
+            let description = CMSampleBufferGetFormatDescription(sampleBuffer),
+            let basicPointer = CMAudioFormatDescriptionGetStreamBasicDescription(
+                description
+            )
+        else {
+            return nil
+        }
+        let basic = basicPointer.pointee
+        guard
+            basic.mFormatID == kAudioFormatLinearPCM,
+            basic.mSampleRate == 16_000,
+            basic.mChannelsPerFrame == 1,
+            basic.mBitsPerChannel == 16,
+            basic.mFormatFlags & kAudioFormatFlagIsFloat == 0,
+            basic.mFormatFlags & kAudioFormatFlagIsBigEndian == 0,
+            let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer)
+        else {
+            return nil
+        }
+        let length = CMBlockBufferGetDataLength(blockBuffer)
+        guard length > 0 else { return nil }
+        var data = Data(count: length)
+        let status = data.withUnsafeMutableBytes { bytes in
+            guard let baseAddress = bytes.baseAddress else {
+                return kCMBlockBufferBadCustomBlockSourceErr
+            }
+            return CMBlockBufferCopyDataBytes(
+                blockBuffer,
+                atOffset: 0,
+                dataLength: length,
+                destination: baseAddress
+            )
+        }
+        return status == kCMBlockBufferNoErr ? data : nil
     }
 
     /// Peak absolute amplitude across the buffer, normalized to 0...1. Returns
@@ -535,7 +658,10 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
         }
     }
 
-    private func configureAndConnect(deviceID: String) throws {
+    private func configureAndConnect(
+        deviceID: String,
+        preparesRealtimePCM: Bool
+    ) throws {
         guard let device = AVCaptureDevice(uniqueID: deviceID) else {
             throw MacAudioRecorderError.deviceUnavailable
         }
@@ -557,11 +683,21 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
         }
         session.addOutput(output)
 
-        // A lightweight tap that only counts delivered buffers. It is how
-        // connect() proves the Continuity stream is really flowing before any
-        // file recording starts. Without it there is no liveness gate at all,
-        // so refuse the connection instead of recording blind.
+        // A lightweight tap that counts delivered buffers and, when the
+        // experimental mode is armed, supplies Scribe's documented raw audio
+        // format. The file output still writes native WAV in parallel.
         let sampleTap = AVCaptureAudioDataOutput()
+        if preparesRealtimePCM {
+            sampleTap.audioSettings = [
+                AVFormatIDKey: kAudioFormatLinearPCM,
+                AVSampleRateKey: 16_000,
+                AVNumberOfChannelsKey: 1,
+                AVLinearPCMBitDepthKey: 16,
+                AVLinearPCMIsFloatKey: false,
+                AVLinearPCMIsBigEndianKey: false,
+                AVLinearPCMIsNonInterleaved: false,
+            ]
+        }
         sampleTap.setSampleBufferDelegate(self, queue: sampleQueue)
         guard session.canAddOutput(sampleTap) else {
             session.commitConfiguration()
@@ -598,6 +734,7 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
         self.session = session
         self.output = output
         activeDeviceID = deviceID
+        self.preparesRealtimePCM = preparesRealtimePCM
         runtimeErrorObserver = observer
         runtimeErrorLatch = latch
         runtimeError = nil
@@ -804,6 +941,7 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
         session = nil
         output = nil
         activeDeviceID = nil
+        preparesRealtimePCM = false
         runtimeError = nil
         pendingRecordingError = nil
 
@@ -835,6 +973,7 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
         session = nil
         output = nil
         activeDeviceID = nil
+        preparesRealtimePCM = false
         runtimeError = nil
 
         // stopRunning() is synchronous. Keep teardown on the same serial queue

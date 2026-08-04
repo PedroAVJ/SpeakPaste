@@ -9,6 +9,7 @@ import SwiftUI
 private final class MacAppRuntime: ObservableObject {
     let model: MacAppModel?
     let statusHUD: MacStatusHUDController?
+    let realtimeCaretIndicator: MacRealtimeCaretIndicatorController?
     let existingApplication: NSRunningApplication?
     let launchFailureMessage: String?
 
@@ -39,6 +40,7 @@ private final class MacAppRuntime: ObservableObject {
                 self.lease = nil
                 self.model = nil
                 self.statusHUD = nil
+                self.realtimeCaretIndicator = nil
                 self.existingApplication = legacyInstance
                 self.launchFailureMessage = nil
                 self.modelObservation = nil
@@ -48,6 +50,7 @@ private final class MacAppRuntime: ObservableObject {
             self.lease = lease
             self.model = model
             self.statusHUD = MacStatusHUDController(model: model)
+            self.realtimeCaretIndicator = MacRealtimeCaretIndicatorController(model: model)
             self.existingApplication = nil
             self.launchFailureMessage = nil
             self.modelObservation = nil
@@ -60,6 +63,7 @@ private final class MacAppRuntime: ObservableObject {
             self.lease = nil
             self.model = nil
             self.statusHUD = nil
+            self.realtimeCaretIndicator = nil
             self.existingApplication = legacyInstance ?? Self.existingSpeakPasteApplication()
             self.launchFailureMessage = nil
             self.modelObservation = nil
@@ -67,6 +71,7 @@ private final class MacAppRuntime: ObservableObject {
             self.lease = nil
             self.model = nil
             self.statusHUD = nil
+            self.realtimeCaretIndicator = nil
             self.existingApplication = legacyInstance
             self.launchFailureMessage = "SpeakPaste could not create its per-user safety lock, so it did not open or touch local dictation data. Check the permissions on your temporary folder, then try again."
             self.modelObservation = nil
@@ -76,8 +81,9 @@ private final class MacAppRuntime: ObservableObject {
     var isPrimaryInstance: Bool { lease != nil }
 
     func start() {
-        guard let model, let statusHUD else { return }
-        statusHUD.start()
+        guard let model else { return }
+        statusHUD?.start()
+        realtimeCaretIndicator?.start()
         model.startSessionTracking()
     }
 

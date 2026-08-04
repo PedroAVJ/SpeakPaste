@@ -330,9 +330,26 @@ app data. While the microphone is recording, SpeakPaste prevents idle display
 and system sleep, and VoiceOver announces the consequential capture phases.
 
 macOS offers Auto plus all 99 documented Scribe language hints in its settings,
-onboarding, and menu-bar picker. It intentionally exposes no provider, model,
-realtime, or speed-versus-quality selector: quality-first ElevenLabs Scribe v2
-batch transcription is the product.
+onboarding, and menu-bar picker. It exposes no provider, model, or
+speed-versus-quality selector: quality-first ElevenLabs Scribe v2 batch
+transcription remains the default product path.
+
+General settings also contain a default-off **Experimental realtime text at the
+cursor** switch for testing ElevenLabs `scribe_v2_realtime`. On a readable,
+settable Accessibility text field with a collapsed caret and ordinary automatic
+delivery, interim hypotheses replace one exact app-owned range at the captured
+caret while a tiny mic marker sits beside it. The recoverable WAV is still
+recorded in parallel. To prove it still owns that range, the experiment reads
+and compares the full active field locally on every hypothesis; that text is
+never uploaded or written to disk. Very large fields therefore remain a physical
+performance check for this experiment.
+Stop releases the microphone first, drains and manually commits the stream,
+then removes the provisional range before the final text enters the normal
+History and durable delivery path. A changed field/caret/focus fails closed to
+manual placement. A nonempty selection, unsupported field, older delivery still
+in flight, special per-app delivery rule, realtime error, or disabled auto-paste
+uses the existing batch path. Escape never commits the stream. Compilation does
+not establish physical Accessibility or Continuity acceptance.
 
 The current macOS capability set and the features deliberately excluded from
 the product are recorded in [the product-parity ledger](docs/macos-feature-parity.md).
