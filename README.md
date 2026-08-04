@@ -37,28 +37,36 @@ The Xcode project contains four product targets:
 6. Click the record control or tap the **right Command (⌘)** key once. A single
    tap starts or stops dictation after the system double-tap window. The left ⌘
    is deliberately untouched, so ⌘C, ⌘V, and ⌘Tab keep their normal behavior.
-7. The click-through Liquid Glass indicator is a wordless capsule that morphs
-   with spring motion: a quiet pulse while the source wakes, a waveform driven
-   by your voice while listening, a release glint, then directional progress
-   while transcribing. That progress is an estimate and stops short of claiming
-   completion. The capsule dismisses itself when the work finishes, or after 90
-   seconds if transcription stalls; success, errors, model details, and offline
-   notices stay in the app instead of becoming floating notifications.
+7. The click-through Liquid Glass indicator is a depth stack with one stable
+   card per chunk. Live capture stays in front and spring-morphs from wake pulse
+   to real waveform to release glint; each transcribing chunk recedes behind it
+   with its own directional progress rail. The oldest card is rearmost and pops
+   out when delivered, while deeper work folds into a numeric `+N`. Progress is
+   only an estimate and stops short of claiming completion. A stalled rail hides
+   after 90 seconds; success, errors, model details, and offline notices stay in
+   the app instead of becoming floating notifications.
 8. Double-tap right Command to switch between **Mac** and **iPhone** input. The
    choice is sticky. During a recording, SpeakPaste first finalizes and releases
    the current source, queues that segment, and then starts a new ordered segment
    on the other source.
 9. Tap right Command once to stop and transcribe, or press **Escape** once to
-   cancel immediately and discard the active segment. Quiet, preloaded sounds
-   pair a rising capture-live cue with its falling release mirror; related tones
-   are reserved for verified delivery and gentle errors.
+   cancel immediately and discard the active segment. Preloaded sounds
+   use three single pings that rise through capture, release, and verified
+   delivery, while errors are the family's only phrase: low and falling.
 
 You do not have to wait at the keyboard. If the field you dictated into is no
-longer focused when the transcript arrives, SpeakPaste holds the text instead of
-pasting it somewhere else, and says so. Click back into that same field and it
-inserts itself; press **⌥⌘V** to drop it wherever your cursor is instead.
-Delivery is attempted only into the exact element that had focus when recording
-started — never merely the same application.
+longer focused when the transcript arrives, SpeakPaste converts that card into a
+safe hold instead of pasting somewhere else. The HUD acknowledges that once with
+a count-free clipboard or tray glyph, then disappears after two seconds; the
+dashboard owns the durable recovery state. Later chunks for that exact field
+join the held run without repeatedly overwriting your clipboard. Click back into
+the field to insert the run in spoken order, or press
+**⌥⌘V** to drop it wherever your cursor is. Delivery is attempted only into the
+captured field — never merely the same application. If a web editor rebuilds its
+Accessibility proxy while you remain in place, SpeakPaste accepts it only when
+the same window, editor structure, geometry, and absence of user input prove
+continuity. The optional **Hold delivery while recording** setting pauses only
+the delivery dequeue while the mic is live and flushes work between chunks.
 
 Stopping ends the Continuity session before transcription starts, allowing
 macOS to dismiss its system-owned capture surface on the iPhone. Each new
@@ -277,16 +285,20 @@ sending sensitive audio.
 
 ## Development status
 
-The macOS target builds with local ad-hoc signing. Its floating indicator is one
-wordless, click-through Liquid Glass capsule that spring-morphs through
-connecting, listening, releasing, and transcribing. Listening uses a real voice
-waveform; transcription uses directional heuristic progress that remains below
-completion until the request actually finishes. The capsule has no controls,
-dismisses after the last active capture or transcription, and never presents
-results, offline notices, or errors. A continuously transcribing capsule is
-capped at 90 seconds so a stalled request cannot pin it onscreen; the dashboard
-and menu bar remain authoritative. A stuck connecting indicator is capped at 20
-seconds and releasing at 15 seconds. Connecting normally stays visible until
+The macOS target builds with local ad-hoc signing. Its floating indicator is a
+click-through Liquid Glass depth stack with stable per-dictation cards. Capture
+is always frontmost; listening uses a real voice waveform, while every
+transcription behind it owns a directional heuristic rail that remains below
+completion until that request actually finishes. The oldest card is rearmost,
+deeper work collapses into `+N`, and only a verified delivery slides out with its
+earcon; overflow and timeout changes simply fold or crossfade. A new hold appears
+only as one count-free clipboard-or-tray glyph for two seconds. Recovered and
+possibly delivered text stays in the dashboard and is never replayed into the
+HUD on launch. The stack has no controls and never presents results, offline
+notices, or errors. Each continuously transcribing card is capped at 90 seconds
+so a stalled request cannot pin it onscreen; the dashboard and menu bar remain
+authoritative. A stuck connecting card is capped at 20 seconds and releasing at
+15 seconds. Connecting normally stays visible until
 the microphone proves it is delivering a steady sample stream, so
 file recording does not begin inside the Continuity wake-up gap; if macOS
 refuses the monitoring tap that proves liveness, the connection fails loudly
@@ -300,10 +312,10 @@ control surface. One bare right-Command tap starts or stops; two taps switch the
 persistent Mac/iPhone input mode. A switch during live capture safely finalizes
 the current segment, releases its hardware, then resumes as the next ordered
 segment on the target source. One Escape cancels connecting or recording
-immediately. Its preloaded sound family uses mirrored rising capture-live and
-falling release cues, with related restrained tones for verified delivery and
-gentle errors. All normal builds that own SpeakPaste's shared local stores use
-one product-wide process lease,
+immediately. Its preloaded sound family uses three single pings that rise
+through capture, release, and verified delivery, while errors are the family's
+only phrase: low and falling. All normal builds that own SpeakPaste's
+shared local stores use one product-wide process lease,
 independent of bundle identifier; a secondary launch exits without initializing
 app data. While the microphone is recording, SpeakPaste prevents idle display
 and system sleep, and VoiceOver announces the consequential capture phases.

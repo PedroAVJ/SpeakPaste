@@ -64,25 +64,56 @@ TCC grants, or Application Support.
       active display is chosen correctly, the pill stays click-through, and no
       state clips at normal accessibility text sizes.
 - [ ] Exercise Connecting, Listening, Releasing, and Transcribing. Confirm the
-      native Liquid Glass surface is used on macOS 26 and remains one wordless
-      capsule throughout. Confirm the listening waveform follows the real voice
-      level with fast attack and slower release, state changes spring-morph, and
-      transcription uses directional heuristic progress that never reaches
-      completion before the request does. The indicator must hide at idle and
-      after the last in-flight transcription, success, errors, and offline
-      state; it must never become an error notification. Start a new capture
-      while an earlier request is transcribing and confirm the capture state
-      wins. Hold the model in Connecting and Releasing and confirm the indicator
-      hides no later than 20 and 15 seconds after those phases began,
-      respectively. Keep one request transcribing and confirm the capsule hides
-      after 90 continuously visible seconds while the dashboard and menu bar
-      continue to report the real work state. With Reduce Motion enabled,
-      confirm movement becomes a restrained crossfade without losing state
-      clarity.
-- [ ] On MacBook speakers at low volume, confirm capture-live and release are a
-      short, coherent rising/falling pair with no load delay. Confirm delivery
-      plays only after verified insertion, errors use the related gentle cue,
-      and disabling Sounds silences the complete family.
+      native Liquid Glass surface is used on macOS 26 and the stack stays
+      wordless apart from live-work numeric badges. Confirm the
+      listening waveform follows the real voice level with fast attack and
+      slower release, state changes spring-morph, and each transcription card
+      uses its own directional heuristic progress that never reaches completion
+      before the request does. The indicator must hide at idle and after the
+      last in-flight transcription, success, errors, and offline state; it must
+      never become an error notification. Dictate several rapid chunks and
+      confirm the capture card is always frontmost, earlier transcriptions
+      recede behind it with their own rails, deeper work folds into the "+N"
+      badge on the rearmost card, and only verified deliveries pop from the
+      rear; overflow and timeout changes must fold or crossfade. Force a held
+      chunk and confirm one count-free clipboard glyph appears only while the
+      hold owns the private live pasteboard claim, changes to a neutral tray
+      after another app replaces the clipboard, and disappears within two
+      seconds. Relaunch with waiting or uncertain recovery entries and confirm
+      none are replayed into the HUD; the dashboard remains authoritative. Hold the
+      model in Connecting and Releasing
+      and confirm those cards hide no later than 20 and 15 seconds after the
+      phases began, respectively. Keep one request transcribing and confirm its
+      card hides after 90 continuously visible seconds — without hiding
+      younger cards — while the dashboard and menu bar continue to report the
+      real work state. With Reduce Motion enabled, confirm depth changes and
+      state changes become restrained crossfades without depth travel and
+      without losing state clarity.
+- [ ] Dictate three rapid chunks into one field and confirm delivery remains in
+      spoken order even when Scribe completes them out of order. Verify every
+      seam against the live caret: words get exactly one needed space,
+      punctuation attaches, existing spaces/newlines do not gain another, and a
+      sentence-ending mark gives the next ordinary chunk sensible casing.
+- [ ] Move focus away after the first chunk so it holds, then dictate later
+      chunks pinned to that same field. Confirm they chain-hold explicitly, the
+      clipboard remains the first single chunk instead of being overwritten,
+      the HUD does not become a queue counter, and returning to the exact field releases the whole
+      run as one ordered, cleanly fitted insertion. Force the first member into
+      an unconfirmed state and confirm no later same-field member skips ahead.
+      When delivery leaves one hold, confirm clipboard ownership transfers only
+      if its original private claim still exists. Confirm a different field in
+      the same app does not qualify.
+- [ ] Turn **Hold delivery while recording** on, dictate overlapping chunks, and
+      confirm completed work never dequeues while capture is active but flushes
+      in the pauses between chunks. Turn it off during capture and confirm the
+      ready queue resumes without changing transcription or spoken order.
+- [ ] With VoiceOver, confirm capture/transcription/held/delivery announcements
+      identify chunk ordinals. With Reduce Motion, confirm stack depth changes
+      and delivery removal crossfade rather than travel or scale.
+- [ ] On MacBook speakers at low volume, confirm capture and release are distinct
+      E5/B5 single pings with no load delay, then a higher E6 single ping plays
+      only after verified insertion. Confirm errors use the only two-note phrase,
+      E4 to B3 low and falling, and disabling Sounds silences the complete family.
 - [ ] Verify every vocabulary action: add, search, edit Save/Cancel, paste-list
       Save/Cancel, file-picker Cancel, and remove confirm/Cancel. Check the
       1,000-term ceiling, fewer-than-50-character and five-word limits, forbidden

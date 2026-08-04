@@ -62,6 +62,13 @@ private struct MacGeneralSettings: View {
 
             Section("Delivery") {
                 Toggle("Paste into the app you were using", isOn: $model.autoPaste)
+                Toggle(
+                    "Hold delivery while recording",
+                    isOn: $model.holdDeliveryWhileRecording
+                )
+                Text("Keeps finished chunks in spoken order while the microphone is live, then delivers them in the pauses between chunks.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Toggle("Context awareness", isOn: $model.contextAwareness)
                 Text("When on, SpeakPaste extracts candidate names and code identifiers from a small caret-local text window, the selection, the window title, and the app name. When hints are found, they are sent as ElevenLabs keyterms and use keyterm pricing. Per-app rules can override this global setting. Separately, local spacing and capitalization may read up to 256 characters before the caret in memory; that text is never uploaded or stored, and secure fields are never read.")
                     .font(.caption)
@@ -150,7 +157,7 @@ private struct MacAudioHUDSettings: View {
                     Text("Right").tag(MacHUDPlacement.right)
                 }
                 .disabled(!model.hudEnabled)
-                Text("A wordless, click-through Liquid Glass capsule spring-morphs between a connecting pulse, your live voice waveform, release, and estimated transcription progress, then disappears. A stalled transcription cannot keep it onscreen for more than 90 seconds. It has no buttons and never takes focus; the main window and menu bar remain authoritative for errors, offline status, and waiting text. Top keeps it clear of the text fields most apps put at the bottom of the window.")
+                Text("A wordless, click-through Liquid Glass capsule spring-morphs between a connecting pulse, your live voice waveform, release, and estimated transcription progress, then disappears. A new hold gets one count-free tray acknowledgment for two seconds; recovery entries never replay here. A stalled transcription cannot keep it onscreen for more than 90 seconds. It has no buttons and never takes focus; the main window and menu bar remain authoritative for errors, offline status, and waiting text. Top keeps it clear of the text fields most apps put at the bottom of the window.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -163,7 +170,7 @@ private struct MacAudioHUDSettings: View {
                         set: { model.sounds.isEnabled = $0 }
                     )
                 )
-                Text("Preloaded rising and falling cues mirror capture going live and being released. Related quiet tones are reserved for verified delivery and gentle errors.")
+                Text("Three single pings rise through capture, release, and verified delivery. Errors are the family's only phrase: low and falling.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

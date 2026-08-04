@@ -354,6 +354,17 @@ private struct MacReplacementLoadResult {
     let blockedExistingDocumentReason: String?
 }
 
+/// Transcript content after deterministic substitutions and spoken formatting,
+/// but before it is fitted against whatever is actually at the insertion point.
+/// Keeping the seam decision separate lets queued chunks use the field's live
+/// text rather than the stale text captured when recording began.
+struct MacPreparedTranscriptChunk: Equatable, Sendable {
+    let text: String
+    /// A configured replacement at the first character owns its exact casing,
+    /// even when the chunk is eventually inserted at a sentence boundary.
+    let preservesLeadingReplacementCase: Bool
+}
+
 /// Deterministic, local cleanup applied to a finished transcript just before it
 /// is delivered. Everything here is a rule the user can predict and a rule the
 /// user asked for: the configured substitutions, and the spacing and casing
@@ -366,9 +377,30 @@ enum MacTranscriptPostProcessor {
         precedingText: String?,
         spokenFormattingCommands: Bool = true
     ) -> String {
+        fit(
+            prepare(
+                transcript,
+                replacements: replacements,
+                spokenFormattingCommands: spokenFormattingCommands
+            ),
+            after: precedingText
+        )
+    }
+
+    /// Applies every transformation intrinsic to one transcript while leaving
+    /// spacing and sentence casing open until its real delivery context exists.
+    static func prepare(
+        _ transcript: String,
+        replacements: [MacTextReplacement],
+        spokenFormattingCommands: Bool = true
+    ) -> MacPreparedTranscriptChunk {
         let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-        // A silent recording must not push a stray space into the field.
-        guard !trimmed.isEmpty else { return "" }
+        guard !trimmed.isEmpty else {
+            return MacPreparedTranscriptChunk(
+                text: "",
+                preservesLeadingReplacementCase: false
+            )
+        }
         let substitution = substitute(
             trimmed,
             using: replacements.filter { $0.isEnabled && !$0.spoken.isEmpty }
@@ -376,11 +408,41 @@ enum MacTranscriptPostProcessor {
         let formatted = spokenFormattingCommands
             ? applySpokenFormattingCommands(substitution.text)
             : substitution.text
-        return join(
-            formatted,
-            after: precedingText,
+        return MacPreparedTranscriptChunk(
+            text: formatted,
             preservesLeadingReplacementCase: substitution.startsWithExactReplacement
         )
+    }
+
+    /// Fits one prepared chunk against the field text observed at delivery.
+    /// A silent recording must not push a stray space into the field.
+    static func fit(
+        _ chunk: MacPreparedTranscriptChunk,
+        after actualPrecedingText: String?
+    ) -> String {
+        guard !chunk.text.isEmpty else { return "" }
+        return join(
+            chunk.text,
+            after: actualPrecedingText,
+            preservesLeadingReplacementCase: chunk.preservesLeadingReplacementCase
+        )
+    }
+
+    /// Fits an ordered run as one insertion while carrying each fitted chunk
+    /// forward as the real context for the next seam. The returned value is
+    /// only the new insertion text; `precedingText` is not repeated.
+    static func fold(
+        _ chunks: [MacPreparedTranscriptChunk],
+        after precedingText: String?
+    ) -> String {
+        var insertion = ""
+        var actualPrecedingText = precedingText ?? ""
+        for chunk in chunks {
+            let fitted = fit(chunk, after: actualPrecedingText)
+            insertion.append(fitted)
+            actualPrecedingText.append(fitted)
+        }
+        return insertion
     }
 
     /// The small deterministic command set that does not require a second

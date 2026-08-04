@@ -22,20 +22,11 @@ struct MacTranscriptionWorkload: Equatable, Sendable {
         }
     }
 
-    struct Snapshot: Equatable, Sendable {
-        /// The oldest outstanding attempt. A view can use this identity to
-        /// crossfade when one request ends and another remains instead of
-        /// interpolating a heuristic value backward.
-        let headID: UUID
-        let activeCount: Int
-        let estimatedFraction: Double
-    }
-
     enum Completion: Equatable, Sendable {
         /// No active job used this identifier.
         case ignored
-        /// At least one request remains. `nextHeadID` is the attempt whose
-        /// progress should now drive the presentation.
+        /// At least one request remains. `nextHeadID` is the attempt that is
+        /// now the oldest outstanding work.
         case moreRemain(nextHeadID: UUID)
         /// The final outstanding request ended.
         case becameIdle
@@ -80,20 +71,18 @@ struct MacTranscriptionWorkload: Equatable, Sendable {
         return .moreRemain(nextHeadID: head.id)
     }
 
-    /// Returns the heuristic state of the oldest outstanding attempt. Several
-    /// jobs can run concurrently, so combining them into one percentage would
-    /// imply knowledge the app does not have.
-    func snapshot(at date: Date = Date()) -> Snapshot? {
-        guard let head = headJob else { return nil }
-        let elapsed = max(0, date.timeIntervalSince(head.enqueuedAt))
-        return Snapshot(
-            headID: head.id,
-            activeCount: jobs.count,
-            estimatedFraction: Self.estimatedFraction(
-                recordingDuration: head.recordingDuration,
-                elapsed: elapsed
-            )
-        )
+    /// Every outstanding attempt oldest-first. The HUD depth stack renders
+    /// one card per attempt, each with its own heuristic rail; combining
+    /// concurrent jobs into one percentage would imply knowledge the app
+    /// does not have.
+    var orderedJobs: [Job] {
+        jobs.enumerated().sorted { lhs, rhs in
+            if lhs.element.enqueuedAt == rhs.element.enqueuedAt {
+                // Preserve start order when timestamps have the same precision.
+                return lhs.offset < rhs.offset
+            }
+            return lhs.element.enqueuedAt < rhs.element.enqueuedAt
+        }.map(\.element)
     }
 
     static func expectedDuration(
@@ -122,13 +111,5 @@ struct MacTranscriptionWorkload: Equatable, Sendable {
         return min(activeCeiling, max(initialFraction, fraction))
     }
 
-    private var headJob: Job? {
-        jobs.enumerated().min { lhs, rhs in
-            if lhs.element.enqueuedAt == rhs.element.enqueuedAt {
-                // Preserve start order when timestamps have the same precision.
-                return lhs.offset < rhs.offset
-            }
-            return lhs.element.enqueuedAt < rhs.element.enqueuedAt
-        }?.element
-    }
+    private var headJob: Job? { orderedJobs.first }
 }

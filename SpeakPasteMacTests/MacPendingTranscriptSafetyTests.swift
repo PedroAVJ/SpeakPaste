@@ -3,6 +3,60 @@ import XCTest
 @testable import SpeakPaste
 
 final class MacPendingTranscriptSafetyTests: XCTestCase {
+    func testHeldClipboardClaimResolvesOnlyItsExactDurableOwnerAndPayload() {
+        let owner = MacHeldClipboardIdentity(
+            transcriptID: UUID(),
+            createdAt: Date(timeIntervalSince1970: 1_234),
+            sourceText: "Same words"
+        )
+        let duplicateText = MacHeldClipboardIdentity(
+            transcriptID: UUID(),
+            createdAt: owner.createdAt.addingTimeInterval(1),
+            sourceText: owner.sourceText
+        )
+        let claim = MacHeldClipboardClaim(
+            owner: owner,
+            clipboardPayload: " Same words"
+        )
+
+        XCTAssertEqual(
+            MacHeldClipboardClaimResolver.ownerID(
+                for: claim,
+                clipboardText: claim.clipboardPayload,
+                heldIdentities: [duplicateText, owner]
+            ),
+            owner.transcriptID
+        )
+        XCTAssertNil(
+            MacHeldClipboardClaimResolver.ownerID(
+                for: claim,
+                clipboardText: "Same words",
+                heldIdentities: [duplicateText, owner]
+            )
+        )
+        XCTAssertNil(
+            MacHeldClipboardClaimResolver.ownerID(
+                for: claim,
+                clipboardText: claim.clipboardPayload,
+                heldIdentities: [duplicateText]
+            )
+        )
+    }
+
+    func testHeldClipboardClaimRoundTripsWithoutPendingStoreSchemaChanges() throws {
+        let claim = MacHeldClipboardClaim(
+            owner: MacHeldClipboardIdentity(
+                transcriptID: UUID(),
+                createdAt: Date(timeIntervalSince1970: 9_876),
+                sourceText: "A held fragment"
+            ),
+            clipboardPayload: " A held fragment"
+        )
+
+        let encoded = try JSONEncoder().encode(claim)
+        XCTAssertEqual(try JSONDecoder().decode(MacHeldClipboardClaim.self, from: encoded), claim)
+    }
+
     func testBulkRemovalDeletesOnlyReviewedIDsAndPreservesHiddenEscrows() async throws {
         try await MainActor.run {
             let scratch = try makePendingSafetyScratch()

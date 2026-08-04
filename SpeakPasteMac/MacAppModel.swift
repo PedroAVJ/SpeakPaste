@@ -9,6 +9,12 @@ import Network
 /// that dictations land in the order they were spoken.
 private struct MacFinishedDictation {
     let text: String
+    let preparedChunk: MacPreparedTranscriptChunk
+    /// Stable presentation identity carried from capture through the final
+    /// delivery receipt. It is intentionally not the network-attempt UUID.
+    let hudCardID: UUID
+    /// One-based spoken position used only for accessible event wording.
+    let hudOrdinal: Int?
     /// Set only after the exact text below has been atomically committed to
     /// retained transcript history.
     let historyRecordID: UUID?
@@ -104,6 +110,9 @@ private struct MacStoredRetryableDictation: Codable {
 struct MacHeldTranscript: Identifiable {
     let id: UUID
     let text: String
+    let preparedChunk: MacPreparedTranscriptChunk
+    let hudCardID: UUID
+    let hudOrdinal: Int?
     /// Nil after a relaunch. AX handles cannot be reconstructed safely, so a
     /// recovered transcript is manual-release only.
     let target: MacDeliveryTarget?
@@ -114,6 +123,13 @@ struct MacHeldTranscript: Identifiable {
 
     var isRecovered: Bool { target == nil }
     var deliveryIsUncertain: Bool { deliveryState == .deliveryUncertain }
+    var clipboardIdentity: MacHeldClipboardIdentity {
+        MacHeldClipboardIdentity(
+            transcriptID: id,
+            createdAt: createdAt,
+            sourceText: text
+        )
+    }
 }
 
 enum MacMicrophoneTestState: Equatable {
@@ -162,7 +178,13 @@ final class MacAppModel: ObservableObject {
         didSet {
             guard phase != oldValue else { return }
             phaseStartedAt = Date()
+            updateHUDCapture(for: phase, at: phaseStartedAt)
             announceCapturePhase(phase)
+            if oldValue.isBusy, !phase.isBusy {
+                Task { [weak self] in
+                    await self?.drainCompletedDictations()
+                }
+            }
         }
     }
     @Published private(set) var phaseStartedAt = Date()
@@ -189,6 +211,22 @@ final class MacAppModel: ObservableObject {
     }
     @Published var autoPaste = true {
         didSet { UserDefaults.standard.set(autoPaste, forKey: Self.autoPasteKey) }
+    }
+    /// When enabled, completed chunks stay queued while the microphone is hot.
+    /// The queue still drains between chunks, preserving the user's ability to
+    /// speak a multipart thought without text appearing under their next take.
+    @Published var holdDeliveryWhileRecording = false {
+        didSet {
+            UserDefaults.standard.set(
+                holdDeliveryWhileRecording,
+                forKey: Self.holdDeliveryWhileRecordingKey
+            )
+            if oldValue, !holdDeliveryWhileRecording {
+                Task { [weak self] in
+                    await self?.drainCompletedDictations()
+                }
+            }
+        }
     }
     /// Off until the user opts in: context terms are sent to ElevenLabs as
     /// recognition hints, so this cannot be an undisclosed first-run default.
@@ -252,6 +290,10 @@ final class MacAppModel: ObservableObject {
     /// are never dropped and never guessed at: each waits for its own field to
     /// come back, or for the release shortcut.
     @Published private(set) var heldTranscripts: [MacHeldTranscript] = []
+    /// Non-nil only when the sole visible hold is proven by SpeakPaste's live
+    /// private pasteboard claim. Queue membership alone never implies that
+    /// Command-V contains the corresponding transcript.
+    @Published private(set) var heldClipboardOwnerID: UUID?
     /// Exact queue snapshot authorized by the dashboard's duplicate-risk
     /// confirmation. The actual paste must happen later, while an external
     /// destination owns focus, through the global release shortcut/menu item.
@@ -260,6 +302,14 @@ final class MacAppModel: ObservableObject {
     /// microphone is already free; these only await text.
     @Published private(set) var inFlightCount = 0
     @Published private(set) var transcriptionWorkload = MacTranscriptionWorkload()
+    /// Presentation lifecycle for capture, transcription, and one short-lived
+    /// held event. Durable recovery and queue depth belong to the dashboard,
+    /// never to the floating HUD.
+    @Published private(set) var hudPipeline = MacHUDPipeline()
+    /// A short-lived terminal receipt lets SwiftUI reserve the trailing slide
+    /// for verified delivery. Projection changes such as overflow, timeout, or
+    /// held-card aggregation must not impersonate completion.
+    @Published private(set) var recentlyDeliveredHUDCardIDs = Set<UUID>()
     /// Failed dictations whose audio is still on disk and can be resent.
     @Published private(set) var retryableFailures: [MacRetryableDictation] = []
     @Published private(set) var networkIsAvailable = true
@@ -348,6 +398,9 @@ final class MacAppModel: ObservableObject {
     private var suppressedDuplicateDeliveryEscrowIDs = Set<UUID>()
     private var connectedDeviceID: String?
     private var pendingWatchTimer: Timer?
+    /// Tracks the private pasteboard claim across queue reductions. Ownership
+    /// dies with its original chunk and is never promoted to another hold.
+    private var trackedHeldClipboardOwner: MacHeldClipboardIdentity?
     /// Delivery is asynchronous now, so the 0.4 s watcher must not start a
     /// second paste on top of one already in progress.
     private var isDeliveringHeldTranscripts = false
@@ -385,6 +438,7 @@ final class MacAppModel: ObservableObject {
     private static let languageKey = "mac-language"
     private static let cleanSpeechKey = "mac-clean-speech"
     private static let autoPasteKey = "mac-auto-paste"
+    private static let holdDeliveryWhileRecordingKey = "mac-hold-delivery-while-recording"
     private static let contextAwarenessKey = "mac-context-awareness"
     private static let spokenFormattingCommandsKey = "mac-spoken-formatting-commands"
     private static let hudEnabledKey = "mac-hud-enabled"
@@ -591,6 +645,12 @@ final class MacAppModel: ObservableObject {
             MacHeldTranscript(
                 id: pending.id,
                 text: pending.text,
+                preparedChunk: MacPreparedTranscriptChunk(
+                    text: pending.text,
+                    preservesLeadingReplacementCase: false
+                ),
+                hudCardID: pending.id,
+                hudOrdinal: nil,
                 target: nil,
                 destinationApplicationName: pending.destinationApplicationName,
                 destinationBundleIdentifier: pending.destinationBundleIdentifier,
@@ -598,6 +658,8 @@ final class MacAppModel: ObservableObject {
                 deliveryState: pending.deliveryState
             )
             }
+        refreshHeldClipboardOwnership()
+        if !heldTranscripts.isEmpty { startPendingWatcher() }
         // An explicit process environment key is the local-development and UI
         // test boundary. Do not query the user's real Keychain in that mode:
         // CFFIXED_USER_HOME isolates defaults and files, but macOS Keychain
@@ -629,6 +691,11 @@ final class MacAppModel: ObservableObject {
         }
         if defaults.object(forKey: Self.autoPasteKey) != nil {
             autoPaste = defaults.bool(forKey: Self.autoPasteKey)
+        }
+        if defaults.object(forKey: Self.holdDeliveryWhileRecordingKey) != nil {
+            holdDeliveryWhileRecording = defaults.bool(
+                forKey: Self.holdDeliveryWhileRecordingKey
+            )
         }
         if defaults.object(forKey: Self.contextAwarenessKey) != nil {
             contextAwareness = defaults.bool(forKey: Self.contextAwarenessKey)
@@ -994,6 +1061,16 @@ final class MacAppModel: ObservableObject {
         captureStartTask?.cancel()
         let requestID = UUID()
         captureRequestID = requestID
+        var pipeline = hudPipeline
+        if let previousCaptureID = pipeline.capture?.id {
+            pipeline.finish(id: previousCaptureID)
+        }
+        pipeline.beginCapture(
+            id: requestID,
+            ordinal: nextSpeakSequence + 1,
+            at: Date()
+        )
+        hudPipeline = pipeline
         if phase == .connecting {
             // Switching sources while an earlier connection is still pending
             // begins a new bounded attempt even though the enum case is the
@@ -1005,6 +1082,69 @@ final class MacAppModel: ObservableObject {
         captureStartTask = Task { [weak self] in
             await self?.startRecording(requestID: requestID)
         }
+    }
+
+    private func updateHUDCapture(
+        for phase: MacCapturePhase,
+        at date: Date = Date()
+    ) {
+        guard let captureID = hudPipeline.capture?.id else { return }
+        var pipeline = hudPipeline
+        switch phase {
+        case .connecting:
+            pipeline.updateCapture(id: captureID, activity: .connecting, at: date)
+        case .recording:
+            pipeline.updateCapture(id: captureID, activity: .listening, at: date)
+        case .finalizing:
+            pipeline.updateCapture(id: captureID, activity: .releasing, at: date)
+        case .failed:
+            pipeline.finish(id: captureID)
+        case .ready, .succeeded:
+            // Ready is the zero-gap handoff between recorder teardown and the
+            // durable transcription job. `startTranscription` morphs this same
+            // card; cancellation explicitly finishes it after hardware release.
+            break
+        }
+        hudPipeline = pipeline
+    }
+
+    private func finishHUDCard(_ id: UUID?) {
+        guard let id else { return }
+        var pipeline = hudPipeline
+        pipeline.finish(id: id)
+        hudPipeline = pipeline
+    }
+
+    private func markHUDCardsDelivered(_ ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+        recentlyDeliveredHUDCardIDs.formUnion(ids)
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard let self else { return }
+            self.recentlyDeliveredHUDCardIDs.subtract(ids)
+        }
+    }
+
+    private func markHUDCardAwaitingDelivery(_ id: UUID) {
+        var pipeline = hudPipeline
+        pipeline.markAwaitingDelivery(id: id)
+        hudPipeline = pipeline
+    }
+
+    private func markHUDCardHeld(
+        _ id: UUID,
+        ordinal: Int?,
+        createdAt: Date,
+        recordingDuration: TimeInterval
+    ) {
+        var pipeline = hudPipeline
+        pipeline.markHeld(
+            id: id,
+            ordinal: ordinal,
+            createdAt: createdAt,
+            recordingDuration: recordingDuration
+        )
+        hudPipeline = pipeline
     }
 
     @discardableResult
@@ -1029,16 +1169,16 @@ final class MacAppModel: ObservableObject {
     func pasteLastTranscript() {
         guard !transcript.isEmpty else { return }
         guard lastTranscriptOutputIsResolved else {
-            phase = .failed(
-                "The last transcript still owns unresolved recovery data. Use Copy or the waiting-text review flow before Paste Last."
-            )
+            let detail = "The last transcript still owns unresolved recovery data. Use Copy or the waiting-text review flow before Paste Last."
+            recoveryNotice = detail
+            if !phase.isBusy { phase = .failed(detail) }
             return
         }
         if let lastTranscriptPendingID,
            pendingTranscriptStore.transcript(withID: lastTranscriptPendingID) != nil {
-            phase = .failed(
-                "The last transcript is still owned by the waiting-text recovery queue. Use its release shortcut—or the duplicate-risk flow when warned—instead of Paste Last."
-            )
+            let detail = "The last transcript is still owned by the waiting-text recovery queue. Use its release shortcut—or the duplicate-risk flow when warned—instead of Paste Last."
+            recoveryNotice = detail
+            if !phase.isBusy { phase = .failed(detail) }
             return
         }
         Task { [weak self] in
@@ -1698,6 +1838,11 @@ final class MacAppModel: ObservableObject {
     }
 
     private func finishSessionTracking() {
+        if let captureID = hudPipeline.capture?.id {
+            var pipeline = hudPipeline
+            pipeline.finish(id: captureID)
+            hudPipeline = pipeline
+        }
         captureRequestID = nil
         captureStartTask?.cancel()
         captureStartTask = nil
@@ -2120,6 +2265,7 @@ final class MacAppModel: ObservableObject {
 
     private func stopAndTranscribe(interruption: String? = nil) async {
         defer { endRecordingActivity() }
+        let hudCapture = hudPipeline.capture
         let deviceName = selectedDevice?.name ?? "Unknown microphone"
         let recordingDuration = Date().timeIntervalSince(recordingStartedAt ?? Date())
 
@@ -2149,9 +2295,16 @@ final class MacAppModel: ObservableObject {
                     target: target,
                     deviceName: deviceName,
                     recordingDuration: recordingDuration,
-                    interruption: interruption ?? diagnosticMessage(for: salvaged.underlying)
+                    interruption: interruption ?? diagnosticMessage(for: salvaged.underlying),
+                    hudCardID: hudCapture?.id,
+                    hudOrdinal: hudCapture?.ordinal
                 )
-                if resumesCapture, handoffIsDurable { beginRecordingRequest() }
+                if resumesCapture, handoffIsDurable {
+                    if holdDeliveryWhileRecording {
+                        await drainCompletedDictations()
+                    }
+                    beginRecordingRequest()
+                }
                 return
             }
             deliveryTarget = nil
@@ -2186,13 +2339,20 @@ final class MacAppModel: ObservableObject {
             target: target,
             deviceName: deviceName,
             recordingDuration: recordingDuration,
-            interruption: interruption
+            interruption: interruption,
+            hudCardID: hudCapture?.id,
+            hudOrdinal: hudCapture?.ordinal
         )
         // Do not let a later segment overtake speech that failed to enter the
         // private recovery journal. The selected mode remains sticky, but the
         // user sees and resolves the first segment's failure before recording
         // continues.
-        if resumesCapture, handoffIsDurable { beginRecordingRequest() }
+        if resumesCapture, handoffIsDurable {
+            if holdDeliveryWhileRecording {
+                await drainCompletedDictations()
+            }
+            beginRecordingRequest()
+        }
     }
 
     /// Applies a deferred source switch only after the recorder's `stop()` has
@@ -2222,7 +2382,9 @@ final class MacAppModel: ObservableObject {
         interruption: String?,
         existingRecordID: UUID? = nil,
         isImport: Bool = false,
-        requiresManualOutput: Bool = false
+        requiresManualOutput: Bool = false,
+        hudCardID: UUID? = nil,
+        hudOrdinal: Int? = nil
     ) -> Bool {
         let record: MacPendingAudioRecord
         do {
@@ -2240,6 +2402,7 @@ final class MacAppModel: ObservableObject {
                 )
             }
         } catch {
+            finishHUDCard(hudCardID)
             recoveryNotice = "Could not journal the recording safely: \(error.localizedDescription)"
             recordCompletedFailure(
                 "The recording was not sent because SpeakPaste could not save its recovery entry. \(error.localizedDescription)",
@@ -2250,6 +2413,7 @@ final class MacAppModel: ObservableObject {
             return false
         }
         guard let durableAudioURL = try? pendingAudioStore.audioURL(for: record) else {
+            finishHUDCard(hudCardID)
             recordCompletedFailure(
                 "The recording was journaled with an unsafe path and was not sent.",
                 deviceName: deviceName,
@@ -2259,6 +2423,7 @@ final class MacAppModel: ObservableObject {
             return false
         }
         retryableFailures.removeAll { $0.id == record.id }
+        let resolvedHUDCardID = hudCardID ?? record.id
         if !networkIsAvailable {
             let reason = Self.offlineRetryReason
             let queued = queuePendingAudioForRetry(
@@ -2276,6 +2441,7 @@ final class MacAppModel: ObservableObject {
             } else {
                 recoveryNotice = "You're offline. The private audio journal will be rescanned on the next launch because its visible retry entry could not be confirmed."
             }
+            finishHUDCard(resolvedHUDCardID)
             return queued
         }
         reconnectRetryIDs.remove(record.id)
@@ -2287,6 +2453,19 @@ final class MacAppModel: ObservableObject {
             sequence = nextSpeakSequence
             nextSpeakSequence += 1
         }
+        let resolvedHUDOrdinal = hudOrdinal ?? sequence.map { $0 + 1 }
+        var pipeline = hudPipeline
+        pipeline.beginTranscription(
+            id: resolvedHUDCardID,
+            ordinal: resolvedHUDOrdinal,
+            recordingDuration: recordingDuration,
+            createdAt: record.createdAt
+        )
+        hudPipeline = pipeline
+        announceHUDEvent(
+            ordinal: resolvedHUDOrdinal,
+            action: "is transcribing"
+        )
         // A reconnect can claim the same durable recording while the failed
         // request is still unwinding. Track network attempts, not record IDs,
         // so the older defer cannot remove the newer retry from the HUD.
@@ -2311,7 +2490,9 @@ final class MacAppModel: ObservableObject {
                 isImport: isImport,
                 requiresManualOutput: requiresManualOutput,
                 networkGenerationAtRequestStart: networkGenerationAtRequestStart,
-                workloadID: workloadID
+                workloadID: workloadID,
+                hudCardID: resolvedHUDCardID,
+                hudOrdinal: resolvedHUDOrdinal
             )
         }
         return true
@@ -2334,7 +2515,9 @@ final class MacAppModel: ObservableObject {
         isImport: Bool,
         requiresManualOutput: Bool,
         networkGenerationAtRequestStart: UInt64,
-        workloadID: UUID
+        workloadID: UUID,
+        hudCardID: UUID,
+        hudOrdinal: Int?
     ) async {
         defer {
             var workload = transcriptionWorkload
@@ -2356,14 +2539,12 @@ final class MacAppModel: ObservableObject {
                 cleanSpeech: cleanSpeech,
                 keyterms: requestKeyterms(for: target)
             )
-            let processed = MacTranscriptPostProcessor.apply(
+            let preparedChunk = MacTranscriptPostProcessor.prepare(
                 result.text,
                 replacements: replacements.replacements,
-                precedingText: isImport || requiresManualOutput
-                    ? nil
-                    : (autoPaste ? target?.precedingText : nil),
                 spokenFormattingCommands: spokenFormattingCommands
             )
+            let processed = preparedChunk.text
             guard !processed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw ElevenLabsClientError.emptyTranscript
             }
@@ -2502,6 +2683,9 @@ final class MacAppModel: ObservableObject {
             }
             let finished = MacFinishedDictation(
                 text: processed,
+                preparedChunk: preparedChunk,
+                hudCardID: hudCardID,
+                hudOrdinal: hudOrdinal,
                 historyRecordID: historyRecordID,
                 deliveryEscrowID: deliveryEscrowID,
                 createdAt: createdAt,
@@ -2518,6 +2702,7 @@ final class MacAppModel: ObservableObject {
                     probability: result.languageProbability
                 )
             )
+            markHUDCardAwaitingDelivery(hudCardID)
             if isImport || requiresManualOutput {
                 finishManualOutputDictation(finished, isImport: isImport)
             } else if let sequence {
@@ -2554,8 +2739,15 @@ final class MacAppModel: ObservableObject {
                 recoveryNotice = "A failed recording needs journal recovery on the next launch."
             }
             // A failed dictation must not stall the ones spoken after it.
+            finishHUDCard(hudCardID)
             let failed = MacFinishedDictation(
                 text: "",
+                preparedChunk: MacPreparedTranscriptChunk(
+                    text: "",
+                    preservesLeadingReplacementCase: false
+                ),
+                hudCardID: hudCardID,
+                hudOrdinal: hudOrdinal,
                 historyRecordID: nil,
                 deliveryEscrowID: nil,
                 createdAt: createdAt,
@@ -2755,6 +2947,7 @@ final class MacAppModel: ObservableObject {
     func cancelRecording() {
         guard phase == .recording || phase == .connecting else { return }
         let shouldPlayReleaseCue = phase == .recording
+        let cancelledHUDCardID = hudPipeline.capture?.id
         pendingInputModeAfterFinalization = nil
         captureRequestID = nil
         captureStartTask?.cancel()
@@ -2779,6 +2972,11 @@ final class MacAppModel: ObservableObject {
             self.isMicrophoneConnected = false
             self.connectedDeviceID = nil
             self.connectionLatency = nil
+            if let cancelledHUDCardID {
+                var pipeline = self.hudPipeline
+                pipeline.finish(id: cancelledHUDCardID)
+                self.hudPipeline = pipeline
+            }
             self.phase = .ready
         }
     }
@@ -2790,6 +2988,7 @@ final class MacAppModel: ObservableObject {
         isDrainingCompletedDictations = true
         defer { isDrainingCompletedDictations = false }
         while let finished = completedDictations[nextDeliverySequence] {
+            if holdDeliveryWhileRecording, phase.isBusy { break }
             completedDictations[nextDeliverySequence] = nil
             nextDeliverySequence += 1
             await deliver(finished)
@@ -2813,9 +3012,17 @@ final class MacAppModel: ObservableObject {
         if let deliveryEscrowID = finished.deliveryEscrowID,
            let pending = pendingTranscriptStore.transcript(withID: deliveryEscrowID),
            pending.text == finished.text {
-            presentPendingTranscript(pending, target: nil)
+            presentPendingTranscript(
+                pending,
+                target: nil,
+                preparedChunk: finished.preparedChunk,
+                hudCardID: finished.hudCardID,
+                hudOrdinal: finished.hudOrdinal,
+                recordingDuration: finished.recordingDuration
+            )
             pendingHandoffSaved = true
         }
+        if !pendingHandoffSaved { finishHUDCard(finished.hudCardID) }
         let manualOutputIsReady = pendingHandoffSaved
         var detail: String
         let sourceLabel = isImport ? "Imported file" : "Saved recording"
@@ -2861,6 +3068,7 @@ final class MacAppModel: ObservableObject {
 
     private func deliver(_ finished: MacFinishedDictation) async {
         guard !finished.text.isEmpty else {
+            finishHUDCard(finished.hudCardID)
             recordCompletedFailure(
                 finished.interruption ?? "Transcription failed.",
                 deviceName: finished.deviceName,
@@ -2879,6 +3087,7 @@ final class MacAppModel: ObservableObject {
         lastTranscriptPendingID = finished.deliveryEscrowID
         lastTranscriptOutputIsResolved = false
         guard let deliveryEscrowID = finished.deliveryEscrowID else {
+            finishHUDCard(finished.hudCardID)
             // The audio is visible in the retry queue. Do not paste or press
             // Return before its text is durable: retrying a failed commit must
             // not duplicate a message that was already delivered.
@@ -2902,6 +3111,7 @@ final class MacAppModel: ObservableObject {
         }
         if pendingTranscriptStore.transcript(withID: deliveryEscrowID) == nil {
             if explicitlyResolvedDeliveryEscrowIDs.remove(deliveryEscrowID) != nil {
+                finishHUDCard(finished.hudCardID)
                 if lastTranscriptPendingID == deliveryEscrowID {
                     lastTranscriptPendingID = nil
                     lastTranscriptOutputIsResolved = true
@@ -2925,6 +3135,7 @@ final class MacAppModel: ObservableObject {
                 return
             }
             let detail = "Transcribed, but not delivered because its durable recovery handoff disappeared unexpectedly. History was preserved when configured."
+            finishHUDCard(finished.hudCardID)
             recordCompletedFailure(
                 detail,
                 deviceName: finished.deviceName,
@@ -2935,7 +3146,14 @@ final class MacAppModel: ObservableObject {
         }
         if let pending = pendingTranscriptStore.transcript(withID: deliveryEscrowID),
            pending.deliveryState == .deliveryUncertain {
-            presentPendingTranscript(pending, target: finished.target)
+            presentPendingTranscript(
+                pending,
+                target: finished.target,
+                preparedChunk: finished.preparedChunk,
+                hudCardID: finished.hudCardID,
+                hudOrdinal: finished.hudOrdinal,
+                recordingDuration: finished.recordingDuration
+            )
             suspendedAutomaticHeldIDs.insert(deliveryEscrowID)
             let detail = "Automatic delivery was blocked because this transcript is already marked as possibly delivered. Review the waiting copy before any retry."
             recordCompletedFailure(
@@ -2948,7 +3166,15 @@ final class MacAppModel: ObservableObject {
         }
         guard ensureSourceRecoveryIsUnlinked(for: Set([deliveryEscrowID])) else {
             if let pending = pendingTranscriptStore.transcript(withID: deliveryEscrowID) {
-                presentPendingTranscript(pending, target: nil)
+                presentPendingTranscript(
+                    pending,
+                    target: nil,
+                    preparedChunk: finished.preparedChunk,
+                    hudCardID: finished.hudCardID,
+                    hudOrdinal: finished.hudOrdinal,
+                    recordingDuration: finished.recordingDuration,
+                    showTransientHUD: true
+                )
             }
             let detail = "Transcribed, but output is paused until SpeakPaste can finish unlinking its source-audio recovery proof. The text and audio remain preserved."
             recordCompletedFailure(
@@ -2959,13 +3185,52 @@ final class MacAppModel: ObservableObject {
             )
             return
         }
+        // Once one chunk for this exact AX field is held, every later chunk in
+        // that run joins it without touching the pasteboard or starting an
+        // ambiguous delivery receipt. The whole run will leave in order when
+        // that exact field returns.
+        if let target = finished.target,
+           heldTranscripts.contains(where: { held in
+               guard let heldTarget = held.target else { return false }
+               return heldTarget.refersToSameElement(as: target)
+           }) {
+            hold(
+                finished.text,
+                preparedChunk: finished.preparedChunk,
+                for: target,
+                pendingID: finished.deliveryEscrowID,
+                createdAt: finished.createdAt,
+                hudCardID: finished.hudCardID,
+                hudOrdinal: finished.hudOrdinal,
+                recordingDuration: finished.recordingDuration,
+                copyOnPersistenceFailure: false
+            )
+            attempts = reliabilityStore.prepend(
+                MacReliabilityAttempt(
+                    deviceName: finished.deviceName,
+                    recordingDuration: finished.recordingDuration,
+                    transcriptionDuration: finished.transcriptionDuration,
+                    outcome: .success,
+                    detail: "Held in spoken order for \(target.applicationName)"
+                )
+            )
+            return
+        }
         // Every route can change the clipboard, including manual/clipboard-only
         // mode and fallbacks that cannot paste. Persist ambiguity before calling
         // the controller; definite no-output outcomes restore pending below.
         if !beginDeliveryEscrowAttempt(finished.deliveryEscrowID) {
             if let escrowID = finished.deliveryEscrowID,
                let pending = pendingTranscriptStore.transcript(withID: escrowID) {
-                presentPendingTranscript(pending, target: nil)
+                presentPendingTranscript(
+                    pending,
+                    target: nil,
+                    preparedChunk: finished.preparedChunk,
+                    hudCardID: finished.hudCardID,
+                    hudOrdinal: finished.hudOrdinal,
+                    recordingDuration: finished.recordingDuration,
+                    showTransientHUD: true
+                )
             }
             var detail = "Transcribed, but paste was blocked because its recovery handoff could not be marked safely. Use Copy or Discard from the waiting-text banner."
             if let languageConfidenceNotice = finished.languageConfidenceNotice {
@@ -2986,31 +3251,85 @@ final class MacAppModel: ObservableObject {
             return
         }
         activeDeliveryEscrowIDs.insert(deliveryEscrowID)
+        let copyOnHold = heldTranscripts.isEmpty
+        let heldClipboardOwner = copyOnHold
+            ? MacHeldClipboardIdentity(
+                transcriptID: deliveryEscrowID,
+                createdAt: finished.createdAt,
+                sourceText: finished.text
+            )
+            : nil
         let delivery = await pasteController.deliver(
-            finished.text,
+            finished.preparedChunk,
             to: finished.target,
             autoPaste: autoPaste,
-            policy: deliveryPolicy(for: finished.target)
+            policy: deliveryPolicy(for: finished.target),
+            copyOnHold: copyOnHold,
+            heldClipboardOwner: heldClipboardOwner
         )
         activeDeliveryEscrowIDs.remove(deliveryEscrowID)
+        if delivery.isDelivered {
+            markHUDCardsDelivered(Set([finished.hudCardID]))
+        }
         var detail = delivery.detail
         if case let .held(reason) = delivery, let target = finished.target {
             restoreDeliveryEscrowPending(finished.deliveryEscrowID)
             hold(
                 finished.text,
+                preparedChunk: finished.preparedChunk,
                 for: target,
                 pendingID: finished.deliveryEscrowID,
-                createdAt: finished.createdAt
+                createdAt: finished.createdAt,
+                hudCardID: finished.hudCardID,
+                hudOrdinal: finished.hudOrdinal,
+                recordingDuration: finished.recordingDuration,
+                copyOnPersistenceFailure: false
             )
             detail = "Held for \(target.applicationName) — \(reason.explanation)"
+        } else if case let .held(reason) = delivery {
+            // A later chunk deliberately avoids replacing the clipboard while
+            // another held chunk owns it. A missing live AX target therefore
+            // means "retain for manual placement," never "discard because no
+            // clipboard side effect occurred."
+            restoreDeliveryEscrowPending(deliveryEscrowID)
+            if let pending = pendingTranscriptStore.transcript(withID: deliveryEscrowID) {
+                presentPendingTranscript(
+                    pending,
+                    target: nil,
+                    preparedChunk: finished.preparedChunk,
+                    hudCardID: finished.hudCardID,
+                    hudOrdinal: finished.hudOrdinal,
+                    recordingDuration: finished.recordingDuration
+                )
+            } else {
+                // `beginDeliveryEscrowAttempt` proved this entry existed. If
+                // its backing store changes underneath us, keep the in-memory
+                // text and HUD card visible rather than treating a hold as a
+                // successful output and destroying the last user-facing copy.
+                markHUDCardHeld(
+                    finished.hudCardID,
+                    ordinal: finished.hudOrdinal,
+                    createdAt: finished.createdAt,
+                    recordingDuration: finished.recordingDuration
+                )
+                recoveryNotice = "Delivery was held, but its saved recovery entry could not be reloaded. The transcript remains visible in this session."
+            }
+            detail = "Held for manual placement — \(reason.explanation)"
         } else if case .pasted(_, verified: false) = delivery,
                   let escrowID = finished.deliveryEscrowID,
                   let pending = pendingTranscriptStore.transcript(withID: escrowID) {
             // The side effect may already have happened. Keep the durable
             // uncertain escrow visible and refuse every implicit retry.
-            presentPendingTranscript(pending, target: finished.target)
+            presentPendingTranscript(
+                pending,
+                target: finished.target,
+                preparedChunk: finished.preparedChunk,
+                hudCardID: finished.hudCardID,
+                hudOrdinal: finished.hudOrdinal,
+                recordingDuration: finished.recordingDuration
+            )
             suspendedAutomaticHeldIDs.insert(escrowID)
-            detail = "\(delivery.detail); recovery copy marked as possibly delivered"
+            detail = "\(delivery.detail); saved recovery entry marked as possibly delivered"
         } else if case .clipboardFailed = delivery,
                   let escrowID = finished.deliveryEscrowID {
             // No external insertion was attempted successfully, so an escrow
@@ -3018,11 +3337,19 @@ final class MacAppModel: ObservableObject {
             // pending. The clipboard failure itself remains visible.
             restoreDeliveryEscrowPending(escrowID)
             if let restored = pendingTranscriptStore.transcript(withID: escrowID) {
-                presentPendingTranscript(restored, target: finished.target)
+                presentPendingTranscript(
+                    restored,
+                    target: finished.target,
+                    preparedChunk: finished.preparedChunk,
+                    hudCardID: finished.hudCardID,
+                    hudOrdinal: finished.hudOrdinal,
+                    recordingDuration: finished.recordingDuration
+                )
             }
             detail = delivery.detail
         } else {
             finishDeliveryEscrow(finished.deliveryEscrowID)
+            finishHUDCard(finished.hudCardID)
             if let target = finished.target {
             // Naming the destination and the route makes the attempt log the
             // record of where each dictation actually went.
@@ -3031,6 +3358,10 @@ final class MacAppModel: ObservableObject {
         }
         if let languageConfidenceNotice = finished.languageConfidenceNotice {
             detail += " \(languageConfidenceNotice)"
+        }
+        if delivery.isDelivered {
+            sounds.playDelivered()
+            announceHUDEvent(ordinal: finished.hudOrdinal, action: "was delivered")
         }
 
         if let interruption = finished.interruption {
@@ -3082,7 +3413,6 @@ final class MacAppModel: ObservableObject {
         // Never overwrite a live recording's state with a background job's
         // result. The microphone owns the capture phase while it is running.
         guard !phase.isBusy else { return }
-        if delivery.isDelivered { sounds.playDelivered() }
         phase = .succeeded(detail)
         scheduleReadyReset()
     }
@@ -3144,8 +3474,10 @@ final class MacAppModel: ObservableObject {
         guard !durableIDs.isEmpty else { return true }
         let visibleIDs = Set(heldTranscripts.map(\.id))
         let removed = removeDeliveredHeldTranscripts(durableIDs)
+        finishHUDCards(forHeldTranscriptIDs: removed)
         heldTranscripts.removeAll { removed.contains($0.id) }
         suspendedAutomaticHeldIDs.subtract(removed)
+        refreshHeldClipboardOwnership()
         explicitlyResolvedDeliveryEscrowIDs.formUnion(
             removed.subtracting(visibleIDs)
         )
@@ -3235,9 +3567,14 @@ final class MacAppModel: ObservableObject {
 
     private func hold(
         _ text: String,
+        preparedChunk: MacPreparedTranscriptChunk,
         for target: MacDeliveryTarget,
         pendingID: UUID? = nil,
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        hudCardID: UUID,
+        hudOrdinal: Int?,
+        recordingDuration: TimeInterval,
+        copyOnPersistenceFailure: Bool
     ) {
         let pending: MacPendingTranscript
         var needsPersistence = true
@@ -3261,21 +3598,52 @@ final class MacAppModel: ObservableObject {
             } catch {
                 // Keep an in-memory and clipboard copy even when disk
                 // persistence fails, but do not claim crash-safe recovery.
-                let copied = pasteController.copyToPasteboardIfIdle(text)
+                let copied = copyOnPersistenceFailure
+                    && pasteController.copyToPasteboardIfIdle(text)
                 recoveryNotice = copied
                     ? "Held text is safe for this session and on the clipboard, but could not be saved to disk: \(error.localizedDescription)"
                     : "Held text is visible for this session, but neither its disk recovery entry nor clipboard copy could be saved: \(error.localizedDescription)"
             }
         }
-        presentPendingTranscript(pending, target: target)
+        presentPendingTranscript(
+            pending,
+            target: target,
+            preparedChunk: preparedChunk,
+            hudCardID: hudCardID,
+            hudOrdinal: hudOrdinal,
+            recordingDuration: recordingDuration,
+            showTransientHUD: true
+        )
     }
 
     private func presentPendingTranscript(
         _ pending: MacPendingTranscript,
-        target: MacDeliveryTarget?
+        target: MacDeliveryTarget?,
+        preparedChunk: MacPreparedTranscriptChunk? = nil,
+        hudCardID: UUID? = nil,
+        hudOrdinal: Int? = nil,
+        recordingDuration: TimeInterval = 0,
+        showTransientHUD: Bool = false
     ) {
+        let resolvedPreparedChunk = preparedChunk ?? MacPreparedTranscriptChunk(
+            text: pending.text,
+            preservesLeadingReplacementCase: false
+        )
+        let resolvedHUDCardID = hudCardID ?? pending.id
         if let index = heldTranscripts.firstIndex(where: { $0.id == pending.id }) {
             heldTranscripts[index].deliveryState = pending.deliveryState
+            if showTransientHUD {
+                markHUDCardHeld(
+                    heldTranscripts[index].hudCardID,
+                    ordinal: heldTranscripts[index].hudOrdinal,
+                    createdAt: heldTranscripts[index].createdAt,
+                    recordingDuration: recordingDuration
+                )
+            } else {
+                finishHUDCard(heldTranscripts[index].hudCardID)
+            }
+            refreshHeldClipboardOwnership()
+            startPendingWatcher()
             return
         }
         armedUncertainPasteIDs.removeAll()
@@ -3283,6 +3651,9 @@ final class MacAppModel: ObservableObject {
             MacHeldTranscript(
                 id: pending.id,
                 text: pending.text,
+                preparedChunk: resolvedPreparedChunk,
+                hudCardID: resolvedHUDCardID,
+                hudOrdinal: hudOrdinal,
                 target: target,
                 destinationApplicationName: pending.destinationApplicationName,
                 destinationBundleIdentifier: pending.destinationBundleIdentifier,
@@ -3290,7 +3661,19 @@ final class MacAppModel: ObservableObject {
                 deliveryState: pending.deliveryState
             )
         )
-        if target != nil { startPendingWatcher() }
+        if showTransientHUD {
+            markHUDCardHeld(
+                resolvedHUDCardID,
+                ordinal: hudOrdinal,
+                createdAt: pending.createdAt,
+                recordingDuration: recordingDuration
+            )
+            announceHUDEvent(ordinal: hudOrdinal, action: "is held")
+        } else {
+            finishHUDCard(resolvedHUDCardID)
+        }
+        refreshHeldClipboardOwnership()
+        startPendingWatcher()
     }
 
     /// Re-read durable state rather than presenting a stale value captured
@@ -3317,9 +3700,11 @@ final class MacAppModel: ObservableObject {
                     lastTranscriptPendingID = nil
                     lastTranscriptOutputIsResolved = true
                 }
+                finishHUDCards(forHeldTranscriptIDs: Set([id]))
                 heldTranscripts.removeAll { $0.id == id }
                 suspendedAutomaticHeldIDs.remove(id)
                 armedUncertainPasteIDs.removeAll()
+                refreshHeldClipboardOwnership()
                 if heldTranscripts.isEmpty { stopPendingWatcher() }
                 recoveryNotice = "The transcript was output; its recovery entry had already been cleared."
                 return true
@@ -3328,9 +3713,11 @@ final class MacAppModel: ObservableObject {
                 lastTranscriptPendingID = nil
                 lastTranscriptOutputIsResolved = true
             }
+            finishHUDCards(forHeldTranscriptIDs: Set([id]))
             heldTranscripts.removeAll { $0.id == id }
             suspendedAutomaticHeldIDs.remove(id)
             armedUncertainPasteIDs.removeAll()
+            refreshHeldClipboardOwnership()
             if heldTranscripts.isEmpty { stopPendingWatcher() }
             return true
         } catch {
@@ -3430,9 +3817,11 @@ final class MacAppModel: ObservableObject {
             )
             let retiredSiblingIDs = Set(siblingRecords.map(\.id))
             suppressedDuplicateDeliveryEscrowIDs.subtract(retiredSiblingIDs)
+            finishHUDCards(forHeldTranscriptIDs: retiredSiblingIDs)
             heldTranscripts.removeAll { retiredSiblingIDs.contains($0.id) }
             suspendedAutomaticHeldIDs.subtract(retiredSiblingIDs)
             armedUncertainPasteIDs.removeAll()
+            refreshHeldClipboardOwnership()
 
             // The action that entered this method was authorized against a
             // seemingly safe canonical row. If an old sibling carried an
@@ -3519,6 +3908,41 @@ final class MacAppModel: ObservableObject {
         }
     }
 
+    /// Reconciles the HUD's clipboard affordance against the live private
+    /// pasteboard claim. Ownership is never promoted to another held chunk:
+    /// once the claimed owner leaves, preserving the user's clipboard wins.
+    private func refreshHeldClipboardOwnership() {
+        guard !heldTranscripts.isEmpty else {
+            trackedHeldClipboardOwner = nil
+            heldClipboardOwnerID = nil
+            return
+        }
+        guard let claim = pasteController.heldClipboardClaim() else {
+            trackedHeldClipboardOwner = nil
+            heldClipboardOwnerID = nil
+            return
+        }
+
+        let identities = heldTranscripts.map(\.clipboardIdentity)
+        let currentOwnerID = MacHeldClipboardClaimResolver.ownerID(
+            for: claim,
+            clipboardText: claim.clipboardPayload,
+            heldIdentities: identities
+        )
+        if currentOwnerID != nil {
+            trackedHeldClipboardOwner = claim.owner
+        } else if trackedHeldClipboardOwner != claim.owner {
+            // A claim from another launch or an already-resolved queue is not
+            // authority to overwrite the user's clipboard for this queue.
+            trackedHeldClipboardOwner = nil
+        }
+
+        let visibleOwnerID = heldTranscripts.count == 1 ? currentOwnerID : nil
+        if heldClipboardOwnerID != visibleOwnerID {
+            heldClipboardOwnerID = visibleOwnerID
+        }
+    }
+
     /// Polls for the destination regaining focus rather than installing an
     /// AXObserver. Observers behave inconsistently across toolkits — Electron
     /// especially — and a 0.4 s poll that only runs while something is held is
@@ -3538,19 +3962,33 @@ final class MacAppModel: ObservableObject {
     }
 
     private func deliverHeldTranscriptsIfTargetFocused() {
+        if !isDeliveringHeldTranscripts, activeDeliveryEscrowIDs.isEmpty {
+            refreshHeldClipboardOwnership()
+        }
         guard !heldTranscripts.isEmpty else {
             stopPendingWatcher()
             return
         }
         guard autoPaste, !phase.isBusy, !isDeliveringHeldTranscripts else { return }
-        let ready = heldTranscripts.filter {
-            !suspendedAutomaticHeldIDs.contains($0.id)
-                && !$0.deliveryIsUncertain
-                && $0.target?.canDeliverOnReturn == true
+        guard let seed = heldTranscripts.first(where: {
+            $0.target?.canDeliverOnReturn == true
+        }), let target = seed.target else { return }
+        let ready = heldTranscripts.filter { held in
+            held.target?.refersToSameElement(as: target) == true
+        }
+        // The exact-field run is one ordered unit. If its earliest member may
+        // already have landed, skipping it and auto-returning a later chunk
+        // would create an unprovable hole in the user's multipart thought.
+        // Keep the whole run behind the uncertain member for reviewed release.
+        guard ready.allSatisfy({ held in
+            !suspendedAutomaticHeldIDs.contains(held.id)
+                && !held.deliveryIsUncertain
+                && held.target?.canDeliverOnReturn == true
+        }) else {
+            return
         }
         guard
             !ready.isEmpty,
-            let target = ready.first?.target,
             deliveryPolicy(for: target)?.deliveryMethod != .clipboardOnly
         else {
             return
@@ -3559,7 +3997,7 @@ final class MacAppModel: ObservableObject {
         // Everything spoken for this field, in the order it was spoken, as one
         // insert. Two dictations while away should read as two sentences, not
         // arrive as a race.
-        let text = ready.map(\.text).joined(separator: " ")
+        let chunks = ready.map(\.preparedChunk)
         let readyIdentifiers = Set(ready.map(\.id))
         let originallyPendingIdentifiers = Set(
             ready.filter { $0.deliveryState == .pending }.map(\.id)
@@ -3580,21 +4018,15 @@ final class MacAppModel: ObservableObject {
                 self.isDeliveringHeldTranscripts = false
             }
             let result = await self.pasteController.deliverHeld(
-                text,
+                chunks,
                 to: target,
-                policy: self.deliveryPolicy(for: target)
+                policy: self.deliveryPolicy(for: target),
+                copyOnHold: false
             )
             if case .pasted(_, verified: false) = result {
                 // A write may have happened even though this field cannot be
                 // read back. Never turn uncertainty into repeated inserts.
                 self.suspendedAutomaticHeldIDs.formUnion(readyIdentifiers)
-                if self.heldTranscripts.allSatisfy({ transcript in
-                    transcript.target == nil
-                        || transcript.deliveryIsUncertain
-                        || self.suspendedAutomaticHeldIDs.contains(transcript.id)
-                }) {
-                    self.stopPendingWatcher()
-                }
                 guard !self.phase.isBusy else { return }
                 self.sounds.playFailed()
                 self.phase = .failed(
@@ -3610,23 +4042,27 @@ final class MacAppModel: ObservableObject {
                 return
             }
             let durablyRemoved = self.removeDeliveredHeldTranscripts(readyIdentifiers)
+            self.markHUDCardsDelivered(
+                Set(ready.lazy.filter { durablyRemoved.contains($0.id) }.map(\.hudCardID))
+            )
+            self.finishHUDCards(forHeldTranscriptIDs: durablyRemoved)
             self.heldTranscripts.removeAll { durablyRemoved.contains($0.id) }
             self.suspendedAutomaticHeldIDs.subtract(durablyRemoved)
-            if self.heldTranscripts.allSatisfy({ transcript in
-                transcript.target == nil
-                    || transcript.deliveryIsUncertain
-                    || self.suspendedAutomaticHeldIDs.contains(transcript.id)
-            }) {
-                self.stopPendingWatcher()
-            }
-            guard !self.phase.isBusy else { return }
+            self.refreshHeldClipboardOwnership()
+            if self.heldTranscripts.isEmpty { self.stopPendingWatcher() }
             guard durablyRemoved == readyIdentifiers else {
+                guard !self.phase.isBusy else { return }
                 self.sounds.playFailed()
                 self.phase = .failed(
                     "Paste was confirmed, but a recovery copy could not be cleared. It remains marked as possibly delivered; verify before Paste Anyway."
                 )
                 return
             }
+            self.sounds.playDelivered()
+            for held in ready where durablyRemoved.contains(held.id) {
+                self.announceHUDEvent(ordinal: held.hudOrdinal, action: "was delivered")
+            }
+            guard !self.phase.isBusy else { return }
             self.phase = .succeeded("Pasted where you left off")
             self.scheduleReadyReset()
         }
@@ -3652,8 +4088,9 @@ final class MacAppModel: ObservableObject {
         else {
             return
         }
-        let text = heldTranscripts.map(\.text).joined(separator: " ")
-        let identifiers = Set(heldTranscripts.map(\.id))
+        let releasedHeld = heldTranscripts
+        let chunks = releasedHeld.map(\.preparedChunk)
+        let identifiers = Set(releasedHeld.map(\.id))
         if hasUncertainHeldTranscripts,
            !allowUncertain,
            armedUncertainPasteIDs != identifiers {
@@ -3683,7 +4120,10 @@ final class MacAppModel: ObservableObject {
                 self.activeDeliveryEscrowIDs.subtract(identifiers)
                 self.isDeliveringHeldTranscripts = false
             }
-            let result = await self.pasteController.pasteAtCurrentFocus(text)
+            let result = await self.pasteController.pasteAtCurrentFocus(
+                chunks,
+                copyOnHold: false
+            )
             guard result.isDelivered else {
                 // The text stays queued. Saying why beats a silent no-op.
                 if case .pasted(_, verified: false) = result {
@@ -3697,14 +4137,23 @@ final class MacAppModel: ObservableObject {
                 return
             }
             let removed = self.removeDeliveredHeldTranscripts(identifiers)
+            self.markHUDCardsDelivered(
+                Set(releasedHeld.lazy.filter { removed.contains($0.id) }.map(\.hudCardID))
+            )
+            self.finishHUDCards(forHeldTranscriptIDs: removed)
             self.heldTranscripts.removeAll { removed.contains($0.id) }
             self.suspendedAutomaticHeldIDs.subtract(removed)
+            self.refreshHeldClipboardOwnership()
             if self.heldTranscripts.isEmpty { self.stopPendingWatcher() }
             guard removed == identifiers else {
                 self.phase = .failed(
                     "Paste was confirmed, but a recovery copy could not be cleared. It remains marked as possibly delivered; verify before Paste Anyway."
                 )
                 return
+            }
+            self.sounds.playDelivered()
+            for held in releasedHeld where removed.contains(held.id) {
+                self.announceHUDEvent(ordinal: held.hudOrdinal, action: "was delivered")
             }
             self.phase = .succeeded("Pasted here")
             self.scheduleReadyReset()
@@ -3773,6 +4222,19 @@ final class MacAppModel: ObservableObject {
         return removed
     }
 
+    private func finishHUDCards(forHeldTranscriptIDs identifiers: Set<UUID>) {
+        guard !identifiers.isEmpty else { return }
+        let cardIDs = Set(
+            heldTranscripts.compactMap { held in
+                identifiers.contains(held.id) ? held.hudCardID : nil
+            }
+        )
+        guard !cardIDs.isEmpty else { return }
+        var pipeline = hudPipeline
+        pipeline.finish(ids: cardIDs)
+        hudPipeline = pipeline
+    }
+
     func discardHeldTranscripts() {
         guard !isDeliveringHeldTranscripts else { return }
         let identifiers = Set(heldTranscripts.map(\.id))
@@ -3794,9 +4256,11 @@ final class MacAppModel: ObservableObject {
                 recoveryNotice = "Could not discard every reviewed waiting transcript; none of the unrelated recovery entries were touched."
                 return
             }
+            finishHUDCards(forHeldTranscriptIDs: removed)
             heldTranscripts.removeAll { removed.contains($0.id) }
             suspendedAutomaticHeldIDs.subtract(removed)
             armedUncertainPasteIDs.removeAll()
+            refreshHeldClipboardOwnership()
             if let lastTranscriptPendingID, removed.contains(lastTranscriptPendingID) {
                 self.lastTranscriptPendingID = nil
                 lastTranscriptOutputIsResolved = true
@@ -3810,7 +4274,10 @@ final class MacAppModel: ObservableObject {
 
     func copyHeldTranscripts() {
         guard !heldTranscripts.isEmpty else { return }
-        let text = heldTranscripts.map(\.text).joined(separator: " ")
+        let text = MacTranscriptPostProcessor.fold(
+            heldTranscripts.map(\.preparedChunk),
+            after: nil
+        )
         let identifiers = Set(heldTranscripts.map(\.id))
         guard activeDeliveryEscrowIDs.isEmpty else {
             recoveryNotice = "Another transcript is currently being delivered. Wait for it to finish before changing the clipboard."
@@ -3827,8 +4294,10 @@ final class MacAppModel: ObservableObject {
             return
         }
         let removed = removeDeliveredHeldTranscripts(identifiers)
+        finishHUDCards(forHeldTranscriptIDs: removed)
         heldTranscripts.removeAll { removed.contains($0.id) }
         suspendedAutomaticHeldIDs.subtract(removed)
+        refreshHeldClipboardOwnership()
         if heldTranscripts.isEmpty { stopPendingWatcher() }
         recoveryNotice = removed == identifiers
             ? "Copied the waiting text and resolved its reviewed recovery entries."
@@ -3926,6 +4395,7 @@ final class MacAppModel: ObservableObject {
         // already spoken are recoverable instead of lost.
         let interruption = diagnosticMessage(for: error)
         let target = deliveryTarget
+        let hudCapture = hudPipeline.capture
         deliveryTarget = nil
         phase = .ready
         startTranscription(
@@ -3933,7 +4403,9 @@ final class MacAppModel: ObservableObject {
             target: target,
             deviceName: deviceName,
             recordingDuration: recordingDuration,
-            interruption: interruption
+            interruption: interruption,
+            hudCardID: hudCapture?.id,
+            hudOrdinal: hudCapture?.ordinal
         )
     }
 
@@ -4015,22 +4487,51 @@ final class MacAppModel: ObservableObject {
     /// consequential transitions so a hands-free user knows when speech is
     /// safe and whether delivery finished without navigating back to the app.
     private func announceCapturePhase(_ phase: MacCapturePhase) {
+        let dictation = hudOrdinalDescription(hudPipeline.capture?.ordinal)
         let announcement: String?
         switch phase {
         case .ready:
             announcement = nil
         case .connecting:
-            announcement = "SpeakPaste is connecting."
+            announcement = "\(dictation) is connecting."
         case .recording:
-            announcement = "SpeakPaste is listening."
+            announcement = "\(dictation) is listening."
         case .finalizing:
-            announcement = "SpeakPaste is releasing the microphone."
+            announcement = "\(dictation) is releasing the microphone."
         case .succeeded:
-            announcement = "Dictation complete."
+            // Terminal HUD events carry the stable chunk ordinal. A generic
+            // second announcement here would make every successful paste chatty.
+            announcement = nil
         case .failed:
             announcement = "SpeakPaste has a dictation error."
         }
         guard let announcement else { return }
+        postAccessibilityAnnouncement(announcement)
+    }
+
+    private func announceHUDEvent(ordinal: Int?, action: String) {
+        postAccessibilityAnnouncement("\(hudOrdinalDescription(ordinal)) \(action).")
+    }
+
+    private func hudOrdinalDescription(_ ordinal: Int?) -> String {
+        guard let ordinal, ordinal > 0 else { return "Dictation" }
+        let word = switch ordinal {
+        case 1: "First"
+        case 2: "Second"
+        case 3: "Third"
+        case 4: "Fourth"
+        case 5: "Fifth"
+        case 6: "Sixth"
+        case 7: "Seventh"
+        case 8: "Eighth"
+        case 9: "Ninth"
+        case 10: "Tenth"
+        default: "Dictation \(ordinal)"
+        }
+        return ordinal <= 10 ? "\(word) dictation" : word
+    }
+
+    private func postAccessibilityAnnouncement(_ announcement: String) {
         NSAccessibility.post(
             element: NSApplication.shared,
             notification: .announcementRequested,

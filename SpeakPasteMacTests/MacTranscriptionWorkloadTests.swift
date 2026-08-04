@@ -2,10 +2,10 @@ import XCTest
 @testable import SpeakPaste
 
 final class MacTranscriptionWorkloadTests: XCTestCase {
-    func testEmptyWorkloadHasNoSnapshotAndIgnoresUnknownCompletion() {
+    func testEmptyWorkloadHasNoJobsAndIgnoresUnknownCompletion() {
         var workload = MacTranscriptionWorkload()
 
-        XCTAssertNil(workload.snapshot(at: Date(timeIntervalSince1970: 100)))
+        XCTAssertTrue(workload.orderedJobs.isEmpty)
         XCTAssertEqual(workload.finish(id: UUID()), .ignored)
         XCTAssertTrue(workload.isEmpty)
     }
@@ -39,28 +39,7 @@ final class MacTranscriptionWorkloadTests: XCTestCase {
         )
     }
 
-    func testSnapshotProgressesMonotonicallyForTheCurrentHead() throws {
-        let startedAt = Date(timeIntervalSince1970: 1_000)
-        let id = UUID()
-        var workload = MacTranscriptionWorkload()
-        XCTAssertTrue(workload.start(id: id, duration: 40, at: startedAt))
-
-        let initial = try XCTUnwrap(workload.snapshot(at: startedAt))
-        let middle = try XCTUnwrap(
-            workload.snapshot(at: startedAt.addingTimeInterval(4))
-        )
-        let late = try XCTUnwrap(
-            workload.snapshot(at: startedAt.addingTimeInterval(30))
-        )
-
-        XCTAssertEqual(initial.headID, id)
-        XCTAssertEqual(initial.activeCount, 1)
-        XCTAssertLessThan(initial.estimatedFraction, middle.estimatedFraction)
-        XCTAssertLessThan(middle.estimatedFraction, late.estimatedFraction)
-        XCTAssertLessThanOrEqual(late.estimatedFraction, 0.92)
-    }
-
-    func testOldestOutstandingAttemptDrivesConcurrentProgress() throws {
+    func testOrderedJobsAreOldestFirstWithStableIdentity() {
         let firstID = UUID()
         let secondID = UUID()
         let base = Date(timeIntervalSince1970: 2_000)
@@ -68,19 +47,28 @@ final class MacTranscriptionWorkloadTests: XCTestCase {
         workload.start(id: secondID, duration: 10, at: base.addingTimeInterval(1))
         workload.start(id: firstID, duration: 30, at: base)
 
-        let initial = try XCTUnwrap(
-            workload.snapshot(at: base.addingTimeInterval(2))
-        )
-        XCTAssertEqual(initial.headID, firstID)
-        XCTAssertEqual(initial.activeCount, 2)
+        XCTAssertEqual(workload.orderedJobs.map(\.id), [firstID, secondID])
+        XCTAssertEqual(workload.orderedJobs.first?.recordingDuration, 30)
+        XCTAssertEqual(workload.activeCount, 2)
 
         XCTAssertEqual(
             workload.finish(id: secondID),
             .moreRemain(nextHeadID: firstID)
         )
-        XCTAssertEqual(workload.snapshot(at: base.addingTimeInterval(3))?.headID, firstID)
+        XCTAssertEqual(workload.orderedJobs.map(\.id), [firstID])
         XCTAssertEqual(workload.finish(id: firstID), .becameIdle)
-        XCTAssertNil(workload.snapshot(at: base.addingTimeInterval(4)))
+        XCTAssertTrue(workload.orderedJobs.isEmpty)
+    }
+
+    func testEqualTimestampsPreserveStartOrder() {
+        let firstID = UUID()
+        let secondID = UUID()
+        let start = Date(timeIntervalSince1970: 2_500)
+        var workload = MacTranscriptionWorkload()
+        workload.start(id: firstID, duration: 5, at: start)
+        workload.start(id: secondID, duration: 5, at: start)
+
+        XCTAssertEqual(workload.orderedJobs.map(\.id), [firstID, secondID])
     }
 
     func testDuplicateStartDoesNotInflateCountAndFinishedIDCanRetry() {
@@ -102,7 +90,7 @@ final class MacTranscriptionWorkloadTests: XCTestCase {
         XCTAssertEqual(workload.activeCount, 1)
     }
 
-    func testFinishingOlderAttemptKeepsOverlappingRetryVisible() throws {
+    func testFinishingOlderAttemptKeepsOverlappingRetryVisible() {
         // A connectivity retry can begin for one durable recording before the
         // failed URLSession task has finished unwinding. Each network attempt
         // therefore needs its own workload identity.
@@ -122,28 +110,28 @@ final class MacTranscriptionWorkloadTests: XCTestCase {
             workload.finish(id: failedAttemptID),
             .moreRemain(nextHeadID: retryAttemptID)
         )
-        let snapshot = try XCTUnwrap(
-            workload.snapshot(at: start.addingTimeInterval(2))
-        )
-        XCTAssertEqual(snapshot.headID, retryAttemptID)
-        XCTAssertEqual(snapshot.activeCount, 1)
+        XCTAssertEqual(workload.orderedJobs.map(\.id), [retryAttemptID])
     }
 
-    func testInvalidDurationsAndClockSkewRemainAtSafeInitialEstimate() throws {
+    func testInvalidDurationsAndClockSkewRemainAtSafeInitialEstimate() {
         let id = UUID()
         let start = Date(timeIntervalSince1970: 4_000)
         var workload = MacTranscriptionWorkload()
         workload.start(id: id, duration: .infinity, at: start)
 
+        // The job sanitizes a nonsensical duration on admission, so every
+        // per-card estimate downstream starts from a real number.
+        XCTAssertEqual(workload.orderedJobs.first?.recordingDuration, 0)
         XCTAssertEqual(
             MacTranscriptionWorkload.expectedDuration(for: -.infinity),
             2,
             accuracy: 0.000_001
         )
         XCTAssertEqual(
-            try XCTUnwrap(
-                workload.snapshot(at: start.addingTimeInterval(-5))
-            ).estimatedFraction,
+            MacTranscriptionWorkload.estimatedFraction(
+                recordingDuration: 0,
+                elapsed: -5
+            ),
             0.08,
             accuracy: 0.000_001
         )

@@ -114,6 +114,38 @@ struct MacPendingTranscript: Identifiable, Codable, Equatable, Sendable {
     }
 }
 
+/// Private pasteboard provenance for the one held transcript that can be
+/// recovered with Command-V. The exact durable identity prevents duplicate
+/// text from being mistaken for ownership, while `clipboardPayload` captures
+/// any delivery-time seam fitting applied to the source text.
+struct MacHeldClipboardIdentity: Codable, Equatable, Sendable {
+    let transcriptID: UUID
+    let createdAt: Date
+    let sourceText: String
+}
+
+struct MacHeldClipboardClaim: Codable, Equatable, Sendable {
+    let owner: MacHeldClipboardIdentity
+    let clipboardPayload: String
+}
+
+enum MacHeldClipboardClaimResolver {
+    static func ownerID(
+        for claim: MacHeldClipboardClaim?,
+        clipboardText: String?,
+        heldIdentities: [MacHeldClipboardIdentity]
+    ) -> UUID? {
+        guard
+            let claim,
+            clipboardText == claim.clipboardPayload,
+            heldIdentities.contains(claim.owner)
+        else {
+            return nil
+        }
+        return claim.owner.transcriptID
+    }
+}
+
 /// Crash- and quit-resistant storage for transcripts awaiting explicit action.
 ///
 /// Loading this store never schedules delivery and never reconstructs a

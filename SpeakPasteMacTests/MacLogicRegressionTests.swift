@@ -2,6 +2,82 @@ import Foundation
 import XCTest
 @testable import SpeakPaste
 
+final class MacAccessibilityTargetFingerprintTests: XCTestCase {
+    private let frame = CGRect(x: 20, y: 30, width: 500, height: 80)
+
+    func testRebuiltEditorMatchesOnlyWithContinuityProof() {
+        let original = fingerprint(identifiers: ["dom:prompt"])
+        let rebuilt = fingerprint(identifiers: ["dom:prompt"])
+
+        XCTAssertTrue(
+            original.safelyMatchesRebuilt(
+                rebuilt,
+                sameWindow: true,
+                noInterveningUserInput: true
+            )
+        )
+        XCTAssertFalse(
+            original.safelyMatchesRebuilt(
+                rebuilt,
+                sameWindow: false,
+                noInterveningUserInput: true
+            )
+        )
+        XCTAssertFalse(
+            original.safelyMatchesRebuilt(
+                rebuilt,
+                sameWindow: true,
+                noInterveningUserInput: false
+            )
+        )
+    }
+
+    func testRebuiltEditorFallbackRequiresMatchingRoleAndSubstantialFrameOverlap() {
+        let original = fingerprint()
+        let shiftedSlightly = MacAccessibilityTargetFingerprint(
+            role: "AXTextArea",
+            subrole: nil,
+            stableIdentifiers: [],
+            placeholder: "Message",
+            frame: frame.offsetBy(dx: 10, dy: 0)
+        )
+        let unrelatedField = MacAccessibilityTargetFingerprint(
+            role: "AXTextField",
+            subrole: nil,
+            stableIdentifiers: [],
+            placeholder: "Search",
+            frame: CGRect(x: 20, y: 300, width: 500, height: 40)
+        )
+
+        XCTAssertTrue(
+            original.safelyMatchesRebuilt(
+                shiftedSlightly,
+                sameWindow: true,
+                noInterveningUserInput: true
+            )
+        )
+        XCTAssertFalse(
+            original.safelyMatchesRebuilt(
+                unrelatedField,
+                sameWindow: true,
+                noInterveningUserInput: true
+            )
+        )
+    }
+
+    private func fingerprint(
+        identifiers: Set<String> = []
+    ) -> MacAccessibilityTargetFingerprint {
+        MacAccessibilityTargetFingerprint(
+            role: "AXTextArea",
+            subrole: nil,
+            stableIdentifiers: identifiers,
+            placeholder: "Message",
+            frame: frame
+        )
+    }
+}
+
 final class MacTranscriptPostProcessorRegressionTests: XCTestCase {
     func testLeadingParagraphCommandSurvivesCursorFitting() {
         XCTAssertEqual(
@@ -53,6 +129,54 @@ final class MacTranscriptPostProcessorRegressionTests: XCTestCase {
         XCTAssertEqual(process("macOS is ready", after: "Done."), " macOS is ready")
     }
 
+    func testPreparedChunkDoesNotCollideWithPrecedingWord() {
+        let chunk = prepare("Next")
+
+        XCTAssertEqual(
+            MacTranscriptPostProcessor.fit(chunk, after: "word"),
+            " Next"
+        )
+    }
+
+    func testPreparedChunkDoesNotAddSpaceAfterWhitespaceNewlineOrOpeningMark() {
+        let chunk = prepare("next")
+
+        XCTAssertEqual(MacTranscriptPostProcessor.fit(chunk, after: "word "), "next")
+        XCTAssertEqual(MacTranscriptPostProcessor.fit(chunk, after: "word\n"), "next")
+        XCTAssertEqual(MacTranscriptPostProcessor.fit(chunk, after: "("), "next")
+    }
+
+    func testPreparedPunctuationAttachesToPrecedingText() {
+        let chunk = prepare(", next")
+
+        XCTAssertEqual(MacTranscriptPostProcessor.fit(chunk, after: "word"), ", next")
+    }
+
+    func testPreparedChunkUsesSentenceCaseWithoutOverridingReplacementCase() {
+        XCTAssertEqual(
+            MacTranscriptPostProcessor.fit(prepare("next"), after: "Done."),
+            " Next"
+        )
+
+        let replacementChunk = prepare(
+            "iphone",
+            replacements: [replacement(spoken: "iphone", written: "iPhone")]
+        )
+        XCTAssertEqual(
+            MacTranscriptPostProcessor.fit(replacementChunk, after: "Done."),
+            " iPhone"
+        )
+    }
+
+    func testPreparedChunkFoldCarriesActualTextAcrossThreeFragments() {
+        let chunks = ["one", "two.", "three"].map { prepare($0) }
+
+        XCTAssertEqual(
+            MacTranscriptPostProcessor.fold(chunks, after: "Draft"),
+            " one two. Three"
+        )
+    }
+
     private func process(
         _ transcript: String,
         replacements: [MacTextReplacement] = [],
@@ -71,6 +195,16 @@ final class MacTranscriptPostProcessorRegressionTests: XCTestCase {
             written: written,
             isEnabled: true,
             matchesWholeWordsOnly: true
+        )
+    }
+
+    private func prepare(
+        _ transcript: String,
+        replacements: [MacTextReplacement] = []
+    ) -> MacPreparedTranscriptChunk {
+        MacTranscriptPostProcessor.prepare(
+            transcript,
+            replacements: replacements
         )
     }
 }

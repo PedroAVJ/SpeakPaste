@@ -69,7 +69,6 @@ let package = Package(
                 "MacAudioDevice.swift",
                 "MacAudioRecorder.swift",
                 "MacContentView.swift",
-                "MacDeliveryTarget.swift",
                 "MacGlobalHotKey.swift",
                 "MacKeyboardLayout.swift",
                 "MacPasteController.swift",
@@ -83,6 +82,7 @@ let package = Package(
             ],
             sources: [
                 "MacDeliveryPolicyStore.swift",
+                "MacDeliveryTarget.swift",
                 "MacDiagnostics.swift",
                 "MacHistoryStore.swift",
                 "MacActiveCaptureRecovery.swift",

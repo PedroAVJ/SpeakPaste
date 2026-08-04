@@ -3,6 +3,88 @@ import AppKit
 import Carbon
 import Foundation
 
+/// A privacy-neutral snapshot of an editable Accessibility element. It stores
+/// structure and geometry, never the field's value or selected text.
+struct MacAccessibilityTargetFingerprint: Equatable, Sendable {
+    let role: String
+    let subrole: String?
+    let stableIdentifiers: Set<String>
+    let placeholder: String?
+    let frame: CGRect?
+
+    /// Chromium can replace an AX proxy while leaving the same editor focused.
+    /// A replacement is accepted only in the same window, with no intervening
+    /// user input, and with a strong structural or geometric match.
+    func safelyMatchesRebuilt(
+        _ other: MacAccessibilityTargetFingerprint,
+        sameWindow: Bool,
+        noInterveningUserInput: Bool
+    ) -> Bool {
+        guard sameWindow, noInterveningUserInput else { return false }
+        guard role == other.role, subrole == other.subrole else { return false }
+
+        if !stableIdentifiers.isEmpty,
+           !stableIdentifiers.isDisjoint(with: other.stableIdentifiers) {
+            return true
+        }
+
+        let placeholdersMatch = placeholder?.isEmpty == false
+            && placeholder == other.placeholder
+        guard placeholdersMatch || framesSubstantiallyOverlap(other) else {
+            return false
+        }
+        return framesSubstantiallyOverlap(other)
+    }
+
+    private func framesSubstantiallyOverlap(
+        _ other: MacAccessibilityTargetFingerprint
+    ) -> Bool {
+        guard let frame, let otherFrame = other.frame else { return false }
+        let smallerArea = min(frame.width * frame.height, otherFrame.width * otherFrame.height)
+        guard smallerArea > 0 else { return false }
+        let intersection = frame.intersection(otherFrame)
+        guard !intersection.isNull else { return false }
+        return (intersection.width * intersection.height) / smallerArea >= 0.85
+    }
+}
+
+/// Counts focus-changing user actions without observing their contents. Bare
+/// Command taps are flags-changed events and deliberately do not increment it.
+private final class MacUserInteractionTracker: @unchecked Sendable {
+    static let shared = MacUserInteractionTracker()
+
+    private let lock = NSLock()
+    private var generation: UInt64 = 0
+    private var monitor: Any?
+
+    private init() {
+        monitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [
+                .leftMouseDown,
+                .rightMouseDown,
+                .otherMouseDown,
+                .keyDown,
+                .scrollWheel,
+            ]
+        ) { [weak self] _ in
+            self?.recordInteraction()
+        }
+    }
+
+    var snapshot: UInt64? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard monitor != nil else { return nil }
+        return generation
+    }
+
+    private func recordInteraction() {
+        lock.lock()
+        generation &+= 1
+        lock.unlock()
+    }
+}
+
 /// Where a dictation is meant to land: the application that was frontmost when
 /// recording started, plus the exact element that held keyboard focus. Keeping
 /// the element — not just the process — is what lets SpeakPaste refuse to
@@ -20,6 +102,9 @@ struct MacDeliveryTarget {
     /// focused when the network request finishes.
     let precedingText: String?
     private let element: AXUIElement?
+    private let window: AXUIElement?
+    private let fingerprint: MacAccessibilityTargetFingerprint?
+    private let interactionGeneration: UInt64?
 
     init(
         processIdentifier: pid_t,
@@ -27,7 +112,10 @@ struct MacDeliveryTarget {
         bundleIdentifier: String? = nil,
         contextKeyterms: [String] = [],
         precedingText: String? = nil,
-        element: AXUIElement?
+        element: AXUIElement?,
+        window: AXUIElement? = nil,
+        fingerprint: MacAccessibilityTargetFingerprint? = nil,
+        interactionGeneration: UInt64? = nil
     ) {
         self.processIdentifier = processIdentifier
         self.applicationName = applicationName
@@ -35,6 +123,9 @@ struct MacDeliveryTarget {
         self.contextKeyterms = contextKeyterms
         self.precedingText = precedingText
         self.element = element
+        self.window = window
+        self.fingerprint = fingerprint
+        self.interactionGeneration = interactionGeneration
     }
 
     /// Captures the current destination. Returns nil when SpeakPaste itself is
@@ -63,7 +154,10 @@ struct MacDeliveryTarget {
                 )
             } ?? [] : [],
             precedingText: element.flatMap(MacAccessibility.textBeforeCursor(in:)),
-            element: element
+            element: element,
+            window: element.flatMap(MacAccessibility.window(of:)),
+            fingerprint: element.flatMap(MacAccessibility.targetFingerprint(of:)),
+            interactionGeneration: MacUserInteractionTracker.shared.snapshot
         )
     }
 
@@ -71,6 +165,22 @@ struct MacDeliveryTarget {
     /// accessibility support — Electron among them — often expose nothing, and
     /// the two cases must be treated differently.
     var hasElement: Bool { element != nil }
+
+    /// Whether two queued dictations were captured for the exact same field.
+    /// A process match alone is not identity: changing chats, browser tabs, or
+    /// form controls commonly keeps the same PID. Opaque captures deliberately
+    /// never compare equal because there is no AX object proving continuity.
+    func refersToSameElement(as other: MacDeliveryTarget) -> Bool {
+        guard processIdentifier == other.processIdentifier else { return false }
+        guard let element, let otherElement = other.element else { return false }
+        if CFEqual(element, otherElement) { return true }
+        return safelyMatchesRebuiltElement(
+            otherElement,
+            otherWindow: other.window,
+            otherFingerprint: other.fingerprint,
+            currentInteractionGeneration: other.interactionGeneration
+        )
+    }
 
     /// Revalidation for the explicit "Paste Here" action. Unlike unattended
     /// delivery, an opaque field is allowed when it exposed no AX element both
@@ -99,14 +209,43 @@ struct MacDeliveryTarget {
         else {
             return false
         }
-        return CFEqual(element, current)
+        if CFEqual(element, current) { return true }
+        return safelyMatchesRebuiltElement(
+            current,
+            otherWindow: MacAccessibility.window(of: current),
+            otherFingerprint: MacAccessibility.targetFingerprint(of: current),
+            currentInteractionGeneration: MacUserInteractionTracker.shared.snapshot
+        )
+    }
+
+    private func safelyMatchesRebuiltElement(
+        _ otherElement: AXUIElement,
+        otherWindow: AXUIElement?,
+        otherFingerprint: MacAccessibilityTargetFingerprint?,
+        currentInteractionGeneration: UInt64?
+    ) -> Bool {
+        guard let window, let otherWindow, CFEqual(window, otherWindow) else {
+            return false
+        }
+        guard
+            let interactionGeneration,
+            interactionGeneration == currentInteractionGeneration,
+            let fingerprint,
+            let otherFingerprint
+        else {
+            return false
+        }
+        return fingerprint.safelyMatchesRebuilt(
+            otherFingerprint,
+            sameWindow: true,
+            noInterveningUserInput: true
+        )
     }
 
     /// Whether it is safe to deliver *right now*. A process match alone is not
     /// enough: changing Slack chats or browser fields keeps the same PID while
-    /// changing the destination. Rebuilt accessibility objects are refused:
-    /// geometry and labels are not strong enough proof that this is still the
-    /// same chat, document, or form field.
+    /// changing the destination. A rebuilt Accessibility proxy is accepted
+    /// only with same-window structural continuity and no intervening input.
     @MainActor
     var canDeliverImmediately: Bool {
         NSWorkspace.shared.frontmostApplication?.processIdentifier == processIdentifier
@@ -114,10 +253,9 @@ struct MacDeliveryTarget {
             && MacAccessibility.focusedElementAcceptsText()
     }
 
-    /// Whether a transcript held earlier may now be delivered unattended.
-    /// Exact AX identity is required. "Same app plus a similar text field" is
-    /// deliberately not enough: that can paste a held dictation into the wrong
-    /// conversation after Chromium rebuilds its accessibility tree.
+    /// Whether a transcript held earlier may now be delivered unattended. A
+    /// direct AX identity or the same narrow rebuilt-proxy proof is required;
+    /// merely returning to the same app is never sufficient.
     @MainActor
     var canDeliverOnReturn: Bool {
         NSWorkspace.shared.frontmostApplication?.processIdentifier == processIdentifier
@@ -159,6 +297,34 @@ enum MacAccessibility {
         return role == (kAXTextFieldRole as String)
             || role == (kAXTextAreaRole as String)
             || role == (kAXComboBoxRole as String)
+    }
+
+    static func window(of element: AXUIElement) -> AXUIElement? {
+        elementAttribute(kAXWindowAttribute, of: element)
+    }
+
+    static func targetFingerprint(
+        of element: AXUIElement
+    ) -> MacAccessibilityTargetFingerprint? {
+        guard let role = stringAttribute(kAXRoleAttribute, of: element) else {
+            return nil
+        }
+        var stableIdentifiers = Set<String>()
+        if let identifier = nonemptyStringAttribute(kAXIdentifierAttribute, of: element) {
+            stableIdentifiers.insert("ax:\(identifier)")
+        }
+        if let identifier = nonemptyStringAttribute("AXDOMIdentifier", of: element) {
+            stableIdentifiers.insert("dom:\(identifier)")
+        }
+        let placeholder = nonemptyStringAttribute(kAXPlaceholderValueAttribute, of: element)
+            ?? nonemptyStringAttribute(kAXDescriptionAttribute, of: element)
+        return MacAccessibilityTargetFingerprint(
+            role: role,
+            subrole: stringAttribute(kAXSubroleAttribute, of: element),
+            stableIdentifiers: stableIdentifiers,
+            placeholder: placeholder,
+            frame: frame(of: element)
+        )
     }
 
     /// Browser and Electron password controls may expose an AX secure subrole
@@ -365,6 +531,69 @@ enum MacAccessibility {
         return (value as! CFArray) as? [AXUIElement] ?? []
     }
 
+    private static func elementAttribute(
+        _ attribute: String,
+        of element: AXUIElement
+    ) -> AXUIElement? {
+        var value: CFTypeRef?
+        guard
+            AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
+            let value,
+            CFGetTypeID(value) == AXUIElementGetTypeID()
+        else {
+            return nil
+        }
+        return (value as! AXUIElement)
+    }
+
+    private static func frame(of element: AXUIElement) -> CGRect? {
+        guard
+            let origin = pointAttribute(kAXPositionAttribute, of: element),
+            let size = sizeAttribute(kAXSizeAttribute, of: element)
+        else {
+            return nil
+        }
+        return CGRect(origin: origin, size: size)
+    }
+
+    private static func pointAttribute(
+        _ attribute: String,
+        of element: AXUIElement
+    ) -> CGPoint? {
+        var value: CFTypeRef?
+        guard
+            AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
+            let value,
+            CFGetTypeID(value) == AXValueGetTypeID()
+        else {
+            return nil
+        }
+        let axValue = value as! AXValue
+        guard AXValueGetType(axValue) == .cgPoint else { return nil }
+        var point = CGPoint.zero
+        guard AXValueGetValue(axValue, .cgPoint, &point) else { return nil }
+        return point
+    }
+
+    private static func sizeAttribute(
+        _ attribute: String,
+        of element: AXUIElement
+    ) -> CGSize? {
+        var value: CFTypeRef?
+        guard
+            AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
+            let value,
+            CFGetTypeID(value) == AXValueGetTypeID()
+        else {
+            return nil
+        }
+        let axValue = value as! AXValue
+        guard AXValueGetType(axValue) == .cgSize else { return nil }
+        var size = CGSize.zero
+        guard AXValueGetValue(axValue, .cgSize, &size) else { return nil }
+        return size
+    }
+
     private static func isEnabled(_ element: AXUIElement) -> Bool {
         var value: CFTypeRef?
         guard
@@ -443,5 +672,14 @@ enum MacAccessibility {
             return nil
         }
         return (value as! CFString) as String
+    }
+
+    private static func nonemptyStringAttribute(
+        _ attribute: String,
+        of element: AXUIElement
+    ) -> String? {
+        guard let value = stringAttribute(attribute, of: element) else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }
