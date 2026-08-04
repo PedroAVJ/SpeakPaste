@@ -116,6 +116,13 @@ final class MacDeliveryTargetingTests: XCTestCase {
                 explicitlyEditable: false
             )
         )
+        XCTAssertFalse(
+            MacAccessibility.roleAcceptsText(
+                "AXSlider",
+                explicitlyEditable: false,
+                valueIsSettable: true
+            )
+        )
     }
 
     func testInvokedMenuActionNeverFallsThroughToAnotherInsertionRoute() {

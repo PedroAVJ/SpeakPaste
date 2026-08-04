@@ -193,7 +193,9 @@ struct MacDeliveryTarget {
     func isSameUninterruptedOutputBoundary(as other: MacDeliveryTarget) -> Bool {
         guard
             processIdentifier == other.processIdentifier,
-            interactionGeneration == other.interactionGeneration,
+            let interactionGeneration,
+            let otherInteractionGeneration = other.interactionGeneration,
+            interactionGeneration == otherInteractionGeneration,
             let element,
             let otherElement = other.element
         else {
@@ -305,21 +307,27 @@ enum MacAccessibility {
 
     /// Pure role boundary kept separate so the deployment regression suite can
     /// cover native and Chromium-style editable ancestors without live UI.
-    static func roleAcceptsText(_ role: String?, explicitlyEditable: Bool) -> Bool {
-        explicitlyEditable
-            || role == (kAXTextFieldRole as String)
+    static func roleAcceptsText(
+        _ role: String?,
+        explicitlyEditable: Bool,
+        valueIsSettable: Bool? = nil
+    ) -> Bool {
+        if explicitlyEditable { return true }
+        let isKnownTextRole = role == (kAXTextFieldRole as String)
             || role == (kAXTextAreaRole as String)
             || role == (kAXComboBoxRole as String)
+        guard isKnownTextRole else { return false }
+        return valueIsSettable != false
     }
 
     private static func elementAcceptsText(_ element: AXUIElement) -> Bool {
         guard isEnabled(element) else { return false }
-        let writable = booleanAttribute("AXEditable", of: element)
-            ?? valueIsSettable(element)
-        guard writable != false else { return false }
+        let editable = booleanAttribute("AXEditable", of: element)
+        guard editable != false else { return false }
         return roleAcceptsText(
             stringAttribute(kAXRoleAttribute, of: element),
-            explicitlyEditable: writable == true
+            explicitlyEditable: editable == true,
+            valueIsSettable: valueIsSettable(element)
         )
     }
 

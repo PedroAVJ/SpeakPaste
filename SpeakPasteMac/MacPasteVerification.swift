@@ -112,15 +112,18 @@ enum MacOutputContinuationPolicy {
         interactionGeneration: UInt64?,
         currentInteractionGeneration: UInt64?
     ) -> Bool {
-        guard sameElement else { return false }
-        return canContinueMultistepInsertion(
-            processIsCurrent: processIsCurrent,
-            currentIsWritable: currentIsWritable,
-            currentIsSecure: currentIsSecure,
-            sameElement: sameElement,
-            interactionGeneration: interactionGeneration,
-            currentInteractionGeneration: currentInteractionGeneration
-        )
+        guard
+            processIsCurrent,
+            currentIsWritable,
+            !currentIsSecure,
+            sameElement,
+            let interactionGeneration,
+            let currentInteractionGeneration,
+            interactionGeneration == currentInteractionGeneration
+        else {
+            return false
+        }
+        return true
     }
 }
 

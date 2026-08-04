@@ -174,6 +174,16 @@ final class MacOutputContinuationPolicyTests: XCTestCase {
                 currentInteractionGeneration: 8
             )
         )
+        XCTAssertFalse(
+            MacOutputContinuationPolicy.canSendFollowUpReturn(
+                processIsCurrent: true,
+                currentIsWritable: true,
+                currentIsSecure: false,
+                sameElement: true,
+                interactionGeneration: nil,
+                currentInteractionGeneration: nil
+            )
+        )
         XCTAssertTrue(
             MacOutputContinuationPolicy.canSendFollowUpReturn(
                 processIsCurrent: true,
