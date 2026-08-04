@@ -232,6 +232,13 @@ credentials, and distribution decisions that this source pass cannot make:
       shared `SpeakPaste/Assets.xcassets` catalog (used by both the iPhone and
       macOS targets). It should be full-bleed in the macOS squircle and legible
       at 16 px; direction is open until the name is chosen.
+- [ ] As part of the same branding pass, decide whether the menu bar item's
+      idle glyph stays a system SF Symbol (`waveform` today) or becomes a
+      custom monochrome template glyph matching the brand. The menu bar item
+      itself stays: it bootstraps login-item launches when no window opens and
+      is the persistent state surface after HUD cards time out. The non-idle
+      state symbols (recording, error, offline, setup needed) keep their
+      system-semantic forms either way.
 - [ ] Choose the permanent macOS bundle identifier and Apple Developer team.
 - [ ] Configure the release entitlements, Developer ID signing, hardened runtime,
       versioning, notarization, and stapling; then repeat the physical acceptance
