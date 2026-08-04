@@ -490,6 +490,26 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
         }
     }
 
+    /// Asynchronous teardown receipt for interactive cancellation. Unlike the
+    /// fire-and-forget variant, this returns only after `stopRunning()` has
+    /// released the physical or Continuity microphone, so callers can pair a
+    /// closing cue and visual state with the real hardware lifecycle.
+    func disconnectAndWait() async {
+        await withCheckedContinuation { continuation in
+            captureQueue.async { [weak self] in
+                guard let self else {
+                    continuation.resume()
+                    return
+                }
+                if self.output?.isRecording == true {
+                    self.output?.stopRecording()
+                }
+                self.failSession(with: MacAudioRecorderError.connectionFailed)
+                continuation.resume()
+            }
+        }
+    }
+
     /// Used only at process/lifecycle boundaries where returning before
     /// `stopRunning()` would leave the iPhone's Continuity microphone owned by
     /// a process that is about to sleep or exit.

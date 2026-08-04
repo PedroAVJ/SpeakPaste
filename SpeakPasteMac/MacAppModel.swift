@@ -259,6 +259,7 @@ final class MacAppModel: ObservableObject {
     /// Dictations that have been spoken and are still being transcribed. The
     /// microphone is already free; these only await text.
     @Published private(set) var inFlightCount = 0
+    @Published private(set) var transcriptionWorkload = MacTranscriptionWorkload()
     /// Failed dictations whose audio is still on disk and can be resent.
     @Published private(set) var retryableFailures: [MacRetryableDictation] = []
     @Published private(set) var networkIsAvailable = true
@@ -935,7 +936,6 @@ final class MacAppModel: ObservableObject {
         switch phase {
         case .recording:
             stopMeter()
-            sounds.playRecordingStopped()
             phase = .finalizing
             Task { await stopAndTranscribe() }
         case .ready, .succeeded, .failed:
@@ -965,7 +965,6 @@ final class MacAppModel: ObservableObject {
         case .recording:
             pendingInputModeAfterFinalization = targetMode
             stopMeter()
-            sounds.playRecordingStopped()
             phase = .finalizing
             Task { await stopAndTranscribe() }
         case .connecting:
@@ -1737,6 +1736,15 @@ final class MacAppModel: ObservableObject {
 
         if phase == .connecting {
             cancelRecording()
+            let clock = ContinuousClock()
+            let deadline = clock.now.advanced(by: .seconds(12))
+            while phase == .finalizing, clock.now < deadline {
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+            guard phase != .finalizing else {
+                recoveryNotice = "SpeakPaste is still releasing the connecting microphone, so Quit was cancelled. Try again in a moment."
+                return false
+            }
             return await waitForFileImportStagingBeforeTermination()
         }
 
@@ -2124,6 +2132,9 @@ final class MacAppModel: ObservableObject {
             connectionLatency = nil
             let resumesCapture = settleInputModeAfterFinalization()
             if let salvaged = error as? MacAudioRecorderSalvagedFailure {
+                // This error is surfaced only after recorder teardown has
+                // completed, so the mirrored closing cue is truthful here.
+                sounds.playRecordingStopped()
                 recordingWarning = nil
                 automaticStopInProgress = false
                 let target = deliveryTarget
@@ -2152,6 +2163,10 @@ final class MacAppModel: ObservableObject {
             )
             return
         }
+        // `stop()` returns only after AVFoundation has released the capture
+        // session. Pair the opening cue with that actual lifecycle receipt,
+        // not with the user's request to stop.
+        sounds.playRecordingStopped()
         isMicrophoneConnected = false
         connectedDeviceID = nil
         connectionLatency = nil
@@ -2272,7 +2287,17 @@ final class MacAppModel: ObservableObject {
             sequence = nextSpeakSequence
             nextSpeakSequence += 1
         }
-        inFlightCount += 1
+        // A reconnect can claim the same durable recording while the failed
+        // request is still unwinding. Track network attempts, not record IDs,
+        // so the older defer cannot remove the newer retry from the HUD.
+        let workloadID = UUID()
+        var workload = transcriptionWorkload
+        _ = workload.start(
+            id: workloadID,
+            duration: recordingDuration
+        )
+        transcriptionWorkload = workload
+        inFlightCount = workload.activeCount
         Task { [weak self] in
             await self?.transcribe(
                 sequence: sequence,
@@ -2285,7 +2310,8 @@ final class MacAppModel: ObservableObject {
                 interruption: interruption,
                 isImport: isImport,
                 requiresManualOutput: requiresManualOutput,
-                networkGenerationAtRequestStart: networkGenerationAtRequestStart
+                networkGenerationAtRequestStart: networkGenerationAtRequestStart,
+                workloadID: workloadID
             )
         }
         return true
@@ -2307,9 +2333,15 @@ final class MacAppModel: ObservableObject {
         interruption: String?,
         isImport: Bool,
         requiresManualOutput: Bool,
-        networkGenerationAtRequestStart: UInt64
+        networkGenerationAtRequestStart: UInt64,
+        workloadID: UUID
     ) async {
-        defer { inFlightCount = max(0, inFlightCount - 1) }
+        defer {
+            var workload = transcriptionWorkload
+            _ = workload.finish(id: workloadID)
+            transcriptionWorkload = workload
+            inFlightCount = workload.activeCount
+        }
         do {
             guard let apiKey = resolvedAPIKey else {
                 throw ElevenLabsClientError.api(statusCode: 401, message: "ElevenLabs API key is missing.")
@@ -2711,29 +2743,44 @@ final class MacAppModel: ObservableObject {
     }
 
     /// Escape is the direct exit gesture: one press abandons connecting or the
-    /// active recording immediately without transcription.
+    /// active recording without transcription and begins hardware teardown.
     func requestRecordingCancellation() {
         guard phase == .recording || phase == .connecting else { return }
         cancelRecording()
     }
 
-    /// Abandons a recording in progress without transcribing it.
+    /// Abandons a recording in progress without transcribing it. The visual
+    /// release state stays visible until the recorder confirms that Continuity
+    /// is actually free; only then does the closing half of the sound pair fire.
     func cancelRecording() {
         guard phase == .recording || phase == .connecting else { return }
+        let shouldPlayReleaseCue = phase == .recording
         pendingInputModeAfterFinalization = nil
         captureRequestID = nil
         captureStartTask?.cancel()
         captureStartTask = nil
         stopMeter()
-        recorder.disconnect()
-        endRecordingActivity()
-        isMicrophoneConnected = false
-        connectedDeviceID = nil
-        connectionLatency = nil
         deliveryTarget = nil
         recordingWarning = nil
         automaticStopInProgress = false
-        phase = .ready
+        phase = .finalizing
+
+        Task { [weak self] in
+            guard let self else { return }
+            await self.recorder.disconnectAndWait()
+            if shouldPlayReleaseCue {
+                self.sounds.playRecordingStopped()
+            }
+            // A Command double-tap may arrive during this short release. Keep
+            // that sticky source choice, but cancellation must never resume a
+            // new recording automatically.
+            _ = self.settleInputModeAfterFinalization()
+            self.endRecordingActivity()
+            self.isMicrophoneConnected = false
+            self.connectedDeviceID = nil
+            self.connectionLatency = nil
+            self.phase = .ready
+        }
     }
 
     /// Delivers finished dictations strictly in spoken order, so a short second
@@ -2949,7 +2996,6 @@ final class MacAppModel: ObservableObject {
         var detail = delivery.detail
         if case let .held(reason) = delivery, let target = finished.target {
             restoreDeliveryEscrowPending(finished.deliveryEscrowID)
-            sounds.playHeld()
             hold(
                 finished.text,
                 for: target,
@@ -3932,7 +3978,6 @@ final class MacAppModel: ObservableObject {
                     self.automaticStopInProgress = true
                     self.recordingWarning = "20-minute limit reached — finishing this dictation"
                     self.stopMeter()
-                    self.sounds.playRecordingStopped()
                     self.phase = .finalizing
                     Task { await self.stopAndTranscribe() }
                 } else if
@@ -4004,7 +4049,6 @@ final class MacAppModel: ObservableObject {
         automaticStopInProgress = true
         recordingWarning = message
         stopMeter()
-        sounds.playRecordingStopped()
         phase = .finalizing
         Task { await stopAndTranscribe(interruption: message) }
     }

@@ -150,19 +150,22 @@ private struct MacAudioHUDSettings: View {
                     Text("Right").tag(MacHUDPlacement.right)
                 }
                 .disabled(!model.hudEnabled)
-                Text("A small click-through Liquid Glass indicator shows Connecting, Listening, Releasing, or Transcribing, then disappears when the work finishes. It has no buttons and never takes focus. Errors, offline status, and waiting text appear in the main window and the menu bar. Top keeps it clear of the text fields most apps put at the bottom of the window.")
+                Text("A wordless, click-through Liquid Glass capsule spring-morphs between a connecting pulse, your live voice waveform, release, and estimated transcription progress, then disappears. A stalled transcription cannot keep it onscreen for more than 90 seconds. It has no buttons and never takes focus; the main window and menu bar remain authoritative for errors, offline status, and waiting text. Top keeps it clear of the text fields most apps put at the bottom of the window.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
             Section("Sounds") {
                 Toggle(
-                    "Play sounds for start, stop, delivery, and errors",
+                    "Play capture, delivery, and error sounds",
                     isOn: Binding(
                         get: { model.sounds.isEnabled },
                         set: { model.sounds.isEnabled = $0 }
                     )
                 )
+                Text("Preloaded rising and falling cues mirror capture going live and being released. Related quiet tones are reserved for verified delivery and gentle errors.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Shortcuts") {

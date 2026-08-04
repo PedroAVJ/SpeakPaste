@@ -64,14 +64,25 @@ TCC grants, or Application Support.
       active display is chosen correctly, the pill stays click-through, and no
       state clips at normal accessibility text sizes.
 - [ ] Exercise Connecting, Listening, Releasing, and Transcribing. Confirm the
-      native Liquid Glass surface is used on macOS 26, the live meter/timer
-      appear only while listening, and a restrained activity indicator appears
-      only while transcribing. The indicator must hide at idle and after the
-      last in-flight transcription, success, errors, and offline state. Start a
-      new capture while an earlier request is transcribing and confirm the
-      capture state wins. Hold the model in Connecting and Releasing and confirm
-      the indicator hides no later than 20 and 15 seconds after those phases
-      began, respectively.
+      native Liquid Glass surface is used on macOS 26 and remains one wordless
+      capsule throughout. Confirm the listening waveform follows the real voice
+      level with fast attack and slower release, state changes spring-morph, and
+      transcription uses directional heuristic progress that never reaches
+      completion before the request does. The indicator must hide at idle and
+      after the last in-flight transcription, success, errors, and offline
+      state; it must never become an error notification. Start a new capture
+      while an earlier request is transcribing and confirm the capture state
+      wins. Hold the model in Connecting and Releasing and confirm the indicator
+      hides no later than 20 and 15 seconds after those phases began,
+      respectively. Keep one request transcribing and confirm the capsule hides
+      after 90 continuously visible seconds while the dashboard and menu bar
+      continue to report the real work state. With Reduce Motion enabled,
+      confirm movement becomes a restrained crossfade without losing state
+      clarity.
+- [ ] On MacBook speakers at low volume, confirm capture-live and release are a
+      short, coherent rising/falling pair with no load delay. Confirm delivery
+      plays only after verified insertion, errors use the related gentle cue,
+      and disabling Sounds silences the complete family.
 - [ ] Verify every vocabulary action: add, search, edit Save/Cancel, paste-list
       Save/Cancel, file-picker Cancel, and remove confirm/Cancel. Check the
       1,000-term ceiling, fewer-than-50-character and five-word limits, forbidden

@@ -78,6 +78,7 @@ let package = Package(
                 "MacSettingsView.swift",
                 "MacSoundEffects.swift",
                 "MacStatusHUD.swift",
+                "Sounds",
                 "SpeakPasteMacApp.swift",
             ],
             sources: [
@@ -92,6 +93,7 @@ let package = Package(
                 "MacHUDActivity.swift",
                 "MacInputMode.swift",
                 "MacSingleInstanceLease.swift",
+                "MacTranscriptionWorkload.swift",
                 "MacTranscriptPostProcessor.swift",
                 "MacVocabularyStore.swift",
             ]

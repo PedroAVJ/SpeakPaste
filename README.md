@@ -37,18 +37,21 @@ The Xcode project contains four product targets:
 6. Click the record control or tap the **right Command (⌘)** key once. A single
    tap starts or stops dictation after the system double-tap window. The left ⌘
    is deliberately untouched, so ⌘C, ⌘V, and ⌘Tab keep their normal behavior.
-7. The click-through Liquid Glass indicator reads **Connecting** while the
-   source is waking, **Listening** when audio is live, **Releasing** while the
-   microphone is being freed, and **Transcribing** while spoken audio still
-   awaits text. It disappears when that work finishes; success, errors, model
-   details, and offline notices stay in the app instead of becoming floating
-   notifications.
+7. The click-through Liquid Glass indicator is a wordless capsule that morphs
+   with spring motion: a quiet pulse while the source wakes, a waveform driven
+   by your voice while listening, a release glint, then directional progress
+   while transcribing. That progress is an estimate and stops short of claiming
+   completion. The capsule dismisses itself when the work finishes, or after 90
+   seconds if transcription stalls; success, errors, model details, and offline
+   notices stay in the app instead of becoming floating notifications.
 8. Double-tap right Command to switch between **Mac** and **iPhone** input. The
    choice is sticky. During a recording, SpeakPaste first finalizes and releases
    the current source, queues that segment, and then starts a new ordered segment
    on the other source.
 9. Tap right Command once to stop and transcribe, or press **Escape** once to
-   cancel immediately and discard the active segment.
+   cancel immediately and discard the active segment. Quiet, preloaded sounds
+   pair a rising capture-live cue with its falling release mirror; related tones
+   are reserved for verified delivery and gentle errors.
 
 You do not have to wait at the keyboard. If the field you dictated into is no
 longer focused when the transcript arrives, SpeakPaste holds the text instead of
@@ -59,9 +62,10 @@ started — never merely the same application.
 
 Stopping ends the Continuity session before transcription starts, allowing
 macOS to dismiss its system-owned capture surface on the iPhone. Each new
-dictation reconnects and may briefly show **Connecting** or play the connection
-sound again. Automatic paste and the global shortcut require macOS Accessibility
-permission; without it, the transcript remains on the clipboard.
+dictation reconnects and may briefly show the capsule's connecting pulse before
+the capture-live cue confirms that audio is ready. Automatic paste and the
+global shortcut require macOS Accessibility permission; without it, the
+transcript remains on the clipboard.
 
 You can also build the macOS target from Terminal:
 
@@ -266,15 +270,17 @@ sending sensitive audio.
 
 ## Development status
 
-The macOS target builds with local ad-hoc signing. Its floating Liquid Glass
-indicator is a compact, declarative view of **Connecting**, **Listening**,
-**Releasing**, and **Transcribing**, with the active Mac/iPhone source plus a
-live level and timer only while listening. It is click-through, has no controls,
-disappears after the last active capture or transcription finishes, and never
-presents results, offline notices, or errors. A stuck Connecting indicator is
-capped at 20 seconds and Releasing at 15 seconds. Connecting normally stays
-visible until the microphone proves it
-is delivering a steady sample stream, so
+The macOS target builds with local ad-hoc signing. Its floating indicator is one
+wordless, click-through Liquid Glass capsule that spring-morphs through
+connecting, listening, releasing, and transcribing. Listening uses a real voice
+waveform; transcription uses directional heuristic progress that remains below
+completion until the request actually finishes. The capsule has no controls,
+dismisses after the last active capture or transcription, and never presents
+results, offline notices, or errors. A continuously transcribing capsule is
+capped at 90 seconds so a stalled request cannot pin it onscreen; the dashboard
+and menu bar remain authoritative. A stuck connecting indicator is capped at 20
+seconds and releasing at 15 seconds. Connecting normally stays visible until
+the microphone proves it is delivering a steady sample stream, so
 file recording does not begin inside the Continuity wake-up gap; if macOS
 refuses the monitoring tap that proves liveness, the connection fails loudly
 instead of recording unguarded.
@@ -287,8 +293,10 @@ control surface. One bare right-Command tap starts or stops; two taps switch the
 persistent Mac/iPhone input mode. A switch during live capture safely finalizes
 the current segment, releases its hardware, then resumes as the next ordered
 segment on the target source. One Escape cancels connecting or recording
-immediately. All normal builds that own SpeakPaste's shared local stores use one
-product-wide process lease,
+immediately. Its preloaded sound family uses mirrored rising capture-live and
+falling release cues, with related restrained tones for verified delivery and
+gentle errors. All normal builds that own SpeakPaste's shared local stores use
+one product-wide process lease,
 independent of bundle identifier; a secondary launch exits without initializing
 app data. While the microphone is recording, SpeakPaste prevents idle display
 and system sleep, and VoiceOver announces the consequential capture phases.
