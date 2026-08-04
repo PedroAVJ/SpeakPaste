@@ -32,6 +32,7 @@ final class KeyboardModel: ObservableObject {
     @Published var hasFullAccess = false
     @Published private(set) var localError: String?
     @Published private(set) var recentlyInserted = false
+    @Published private(set) var isPreparingHost = true
 
     private let store: SharedDictationStore
     private let resolveHostApplication: () -> HostApplicationResolution
@@ -73,6 +74,11 @@ final class KeyboardModel: ObservableObject {
 
     var isStarting: Bool {
         snapshot.phase == .starting || snapshot.phase == .launching
+    }
+    var startingStatusText: String {
+        return snapshot.phase == .launching
+            ? "Opening SpeakPaste…"
+            : "Starting microphone…"
     }
     var isRecording: Bool { snapshot.phase == .recording }
     var isTranscribing: Bool { snapshot.phase == .transcribing }
@@ -124,9 +130,13 @@ final class KeyboardModel: ObservableObject {
         pollingStartedAt = nil
     }
 
+    func setHostPreparationInProgress(_ isInProgress: Bool) {
+        isPreparingHost = isInProgress
+    }
+
     func startDictation() {
         localError = nil
-        guard isIdle else { return }
+        guard isIdle, !isPreparingHost else { return }
         guard hasFullAccess else {
             localError = "Enable Allow Full Access for SpeakPaste in Keyboard Settings."
             return

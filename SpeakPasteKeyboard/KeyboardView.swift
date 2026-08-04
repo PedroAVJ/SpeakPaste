@@ -654,8 +654,14 @@ struct KeyboardView: View {
 
             Button(action: model.startDictation) {
                 HStack(spacing: 5) {
-                    Text("Start")
-                    Image(systemName: "waveform")
+                    Text(model.isPreparingHost ? "Preparing" : "Start")
+                    if model.isPreparingHost {
+                        ProgressView()
+                            .controlSize(.mini)
+                            .tint(.white)
+                    } else {
+                        Image(systemName: "waveform")
+                    }
                 }
             }
             .buttonStyle(
@@ -665,7 +671,12 @@ struct KeyboardView: View {
                 )
             )
             .frame(height: 32)
-            .accessibilityLabel("Start dictation")
+            .disabled(model.isPreparingHost)
+            .accessibilityLabel(
+                model.isPreparingHost
+                    ? "Preparing dictation"
+                    : "Start dictation"
+            )
             .accessibilityHint(
                 "Briefly opens SpeakPaste, starts recording, and returns here."
             )
@@ -903,11 +914,7 @@ struct KeyboardView: View {
             ProgressView()
                 .tint(KBTheme.accent)
                 .controlSize(.large)
-            Text(
-                model.snapshot.phase == .launching
-                    ? "Opening SpeakPaste…"
-                    : "Starting microphone…"
-            )
+            Text(model.startingStatusText)
             .font(.headline)
             .foregroundStyle(KBTheme.ink)
             Text("This should only take a moment.")

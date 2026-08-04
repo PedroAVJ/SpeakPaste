@@ -6,6 +6,7 @@ import UIKit
 final class KeyboardViewController: UIInputViewController {
     private let hostResolver = HostApplicationResolver()
     private var hostingController: UIHostingController<KeyboardView>?
+    private var hostPrewarmTask: Task<Void, Never>?
 
     private lazy var model = KeyboardModel(
         resolveHostApplication: { [weak self] in
@@ -75,13 +76,33 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        // Ask the iOS 26.4+ keyboard arbiter to publish the current host while
-        // the extension is still embedded in it. The Start action repeats the
-        // refresh, but warming the cache here avoids depending on tap timing.
-        SPHostApplicationCaptureRefresh()
         applyKeyboardAppearance()
         model.hasFullAccess = hasFullAccess
+        model.setHostPreparationInProgress(true)
         model.startPolling()
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        // The iOS 26.4+ arbiter client is initialized lazily. Waiting until the
+        // keyboard is actually visible, then retrying without blocking UIKit,
+        // closes the first-use race exposed by an install or extension restart.
+        hostPrewarmTask?.cancel()
+        model.setHostPreparationInProgress(true)
+        hostResolver.beginAppearance(for: self)
+        hostPrewarmTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let preparedCurrentAppearance = await self.hostResolver.prewarm(
+                for: self
+            )
+            guard
+                !Task.isCancelled,
+                preparedCurrentAppearance
+            else {
+                return
+            }
+            self.model.setHostPreparationInProgress(false)
+        }
     }
 
     override func textDidChange(_ textInput: UITextInput?) {
@@ -104,7 +125,13 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     override func viewWillDisappear(_ animated: Bool) {
+        hostPrewarmTask?.cancel()
+        hostPrewarmTask = nil
+        model.setHostPreparationInProgress(false)
         model.stopPolling()
+        // Never let one host's process-local bundle leak into the next app.
+        // The exact bundle+PID record remains available in the App Group.
+        hostResolver.endAppearance()
         super.viewWillDisappear(animated)
     }
 

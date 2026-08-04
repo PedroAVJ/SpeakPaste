@@ -2,6 +2,193 @@ import XCTest
 @testable import SpeakPaste
 
 final class SharedDictationStoreTests: XCTestCase {
+    func testHostCaptureBaselinePreservesCallbacksAfterCleanHandoff() {
+        XCTAssertEqual(
+            HostApplicationCapturePolicy.baselineGeneration(
+                currentGeneration: 1,
+                cleanBoundaryGeneration: nil,
+                processHasEstablishedAppearance: false
+            ),
+            0
+        )
+        XCTAssertEqual(
+            HostApplicationCapturePolicy.baselineGeneration(
+                currentGeneration: 3,
+                cleanBoundaryGeneration: 2,
+                processHasEstablishedAppearance: true
+            ),
+            2
+        )
+        XCTAssertEqual(
+            HostApplicationCapturePolicy.baselineGeneration(
+                currentGeneration: 3,
+                cleanBoundaryGeneration: nil,
+                processHasEstablishedAppearance: true
+            ),
+            3
+        )
+    }
+
+    func testHostCapturePolicyRequiresNewGenerationAndStableProcess() {
+        XCTAssertTrue(
+            HostApplicationCapturePolicy.accepts(
+                candidateBundleIdentifier: "net.whatsapp.WhatsApp",
+                captureGeneration: 12,
+                appearanceBaselineGeneration: 11,
+                expectedProcessIdentifier: 474,
+                currentProcessIdentifier: 474,
+                previousIdentity: nil
+            )
+        )
+        XCTAssertFalse(
+            HostApplicationCapturePolicy.accepts(
+                candidateBundleIdentifier: "net.whatsapp.WhatsApp",
+                captureGeneration: 11,
+                appearanceBaselineGeneration: 11,
+                expectedProcessIdentifier: 474,
+                currentProcessIdentifier: 474,
+                previousIdentity: nil
+            )
+        )
+        XCTAssertFalse(
+            HostApplicationCapturePolicy.accepts(
+                candidateBundleIdentifier: "net.whatsapp.WhatsApp",
+                captureGeneration: 12,
+                appearanceBaselineGeneration: 11,
+                expectedProcessIdentifier: 474,
+                currentProcessIdentifier: 475,
+                previousIdentity: nil
+            )
+        )
+        XCTAssertFalse(
+            HostApplicationCapturePolicy.accepts(
+                candidateBundleIdentifier: "net.whatsapp.WhatsApp",
+                captureGeneration: 12,
+                appearanceBaselineGeneration: 11,
+                expectedProcessIdentifier: nil,
+                currentProcessIdentifier: nil,
+                previousIdentity: nil
+            )
+        )
+    }
+
+    func testHostCapturePolicyQuarantinesLatePreviousHostCallback() {
+        let now = Date(timeIntervalSince1970: 30_000)
+        let previousNotes = HostApplicationIdentity(
+            bundleIdentifier: "com.apple.mobilenotes",
+            processIdentifier: 801,
+            capturedAt: now.addingTimeInterval(-1)
+        )
+
+        XCTAssertFalse(
+            HostApplicationCapturePolicy.accepts(
+                candidateBundleIdentifier: "com.apple.mobilenotes",
+                captureGeneration: 22,
+                appearanceBaselineGeneration: 21,
+                expectedProcessIdentifier: 474,
+                currentProcessIdentifier: 474,
+                previousIdentity: previousNotes
+            )
+        )
+        XCTAssertTrue(
+            HostApplicationCapturePolicy.accepts(
+                candidateBundleIdentifier: "net.whatsapp.WhatsApp",
+                captureGeneration: 23,
+                appearanceBaselineGeneration: 21,
+                expectedProcessIdentifier: 474,
+                currentProcessIdentifier: 474,
+                previousIdentity: previousNotes
+            )
+        )
+    }
+
+    func testHostIdentityCacheRequiresExactLiveProcess() throws {
+        let suiteName = "HostApplicationIdentityCache-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let cache = HostApplicationIdentityCache(suiteName: suiteName)
+        let capturedAt = Date(timeIntervalSince1970: 10_000)
+
+        cache.save(
+            bundleIdentifier: "net.whatsapp.WhatsApp",
+            processIdentifier: 474,
+            capturedAt: capturedAt
+        )
+
+        XCTAssertEqual(
+            cache.matchingIdentity(
+                processIdentifier: 474,
+                now: capturedAt.addingTimeInterval(60)
+            )?.bundleIdentifier,
+            "net.whatsapp.WhatsApp"
+        )
+        XCTAssertNil(
+            cache.matchingIdentity(
+                processIdentifier: 475,
+                now: capturedAt.addingTimeInterval(60)
+            )
+        )
+        XCTAssertNil(
+            cache.matchingIdentity(
+                processIdentifier: nil,
+                now: capturedAt.addingTimeInterval(60)
+            )
+        )
+    }
+
+    func testHostIdentityCacheRejectsExpiredAndFutureRecords() throws {
+        let suiteName = "HostApplicationIdentityCache-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let cache = HostApplicationIdentityCache(suiteName: suiteName)
+        let capturedAt = Date(timeIntervalSince1970: 20_000)
+
+        cache.save(
+            bundleIdentifier: "com.apple.mobilenotes",
+            processIdentifier: 801,
+            capturedAt: capturedAt
+        )
+
+        XCTAssertNil(
+            cache.matchingIdentity(
+                processIdentifier: 801,
+                now: capturedAt.addingTimeInterval(
+                    HostApplicationIdentityCache.defaultMaximumAge + 1
+                )
+            )
+        )
+        XCTAssertNil(
+            cache.matchingIdentity(
+                processIdentifier: 801,
+                now: capturedAt.addingTimeInterval(-6)
+            )
+        )
+    }
+
+    func testHostIdentityCacheReplacesAndClearsRecord() throws {
+        let suiteName = "HostApplicationIdentityCache-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let cache = HostApplicationIdentityCache(suiteName: suiteName)
+
+        cache.save(
+            bundleIdentifier: "com.apple.mobilenotes",
+            processIdentifier: 700
+        )
+        cache.save(
+            bundleIdentifier: "net.whatsapp.WhatsApp",
+            processIdentifier: 701
+        )
+
+        XCTAssertNil(cache.matchingIdentity(processIdentifier: 700))
+        XCTAssertEqual(
+            cache.matchingIdentity(processIdentifier: 701)?.bundleIdentifier,
+            "net.whatsapp.WhatsApp"
+        )
+        cache.clear()
+        XCTAssertNil(cache.load())
+    }
+
     @MainActor
     func testWisprStyleCatalogUsesStaticHostURLs() throws {
         let notes = try XCTUnwrap(

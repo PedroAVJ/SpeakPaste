@@ -244,11 +244,24 @@ implements the same observable shape:
    `queue_keyboardChanged:onComplete:` callback.
 3. It reads the callback object's `_sourceBundleIdentifier`, rejects system
    brokers and SpeakPaste itself, then caches the host bundle identifier.
-4. The keyboard writes that identifier to the App Group before opening the
-   containing app.
-5. The containing app maps only supported bundle identifiers to the URL schemes
+4. After the keyboard is visible, it retries the lazily initialized arbiter for
+   a bounded interval instead of treating one early `nil` as final. The Start
+   control is briefly disabled while this preflight runs, so the eventual tap
+   synchronously resolves and creates one session, then initiates one launch
+   task without waiting on host detection.
+5. A successful capture is persisted as an exact bundle identifier, host PID,
+   and timestamp in the App Group. A later extension process may reuse it only
+   as the last fallback, for at most 60 seconds, while the PID still matches; a
+   bundle without the matching PID is never trusted. Process-local capture is
+   accepted from the first process-load focus callback or when its generation
+   postdates the prior host's clean invalidation boundary and the new host PID
+   stayed stable. A previous host's bundle is quarantined when the PID changes,
+   and process-local capture is invalidated when the keyboard leaves its host.
+6. The keyboard writes the resolved identifier to the shared session before
+   opening the containing app.
+7. The containing app maps only supported bundle identifiers to the URL schemes
    declared in its property list and uses `UIApplication.open`.
-6. A missing host, an unsupported host, an unavailable scheme, or a failed open
+8. A missing host, an unsupported host, an unavailable scheme, or a failed open
    keeps recording alive and shows the manual home-bar swipe.
 
 The host-capture technique is adapted from the MIT-licensed
@@ -300,6 +313,10 @@ the phone:
   **Verified on iPhone 15/iOS 26.5.2.**
 - Notes: a second launch without the one-time explanation. **Verified.**
 - At least one third-party host such as ChatGPT or WhatsApp.
+- The first third-party attempt immediately after installing a build or
+  restarting the keyboard extension; it must not depend on a warmed process.
+- Switching from Notes to that third-party host in the same keyboard process;
+  the persisted PID guard must prevent a stale Notes return.
 - Microphone permission denied, then enabled.
 - Full Access disabled.
 - Cancel while recording.

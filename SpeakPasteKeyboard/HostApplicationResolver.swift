@@ -18,11 +18,144 @@ private struct KeyboardArbiterResolution {
     let attempts: [String]
 }
 
-struct HostApplicationResolver {
-    @MainActor
-    func resolve(for controller: UIInputViewController) -> HostApplicationResolution {
+@MainActor
+final class HostApplicationResolver {
+    private struct Appearance: Equatable {
+        let identifier: UUID
+        let processIdentifier: Int32?
+        let baselineGeneration: UInt64
+        let previousIdentity: HostApplicationIdentity?
+    }
+
+    private static var processHasEstablishedAppearance = false
+    private static var cleanBoundaryGeneration: UInt64?
+
+    private let identityCache: HostApplicationIdentityCache
+    private let arbiterRetryCount: Int
+    private let arbiterRetryDelay: Duration
+    private var appearance: Appearance?
+    private var lastAcceptedIdentity: HostApplicationIdentity?
+
+    init(
+        identityCache: HostApplicationIdentityCache =
+            HostApplicationIdentityCache(),
+        arbiterRetryCount: Int = 20,
+        arbiterRetryDelay: Duration = .milliseconds(75)
+    ) {
+        self.identityCache = identityCache
+        self.arbiterRetryCount = max(1, arbiterRetryCount)
+        self.arbiterRetryDelay = arbiterRetryDelay
+        lastAcceptedIdentity = identityCache.load()
+    }
+
+    /// Establishes a trust boundary for this visible keyboard. The first
+    /// appearance in an extension process preserves the callback captured by
+    /// the Objective-C +load hook. Later appearances begin after the previous
+    /// invalidation boundary and quarantine that host's bundle on a new PID.
+    func beginAppearance(for controller: UIInputViewController) {
+        let generation = SPHostApplicationCaptureGeneration()
+        let cleanBoundaryGeneration = Self.cleanBoundaryGeneration
+        let baselineGeneration = HostApplicationCapturePolicy.baselineGeneration(
+            currentGeneration: generation,
+            cleanBoundaryGeneration: cleanBoundaryGeneration,
+            processHasEstablishedAppearance: Self.processHasEstablishedAppearance
+        )
+        if cleanBoundaryGeneration != nil {
+            // Preserve a callback for the next host that arrived after the
+            // prior controller cleanly invalidated its own host.
+            Self.cleanBoundaryGeneration = nil
+        }
+        // The first process-load callback belongs to this first host. A
+        // restart inside one appearance has no clean handoff, so its current
+        // generation becomes the new boundary and UIKit is pinged again.
+        Self.processHasEstablishedAppearance = true
+        appearance = Appearance(
+            identifier: UUID(),
+            processIdentifier: hostProcessIdentifier(for: controller),
+            baselineGeneration: baselineGeneration,
+            previousIdentity: lastAcceptedIdentity
+        )
+    }
+
+    func endAppearance() {
+        appearance = nil
+        Self.cleanBoundaryGeneration = SPHostApplicationCaptureInvalidate()
+    }
+
+    /// Warm the iOS 26.4+ arbiter only after the controller is visible. The
+    /// shared client is lazy on a cold extension process, so one early ping in
+    /// `viewWillAppear` is not sufficient.
+    func prewarm(for controller: UIInputViewController) async -> Bool {
+        while !Task.isCancelled {
+            let currentAppearance = ensureAppearance(for: controller)
+            if await prewarm(currentAppearance, for: controller) {
+                return true
+            }
+            guard !Task.isCancelled else { return false }
+            // The PID or lifecycle token changed while UIKit initialized the
+            // arbiter. Establish a new boundary and run the full window again.
+            beginAppearance(for: controller)
+        }
+        return false
+    }
+
+    private func prewarm(
+        _ currentAppearance: Appearance,
+        for controller: UIInputViewController
+    ) async -> Bool {
+        for attempt in 0...arbiterRetryCount {
+            guard
+                !Task.isCancelled,
+                appearanceIsCurrent(currentAppearance, for: controller)
+            else {
+                return false
+            }
+
+            let snapshot = hostCaptureSnapshot()
+            if let identifier = freshCapturedIdentifier(
+                snapshot,
+                for: currentAppearance,
+                controller: controller
+            ) {
+                persistIdentity(
+                    identifier,
+                    processIdentifier: currentAppearance.processIdentifier
+                )
+                return true
+            }
+
+            guard attempt < arbiterRetryCount else {
+                return appearanceIsCurrent(
+                    currentAppearance,
+                    for: controller
+                )
+            }
+            _ = SPHostApplicationCaptureRefresh()
+            do {
+                try await Task.sleep(for: arbiterRetryDelay)
+            } catch {
+                return false
+            }
+            guard
+                !Task.isCancelled,
+                appearanceIsCurrent(currentAppearance, for: controller)
+            else {
+                return false
+            }
+        }
+        return false
+    }
+
+    func resolve(
+        for controller: UIInputViewController
+    ) -> HostApplicationResolution {
         var attempts: [String] = []
-        var resolvedProcessIdentifier: Int32?
+        let currentAppearance = ensureAppearance(for: controller)
+        var resolvedProcessIdentifier = currentAppearance.processIdentifier
+        attempts.append(
+            "controller-host-pid:"
+                + (resolvedProcessIdentifier.map(String.init) ?? "<nil>")
+        )
 
         // Wispr's iOS 26.4+ shape is an early keyboard-arbiter capture, not a
         // late attempt to reverse-map a PID. The Objective-C +load hook runs
@@ -31,38 +164,91 @@ struct HostApplicationResolver {
         attempts.append(
             "arbiter-hook-status:\(SPHostApplicationCaptureStatus())"
         )
-        if let identifier = plausibleBundleIdentifier(
-            SPHostApplicationCaptureLastBundleIdentifier()
+        attempts.append(
+            "arbiter-hook-baseline:\(currentAppearance.baselineGeneration)"
+        )
+        var captureSnapshot = hostCaptureSnapshot()
+        attempts.append("arbiter-hook-generation:\(captureSnapshot.generation)")
+        if let identifier = freshCapturedIdentifier(
+            captureSnapshot,
+            for: currentAppearance,
+            controller: controller
         ) {
             attempts.append("arbiter-hook-cached:\(identifier)")
-            return resolution(identifier, attempts)
+            return resolution(
+                identifier,
+                attempts,
+                processIdentifier: resolvedProcessIdentifier
+            )
         }
-        attempts.append("arbiter-hook-cached:<nil>")
-        SPHostApplicationCaptureRefresh()
-        RunLoop.current.run(
-            until: Date(timeIntervalSinceNow: 0.05)
-        )
-        if let identifier = plausibleBundleIdentifier(
-            SPHostApplicationCaptureLastBundleIdentifier()
+        if let identifier = rejectedPreviousHostIdentifier(
+            captureSnapshot,
+            for: currentAppearance
         ) {
-            attempts.append("arbiter-hook-refreshed:\(identifier)")
-            return resolution(identifier, attempts)
+            attempts.append(
+                "arbiter-hook-rejected-previous-host:\(identifier)"
+            )
         }
-        attempts.append("arbiter-hook-refreshed:<nil>")
+        attempts.append("arbiter-hook-cached:<nil-or-stale>")
+
+        let didPing = SPHostApplicationCaptureRefresh()
+        attempts.append("arbiter-hook-refresh:\(didPing)")
+        captureSnapshot = hostCaptureSnapshot()
+        if let identifier = freshCapturedIdentifier(
+            captureSnapshot,
+            for: currentAppearance,
+            controller: controller
+        ) {
+            attempts.append(
+                "arbiter-hook-refreshed:\(identifier);generation=\(captureSnapshot.generation)"
+            )
+            return resolution(
+                identifier,
+                attempts,
+                processIdentifier: resolvedProcessIdentifier
+            )
+        }
+        if let identifier = rejectedPreviousHostIdentifier(
+            captureSnapshot,
+            for: currentAppearance
+        ) {
+            attempts.append(
+                "arbiter-hook-rejected-previous-host:\(identifier)"
+            )
+        }
+        attempts.append("arbiter-hook-refreshed:<nil-or-stale>")
+
+        guard appearanceIsCurrent(currentAppearance, for: controller) else {
+            attempts.append("keyboard-appearance:changed")
+            return resolution(
+                nil,
+                attempts,
+                processIdentifier: nil,
+                shouldPersistIdentity: false
+            )
+        }
 
         let arbiterResolution = keyboardArbiterResolution(for: controller)
         attempts.append(contentsOf: arbiterResolution.attempts)
         if let identifier = arbiterResolution.bundleIdentifier {
-            return resolution(identifier, attempts)
+            return resolution(
+                identifier,
+                attempts,
+                processIdentifier: resolvedProcessIdentifier
+            )
         }
 
         let legacyValue = legacyBundleIdentifier(for: controller)
         attempts.append("controller-legacy:\(diagnosticValue(legacyValue))")
         if let identifier = knownBundleIdentifier(exactValue: legacyValue) {
-            return resolution(identifier, attempts)
+            return resolution(
+                identifier,
+                attempts,
+                processIdentifier: resolvedProcessIdentifier
+            )
         }
 
-        if let processID = hostProcessIdentifier(for: controller) {
+        if let processID = resolvedProcessIdentifier {
             resolvedProcessIdentifier = processID
             if
                 let processValue = bundleIdentifier(forProcessID: processID),
@@ -92,14 +278,18 @@ struct HostApplicationResolver {
                 )
             }
         } else {
-            attempts.append("controller-host-pid:<nil>")
+            attempts.append("controller-host-path:<nil>")
         }
 
         let environment = ProcessInfo.processInfo.environment
         let environmentValue = environment["XPCExtensionHostBundleIdentifier"]
         attempts.append("environment-host:\(diagnosticValue(environmentValue))")
         if let identifier = knownBundleIdentifier(exactValue: environmentValue) {
-            return resolution(identifier, attempts)
+            return resolution(
+                identifier,
+                attempts,
+                processIdentifier: resolvedProcessIdentifier
+            )
         }
 
         let environmentPID = environment["XPCExtensionHostPID"].flatMap(Int32.init)
@@ -108,6 +298,8 @@ struct HostApplicationResolver {
         }
         if
             let environmentPID,
+            currentAppearance.processIdentifier == nil
+                || currentAppearance.processIdentifier == environmentPID,
             let processValue = bundleIdentifier(forProcessID: environmentPID),
             let identifier = knownBundleIdentifier(exactValue: processValue)
         {
@@ -137,7 +329,11 @@ struct HostApplicationResolver {
                     "\(candidate.label).\(selectorName):\(diagnosticValue(value))"
                 )
                 if let identifier = knownBundleIdentifier(exactValue: value) {
-                    return resolution(identifier, attempts)
+                    return resolution(
+                        identifier,
+                        attempts,
+                        processIdentifier: resolvedProcessIdentifier
+                    )
                 }
             }
 
@@ -147,7 +343,9 @@ struct HostApplicationResolver {
                         selectorName: selectorName,
                         from: candidate.object
                     ),
-                    processID > 0
+                    processID > 0,
+                    currentAppearance.processIdentifier == nil
+                        || currentAppearance.processIdentifier == processID
                 else {
                     continue
                 }
@@ -170,10 +368,56 @@ struct HostApplicationResolver {
 
         let frontmostValue = frontmostBundleIdentifier()
         attempts.append("springboard-frontmost:\(diagnosticValue(frontmostValue))")
+        if let identifier = knownBundleIdentifier(exactValue: frontmostValue) {
+            return resolution(
+                identifier,
+                attempts,
+                processIdentifier: resolvedProcessIdentifier
+            )
+        }
+
+        guard appearanceIsCurrent(currentAppearance, for: controller) else {
+            attempts.append("durable-host-cache:appearance-changed")
+            return resolution(
+                nil,
+                attempts,
+                processIdentifier: nil,
+                shouldPersistIdentity: false
+            )
+        }
+
+        if
+            let cached = identityCache.matchingIdentity(
+                processIdentifier: currentAppearance.processIdentifier
+            ),
+            let identifier = plausibleBundleIdentifier(cached.bundleIdentifier)
+        {
+            attempts.append(
+                "durable-host-cache:\(identifier);pid=\(cached.processIdentifier)"
+            )
+            return resolution(
+                identifier,
+                attempts,
+                processIdentifier: currentAppearance.processIdentifier,
+                shouldPersistIdentity: false
+            )
+        }
+
+        if let cached = identityCache.load() {
+            attempts.append(
+                "durable-host-cache:rejected;cached-pid="
+                    + String(cached.processIdentifier)
+            )
+            identityCache.clear()
+            lastAcceptedIdentity = nil
+        } else {
+            attempts.append("durable-host-cache:<nil>")
+        }
         return resolution(
-            knownBundleIdentifier(exactValue: frontmostValue),
+            nil,
             attempts,
-            processIdentifier: resolvedProcessIdentifier
+            processIdentifier: currentAppearance.processIdentifier,
+            shouldPersistIdentity: false
         )
     }
 
@@ -739,11 +983,96 @@ struct HostApplicationResolver {
         }
     }
 
+    private func ensureAppearance(
+        for controller: UIInputViewController
+    ) -> Appearance {
+        let currentProcessIdentifier = hostProcessIdentifier(for: controller)
+        if
+            let appearance,
+            appearance.processIdentifier == currentProcessIdentifier
+        {
+            return appearance
+        }
+
+        beginAppearance(for: controller)
+        // `beginAppearance` always installs a token synchronously.
+        return appearance!
+    }
+
+    private func appearanceIsCurrent(
+        _ expected: Appearance,
+        for controller: UIInputViewController
+    ) -> Bool {
+        appearance?.identifier == expected.identifier
+            && hostProcessIdentifier(for: controller)
+                == expected.processIdentifier
+    }
+
+    private func hostCaptureSnapshot() -> (
+        bundleIdentifier: String?,
+        generation: UInt64
+    ) {
+        var generation: UInt64 = 0
+        let bundleIdentifier = SPHostApplicationCaptureCopySnapshot(&generation)
+        return (bundleIdentifier, generation)
+    }
+
+    private func freshCapturedIdentifier(
+        _ snapshot: (bundleIdentifier: String?, generation: UInt64),
+        for expected: Appearance,
+        controller: UIInputViewController
+    ) -> String? {
+        guard
+            appearance?.identifier == expected.identifier,
+            let identifier = plausibleBundleIdentifier(
+                snapshot.bundleIdentifier
+            ),
+            HostApplicationCapturePolicy.accepts(
+                candidateBundleIdentifier: identifier,
+                captureGeneration: snapshot.generation,
+                appearanceBaselineGeneration: expected.baselineGeneration,
+                expectedProcessIdentifier: expected.processIdentifier,
+                currentProcessIdentifier: hostProcessIdentifier(for: controller),
+                previousIdentity: expected.previousIdentity
+            )
+        else {
+            return nil
+        }
+        return identifier
+    }
+
+    private func rejectedPreviousHostIdentifier(
+        _ snapshot: (bundleIdentifier: String?, generation: UInt64),
+        for expected: Appearance
+    ) -> String? {
+        guard
+            let processIdentifier = expected.processIdentifier,
+            let identifier = plausibleBundleIdentifier(
+                snapshot.bundleIdentifier
+            ),
+            HostApplicationCapturePolicy.rejectsPreviousHost(
+                candidateBundleIdentifier: identifier,
+                expectedProcessIdentifier: processIdentifier,
+                previousIdentity: expected.previousIdentity
+            )
+        else {
+            return nil
+        }
+        return identifier
+    }
+
     private func resolution(
         _ bundleIdentifier: String?,
         _ attempts: [String],
-        processIdentifier: Int32? = nil
+        processIdentifier: Int32? = nil,
+        shouldPersistIdentity: Bool = true
     ) -> HostApplicationResolution {
+        if shouldPersistIdentity, let bundleIdentifier {
+            persistIdentity(
+                bundleIdentifier,
+                processIdentifier: processIdentifier
+            )
+        }
         let boundedAttempts: [String]
         if attempts.count <= 160 {
             boundedAttempts = attempts
@@ -757,6 +1086,30 @@ struct HostApplicationResolver {
             bundleIdentifier: bundleIdentifier,
             processIdentifier: processIdentifier,
             attempts: boundedAttempts
+        )
+    }
+
+    private func persistIdentity(
+        _ bundleIdentifier: String,
+        processIdentifier: Int32?
+    ) {
+        guard
+            let processIdentifier,
+            processIdentifier > 1,
+            let identifier = plausibleBundleIdentifier(bundleIdentifier)
+        else {
+            return
+        }
+        let capturedAt = Date()
+        lastAcceptedIdentity = HostApplicationIdentity(
+            bundleIdentifier: identifier,
+            processIdentifier: processIdentifier,
+            capturedAt: capturedAt
+        )
+        identityCache.save(
+            bundleIdentifier: identifier,
+            processIdentifier: processIdentifier,
+            capturedAt: capturedAt
         )
     }
 
@@ -821,14 +1174,20 @@ struct HostApplicationResolver {
     private func plausibleBundleIdentifier(_ value: String?) -> String? {
         guard let value else { return nil }
         let identifier = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowercased = identifier.lowercased()
         let hasBundleShape = identifier.contains(".")
             || identifier.caseInsensitiveCompare("pinterest") == .orderedSame
         guard
             hasBundleShape,
             !identifier.contains(" "),
+            !["<null>", "(null)", "null", "nil"].contains(lowercased),
+            lowercased != "com.apple.springboard",
+            lowercased != "com.apple.spotlight",
+            lowercased != "com.apple.uikitsystemapp",
+            !lowercased.hasPrefix("com.apple.inputmethod."),
             let ownIdentifier = Bundle.main.bundleIdentifier
         else {
-            return hasBundleShape ? identifier : nil
+            return nil
         }
         let containingIdentifier = ownIdentifier.hasSuffix(".Keyboard")
             ? String(ownIdentifier.dropLast(".Keyboard".count))

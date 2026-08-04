@@ -24,6 +24,7 @@ static NSString *const SPSourceBundleIdentifierKey =
 
 static os_unfair_lock SPHostCaptureLock = OS_UNFAIR_LOCK_INIT;
 static NSString *_Nullable SPHostCaptureBundleIdentifier;
+static uint64_t SPHostCaptureGeneration;
 static NSString *SPHostCaptureInstallStatus = @"not-installed";
 static IMP _Nullable SPOriginalKeyboardChangedImplementation;
 
@@ -77,6 +78,7 @@ static void SPCommitHostBundleIdentifier(NSString *_Nullable value) {
     if (!SPIsAcceptableHostBundleIdentifier(value)) return;
     os_unfair_lock_lock(&SPHostCaptureLock);
     SPHostCaptureBundleIdentifier = [value copy];
+    SPHostCaptureGeneration += 1;
     os_unfair_lock_unlock(&SPHostCaptureLock);
 }
 
@@ -184,22 +186,38 @@ static void SPInstallHostCapture(void) {
 @end
 
 NSString *_Nullable SPHostApplicationCaptureLastBundleIdentifier(void) {
+    return SPHostApplicationCaptureCopySnapshot(NULL);
+}
+
+NSString *_Nullable SPHostApplicationCaptureCopySnapshot(
+    uint64_t *_Nullable generation
+) {
     os_unfair_lock_lock(&SPHostCaptureLock);
     NSString *bundleIdentifier = [SPHostCaptureBundleIdentifier copy];
+    if (generation != NULL) {
+        *generation = SPHostCaptureGeneration;
+    }
     os_unfair_lock_unlock(&SPHostCaptureLock);
     return SPIsAcceptableHostBundleIdentifier(bundleIdentifier)
         ? bundleIdentifier
         : nil;
 }
 
-void SPHostApplicationCaptureRefresh(void) {
+uint64_t SPHostApplicationCaptureGeneration(void) {
+    os_unfair_lock_lock(&SPHostCaptureLock);
+    uint64_t generation = SPHostCaptureGeneration;
+    os_unfair_lock_unlock(&SPHostCaptureLock);
+    return generation;
+}
+
+BOOL SPHostApplicationCaptureRefresh(void) {
     if (@available(iOS 26.4, *)) {
         Class clientClass = NSClassFromString(SPArbiterClientClassName);
         SEL sharedClientSelector =
             NSSelectorFromString(SPSharedClientSelectorName);
         if (clientClass == Nil ||
             ![(id)clientClass respondsToSelector:sharedClientSelector]) {
-            return;
+            return NO;
         }
 
         id (*getClient)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
@@ -208,8 +226,19 @@ void SPHostApplicationCaptureRefresh(void) {
         if (client != nil && [client respondsToSelector:refreshSelector]) {
             void (*refresh)(id, SEL) = (void (*)(id, SEL))objc_msgSend;
             refresh(client, refreshSelector);
+            return YES;
         }
     }
+    return NO;
+}
+
+uint64_t SPHostApplicationCaptureInvalidate(void) {
+    os_unfair_lock_lock(&SPHostCaptureLock);
+    SPHostCaptureBundleIdentifier = nil;
+    SPHostCaptureGeneration += 1;
+    uint64_t generation = SPHostCaptureGeneration;
+    os_unfair_lock_unlock(&SPHostCaptureLock);
+    return generation;
 }
 
 NSString *SPHostApplicationCaptureStatus(void) {

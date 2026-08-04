@@ -26,6 +26,159 @@ enum SharedDictationConstants {
     /// without reproducing it while attached to Xcode.
     static let diagnosticsFileName = "last-dictation-session.json"
     static let diagnosticsHistoryFileName = "dictation-sessions.jsonl"
+    static let hostApplicationIdentityKey = "host-application-identity-v1"
+}
+
+/// A host identity captured while the keyboard is still embedded in another
+/// app. The process identifier is intentionally part of the record: a bundle
+/// identifier by itself can become stale when the user changes apps.
+struct HostApplicationIdentity: Codable, Equatable, Sendable {
+    let bundleIdentifier: String
+    let processIdentifier: Int32
+    let capturedAt: Date
+}
+
+/// A process-local arbiter value is usable only when UIKit published it after
+/// the current keyboard appearance began and the host process stayed stable.
+/// Keeping this policy in the shared target makes the stale-host boundary
+/// directly testable without loading UIKit's private keyboard classes.
+enum HostApplicationCapturePolicy {
+    static func baselineGeneration(
+        currentGeneration: UInt64,
+        cleanBoundaryGeneration: UInt64?,
+        processHasEstablishedAppearance: Bool
+    ) -> UInt64 {
+        if let cleanBoundaryGeneration {
+            return cleanBoundaryGeneration
+        }
+        return processHasEstablishedAppearance ? currentGeneration : 0
+    }
+
+    static func accepts(
+        candidateBundleIdentifier: String,
+        captureGeneration: UInt64,
+        appearanceBaselineGeneration: UInt64,
+        expectedProcessIdentifier: Int32?,
+        currentProcessIdentifier: Int32?,
+        previousIdentity: HostApplicationIdentity?
+    ) -> Bool {
+        guard
+            let expectedProcessIdentifier,
+            expectedProcessIdentifier > 1,
+            currentProcessIdentifier == expectedProcessIdentifier
+        else {
+            return false
+        }
+        guard captureGeneration > appearanceBaselineGeneration else {
+            return false
+        }
+
+        // UIKit can deliver a destination callback after the prior host has
+        // already disappeared. Never bind that prior bundle to a new PID.
+        if rejectsPreviousHost(
+            candidateBundleIdentifier: candidateBundleIdentifier,
+            expectedProcessIdentifier: expectedProcessIdentifier,
+            previousIdentity: previousIdentity
+        ) {
+            return false
+        }
+        return true
+    }
+
+    static func rejectsPreviousHost(
+        candidateBundleIdentifier: String,
+        expectedProcessIdentifier: Int32,
+        previousIdentity: HostApplicationIdentity?
+    ) -> Bool {
+        guard
+            let previousIdentity,
+            previousIdentity.processIdentifier != expectedProcessIdentifier
+        else {
+            return false
+        }
+        return previousIdentity.bundleIdentifier.caseInsensitiveCompare(
+            candidateBundleIdentifier
+        ) == .orderedSame
+    }
+}
+
+/// Carries a verified keyboard-host identity across extension termination and
+/// app upgrades. Reads require the exact live host PID and a short age window;
+/// there is deliberately no bundle-only fallback.
+struct HostApplicationIdentityCache: @unchecked Sendable {
+    /// This is only a last-resort bridge across a short extension restart. A
+    /// small lease sharply limits PID-reuse risk; live host evidence wins.
+    static let defaultMaximumAge: TimeInterval = 60
+
+    private let defaults: UserDefaults?
+    private let storageKey: String
+
+    init(
+        suiteName: String = SharedDictationConstants.appGroupIdentifier,
+        storageKey: String = SharedDictationConstants.hostApplicationIdentityKey
+    ) {
+        defaults = UserDefaults(suiteName: suiteName)
+        self.storageKey = storageKey
+    }
+
+    func load() -> HostApplicationIdentity? {
+        guard
+            let data = defaults?.data(forKey: storageKey),
+            let identity = try? JSONDecoder().decode(
+                HostApplicationIdentity.self,
+                from: data
+            ),
+            identity.processIdentifier > 1,
+            !identity.bundleIdentifier.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            ).isEmpty
+        else {
+            return nil
+        }
+        return identity
+    }
+
+    func matchingIdentity(
+        processIdentifier: Int32?,
+        now: Date = Date(),
+        maximumAge: TimeInterval = Self.defaultMaximumAge
+    ) -> HostApplicationIdentity? {
+        guard
+            let processIdentifier,
+            processIdentifier > 1,
+            let identity = load(),
+            identity.processIdentifier == processIdentifier
+        else {
+            return nil
+        }
+        let age = now.timeIntervalSince(identity.capturedAt)
+        guard age >= -5, age <= maximumAge else { return nil }
+        return identity
+    }
+
+    func save(
+        bundleIdentifier: String,
+        processIdentifier: Int32,
+        capturedAt: Date = Date()
+    ) {
+        let identifier = bundleIdentifier.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard processIdentifier > 1, !identifier.isEmpty else { return }
+        let identity = HostApplicationIdentity(
+            bundleIdentifier: identifier,
+            processIdentifier: processIdentifier,
+            capturedAt: capturedAt
+        )
+        guard let data = try? JSONEncoder().encode(identity) else { return }
+        defaults?.set(data, forKey: storageKey)
+        _ = defaults?.synchronize()
+    }
+
+    func clear() {
+        defaults?.removeObject(forKey: storageKey)
+        _ = defaults?.synchronize()
+    }
 }
 
 enum SharedDictationPhase: String, Codable {
