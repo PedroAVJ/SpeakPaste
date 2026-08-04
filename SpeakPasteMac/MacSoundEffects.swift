@@ -1,4 +1,4 @@
-import AudioToolbox
+import AVFoundation
 import Combine
 import Foundation
 
@@ -17,14 +17,15 @@ final class MacSoundEffects: ObservableObject {
 
     private static let enabledKey = "mac-sound-effects-enabled"
 
-    /// These IDs are created once at launch and retained for the process
-    /// lifetime. Playback therefore never searches for or decodes a file on the
-    /// shortcut path. System Sound Services also respects the user's macOS
-    /// sound-effects preference instead of inventing an app-specific volume.
-    private let captureLive: SystemSoundID?
-    private let captureReleased: SystemSoundID?
-    private let deliveryVerified: SystemSoundID?
-    private let needsAttention: SystemSoundID?
+    /// These players are created and prepared once at launch. Playback therefore
+    /// never searches for or decodes a file on the shortcut path. They use the
+    /// normal app-output channel: System Sound Services uses the separate macOS
+    /// alert-volume channel, which can be muted even while ordinary audio is
+    /// audible and would make every SpeakPaste cue disappear.
+    private let captureLive: AVAudioPlayer?
+    private let captureReleased: AVAudioPlayer?
+    private let deliveryVerified: AVAudioPlayer?
+    private let needsAttention: AVAudioPlayer?
 
     init() {
         // Default on. A shortcut-driven tool that gives no feedback at all is a
@@ -41,17 +42,6 @@ final class MacSoundEffects: ObservableObject {
         needsAttention = Self.loadSound(named: "needs-attention")
     }
 
-    deinit {
-        for soundID in [
-            captureLive,
-            captureReleased,
-            deliveryVerified,
-            needsAttention,
-        ].compactMap({ $0 }) {
-            AudioServicesDisposeSystemSoundID(soundID)
-        }
-    }
-
     func playRecordingStarted() {
         play(captureLive)
     }
@@ -65,26 +55,24 @@ final class MacSoundEffects: ObservableObject {
     }
 
     func playFailed() {
-        play(needsAttention, asAlert: true)
+        play(needsAttention)
     }
 
-    private static func loadSound(named name: String) -> SystemSoundID? {
+    private static func loadSound(named name: String) -> AVAudioPlayer? {
         guard let url = Bundle.main.url(forResource: name, withExtension: "caf") else {
             return nil
         }
-        var soundID: SystemSoundID = 0
-        guard AudioServicesCreateSystemSoundID(url as CFURL, &soundID) == kAudioServicesNoError else {
+        guard let player = try? AVAudioPlayer(contentsOf: url) else {
             return nil
         }
-        return soundID
+        player.volume = 1
+        player.prepareToPlay()
+        return player
     }
 
-    private func play(_ soundID: SystemSoundID?, asAlert: Bool = false) {
-        guard isEnabled, let soundID else { return }
-        if asAlert {
-            AudioServicesPlayAlertSound(soundID)
-        } else {
-            AudioServicesPlaySystemSound(soundID)
-        }
+    private func play(_ player: AVAudioPlayer?) {
+        guard isEnabled, let player else { return }
+        player.currentTime = 0
+        player.play()
     }
 }
