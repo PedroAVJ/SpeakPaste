@@ -3,7 +3,7 @@ import Foundation
 /// The two built-in capture modes owned by the Command double-tap. Exact
 /// device UIDs can come and go; persisting this semantic choice keeps an absent
 /// iPhone from silently turning into the Mac microphone (or vice versa).
-enum MacInputMode: String, CaseIterable, Sendable {
+enum MacInputMode: String, CaseIterable, Equatable, Sendable {
     case mac
     case iPhone
 

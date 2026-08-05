@@ -340,6 +340,8 @@ private enum MacHUDMetrics {
         reduceMotion: Bool
     ) -> CGFloat {
         switch content {
+        case .inputSwitch:
+            return reduceMotion ? 150 : 104
         case .held:
             return reduceMotion ? 150 : 56
         case .capture(.connecting), .capture(.inactive):
@@ -451,6 +453,11 @@ private struct MacStatusHUDView: View {
     private func transition(for card: MacHUDStack.Card) -> AnyTransition {
         if reduceMotion { return .opacity }
         switch card.content {
+        case .inputSwitch:
+            return .asymmetric(
+                insertion: .scale(scale: 0.86).combined(with: .opacity),
+                removal: .opacity
+            )
         case .capture:
             return .asymmetric(
                 insertion: .scale(scale: 0.86).combined(with: .opacity),
@@ -510,6 +517,8 @@ private struct MacHUDStackCardView: View {
     @ViewBuilder
     private var content: some View {
         switch card.content {
+        case .inputSwitch(let targetMode):
+            MacHUDInputSwitch(targetMode: targetMode, reduceMotion: reduceMotion)
         case .capture(.connecting), .capture(.inactive):
             MacHUDWakeSignal(reduceMotion: reduceMotion)
         case .capture(.listening):
@@ -534,6 +543,53 @@ private struct MacHUDStackCardView: View {
         case .held:
             MacHUDHeldBadge(clipboardBacked: heldClipboardBacked)
         }
+    }
+}
+
+/// Double-Command source switch: the old device yields to the newly selected
+/// one. The compact, wordless handoff is immediate feedback for the gesture;
+/// the ordinary capture waveform then takes over if recording continues.
+private struct MacHUDInputSwitch: View {
+    let targetMode: MacInputMode
+    let reduceMotion: Bool
+
+    @State private var isAdvancing = false
+
+    var body: some View {
+        HStack(spacing: 9) {
+            deviceGlyph(for: targetMode.opposite, isTarget: false)
+            Image(systemName: "chevron.right")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(Color(nsColor: .secondaryLabelColor))
+                .offset(x: reduceMotion ? 0 : (isAdvancing ? 2 : -2))
+                .opacity(reduceMotion ? 0.7 : (isAdvancing ? 1 : 0.35))
+            deviceGlyph(for: targetMode, isTarget: true)
+        }
+        .onAppear {
+            guard !reduceMotion else { return }
+            withAnimation(
+                .easeInOut(duration: 0.42)
+                    .repeatForever(autoreverses: false)
+            ) {
+                isAdvancing = true
+            }
+        }
+        .accessibilityHidden(true)
+    }
+
+    private func deviceGlyph(
+        for mode: MacInputMode,
+        isTarget: Bool
+    ) -> some View {
+        Image(systemName: mode == .mac ? "laptopcomputer" : "iphone")
+            .font(.system(size: 14, weight: isTarget ? .semibold : .regular))
+            .foregroundStyle(
+                isTarget
+                    ? Color(nsColor: .systemCyan)
+                    : Color(nsColor: .secondaryLabelColor)
+            )
+            .opacity(isTarget ? 1 : 0.48)
+            .scaleEffect(isTarget ? 1.05 : 0.92)
     }
 }
 

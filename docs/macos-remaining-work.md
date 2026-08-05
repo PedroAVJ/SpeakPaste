@@ -266,7 +266,8 @@ for the release evidence.
       hold, one recoverable WAV where applicable, provisional-composition clear
       when no audio can be recovered, and no unattended replay after relaunch.
 - [ ] Start in Mac mode, double-tap bare right Command while idle, and confirm
-      iPhone mode is selected. Relaunch and confirm the mode persists. Double-tap
+      the device-to-device HUD points to iPhone and iPhone mode is selected.
+      Relaunch and confirm the mode persists. Double-tap
       back and verify Mac mode also persists.
 - [ ] While speaking through the Mac, double-tap bare right Command. Confirm the
       Mac segment is finalized and its input released before iPhone Connecting

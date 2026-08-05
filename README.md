@@ -47,7 +47,8 @@ The Xcode project contains four product targets:
    only an estimate and stops short of claiming completion. A stalled rail hides
    after 90 seconds; success, errors, model details, and offline notices stay in
    the app instead of becoming floating notifications.
-8. Double-tap right Command to switch between **Mac** and **iPhone** input. The
+8. Double-tap right Command to switch between **Mac** and **iPhone** input. A
+   brief device-to-device HUD confirms the new source immediately. The
    choice is sticky. During a recording, SpeakPaste first finalizes and releases
    the current source, queues that segment, and then starts a new ordered segment
    on the other source.

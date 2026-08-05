@@ -1096,6 +1096,10 @@ final class MacAppModel: ObservableObject {
             return
         }
 
+        var pipeline = hudPipeline
+        pipeline.showInputSwitch(to: targetMode)
+        hudPipeline = pipeline
+
         switch phase {
         case .recording:
             pendingInputModeAfterFinalization = targetMode

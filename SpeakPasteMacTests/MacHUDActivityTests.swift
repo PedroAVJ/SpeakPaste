@@ -72,6 +72,57 @@ final class MacHUDStackTests: XCTestCase {
         XCTAssertNil(MacHUDStack.nextExpiry(in: MacHUDPipeline(), after: base))
     }
 
+    func testInputSwitchAppearsImmediatelyInFrontAndExpires() {
+        let captureID = UUID()
+        var pipeline = MacHUDPipeline()
+        pipeline.beginCapture(id: captureID, ordinal: 1, at: base)
+        pipeline.showInputSwitch(to: .iPhone, at: base.addingTimeInterval(1))
+
+        let visible = MacHUDStack.resolve(
+            pipeline: pipeline,
+            at: base.addingTimeInterval(1.5)
+        )
+
+        XCTAssertEqual(visible.cards.count, 2)
+        XCTAssertEqual(visible.cards[0].content, .inputSwitch(targetMode: .iPhone))
+        XCTAssertEqual(visible.cards[1].id, captureID)
+        XCTAssertEqual(
+            visible.accessibilityLabel(sourceName: "Mac"),
+            "SpeakPaste, Switching input to iPhone"
+        )
+        XCTAssertEqual(
+            MacHUDStack.nextExpiry(in: pipeline, after: base.addingTimeInterval(1)),
+            base.addingTimeInterval(1 + MacHUDStack.inputSwitchVisibilityCap)
+        )
+
+        let expired = MacHUDStack.resolve(
+            pipeline: pipeline,
+            at: base.addingTimeInterval(
+                1 + MacHUDStack.inputSwitchVisibilityCap + 0.001
+            )
+        )
+        XCTAssertEqual(expired.cards.map(\.id), [captureID])
+    }
+
+    func testRepeatedInputSwitchReplacesThePreviousDirectionAndRestartsExpiry() {
+        var pipeline = MacHUDPipeline()
+        pipeline.showInputSwitch(to: .iPhone, at: base)
+        let firstID = MacHUDStack.resolve(pipeline: pipeline, at: base).cards[0].id
+
+        pipeline.showInputSwitch(to: .mac, at: base.addingTimeInterval(0.4))
+        let switchedBack = MacHUDStack.resolve(
+            pipeline: pipeline,
+            at: base.addingTimeInterval(0.5)
+        )
+
+        XCTAssertNotEqual(switchedBack.cards[0].id, firstID)
+        XCTAssertEqual(switchedBack.cards[0].content, .inputSwitch(targetMode: .mac))
+        XCTAssertEqual(
+            MacHUDStack.nextExpiry(in: pipeline, after: base.addingTimeInterval(0.5)),
+            base.addingTimeInterval(0.4 + MacHUDStack.inputSwitchVisibilityCap)
+        )
+    }
+
     func testOneCardKeepsItsIdentityFromCaptureThroughTranscriptionAndHeld() {
         let id = UUID()
         var pipeline = MacHUDPipeline()

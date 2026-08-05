@@ -41,6 +41,12 @@ enum MacHUDCaptureActivity: Equatable, Sendable {
 /// from the first connection pulse through transcription, held output, or
 /// verified delivery.
 struct MacHUDPipeline: Equatable, Sendable {
+    struct InputSwitch: Equatable, Sendable {
+        let id: UUID
+        let targetMode: MacInputMode
+        let startedAt: Date
+    }
+
     struct Capture: Equatable, Sendable {
         let id: UUID
         let ordinal: Int?
@@ -67,6 +73,7 @@ struct MacHUDPipeline: Equatable, Sendable {
         var recordingDuration: TimeInterval
     }
 
+    private(set) var inputSwitch: InputSwitch?
     private(set) var capture: Capture?
     private(set) var dictations: [Dictation] = []
 
@@ -80,6 +87,17 @@ struct MacHUDPipeline: Equatable, Sendable {
         dictations.enumerated().sorted { lhs, rhs in
             Self.isOlder(lhs.element, than: rhs.element, lhsOffset: lhs.offset, rhsOffset: rhs.offset)
         }.map(\.element)
+    }
+
+    mutating func showInputSwitch(
+        to targetMode: MacInputMode,
+        at date: Date = Date()
+    ) {
+        inputSwitch = InputSwitch(
+            id: UUID(),
+            targetMode: targetMode,
+            startedAt: date
+        )
     }
 
     mutating func beginCapture(
@@ -210,6 +228,7 @@ struct MacHUDPipeline: Equatable, Sendable {
 /// of the full pipeline, never the authority for delivery state.
 struct MacHUDStack: Equatable, Sendable {
     enum CardContent: Equatable, Sendable {
+        case inputSwitch(targetMode: MacInputMode)
         case capture(MacHUDCaptureActivity)
         case transcription(
             stage: MacHUDPipeline.DictationStage,
@@ -233,6 +252,7 @@ struct MacHUDStack: Equatable, Sendable {
     }
 
     static let visibleCardBudget = 3
+    static let inputSwitchVisibilityCap: TimeInterval = 1.4
     static let connectingVisibilityCap: TimeInterval = 20
     static let releasingVisibilityCap: TimeInterval = 15
     static let transcriptionVisibilityCap: TimeInterval = 90
@@ -333,6 +353,17 @@ struct MacHUDStack: Equatable, Sendable {
                 at: 0
             )
         }
+        if let inputSwitch = visibleInputSwitch(in: pipeline, at: date) {
+            frontToBack.insert(
+                Entry(
+                    id: inputSwitch.id,
+                    content: .inputSwitch(targetMode: inputSwitch.targetMode),
+                    ordinal: nil,
+                    createdAt: inputSwitch.startedAt
+                ),
+                at: 0
+            )
+        }
         guard !frontToBack.isEmpty else { return .empty }
 
         let visible: [Entry]
@@ -395,6 +426,12 @@ struct MacHUDStack: Equatable, Sendable {
                 if deadline > date { deadlines.append(deadline) }
             }
         }
+        if let inputSwitch = pipeline.inputSwitch {
+            let deadline = inputSwitch.startedAt.addingTimeInterval(
+                inputSwitchVisibilityCap
+            )
+            if deadline > date { deadlines.append(deadline) }
+        }
         return deadlines.min()
     }
 
@@ -403,6 +440,9 @@ struct MacHUDStack: Equatable, Sendable {
         heldClipboardBacked: Bool = false
     ) -> String {
         var parts = ["SpeakPaste"]
+        if case .inputSwitch(let targetMode) = cards.first?.content {
+            parts.append("Switching input to \(targetMode.title)")
+        }
         if case .capture(let activity) = cards.first?.content {
             switch activity {
             case .connecting:
@@ -456,5 +496,15 @@ struct MacHUDStack: Equatable, Sendable {
         default:
             return capture
         }
+    }
+
+    private static func visibleInputSwitch(
+        in pipeline: MacHUDPipeline,
+        at date: Date
+    ) -> MacHUDPipeline.InputSwitch? {
+        guard let inputSwitch = pipeline.inputSwitch else { return nil }
+        return date.timeIntervalSince(inputSwitch.startedAt) < inputSwitchVisibilityCap
+            ? inputSwitch
+            : nil
     }
 }

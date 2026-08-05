@@ -15,6 +15,10 @@ SpeakPaste is an open-source native Swift dictation project. It contains a macOS
 - Fully release the Continuity-microphone session after every dictation, before transcription. Returning control of the iPhone takes priority over warm-start latency.
 - Keep generated builds, DerivedData, user Xcode state, and packaged ZIPs out of Git.
 - Prefer focused Swift type-checks and target builds. Do not modify signing teams or publish through the App Store unless explicitly requested.
+- Never synthesize or inject keyboard input to test SpeakPaste, including with
+  `CGEvent`, AppleScript/System Events, Computer Use, or virtual-key tools.
+  Modifier-only shortcut acceptance is Pedro-only physical testing; do not
+  interfere with the user's active apps or typing.
 
 ### Reference-backed behavior
 
