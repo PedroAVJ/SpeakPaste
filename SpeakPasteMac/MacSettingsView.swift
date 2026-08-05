@@ -60,7 +60,7 @@ private struct MacGeneralSettings: View {
                     isOn: $model.realtimeDictationEnabled
                 )
                 .disabled(model.phase.isBusy)
-                Text("Saying “new line”, “new paragraph”, or a punctuation name produces the formatting instead of the words. Batch Scribe remains the default. The realtime experiment streams microphone audio to Scribe while you speak only at a collapsed caret in a safely editable field; otherwise it automatically uses batch. Its ownership check reads and compares that full active field locally for each hypothesis, but never uploads or writes the field text to disk.")
+                Text("Saying “new line”, “new paragraph”, or a punctuation name produces the formatting instead of the words. Batch Scribe remains the default. The realtime experiment streams microphone audio to Scribe while you speak and replaces one native marked-text composition at the current cursor. It does not use Accessibility node identity to police the destination; if the native input client changes, SpeakPaste reacquires the currently focused client.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 if let notice = model.realtimeModeNotice {

@@ -362,8 +362,11 @@ is active. Stop releases the microphone first, drains and manually commits the
 stream, and makes History and delivery escrow durable before the fully
 post-processed final text is inserted exactly once through the active input
 method. It does not follow that with a menu paste. Escape clears the provisional
-composition without committing it. Client, focus, or composition loss fails
-closed to manual placement; other unsupported delivery rules remain batch-only.
+composition without committing it. Realtime does not compare Accessibility node
+identity or user-interaction generations: if the native input client detaches,
+the next revision reacquires the currently focused client, and an unavailable
+final composition uses the same current-focus native paste primitive as batch.
+Other unsupported delivery rules remain batch-only.
 The implementation follows the native marked-text pattern, but compilation and
 isolated callbacks do not establish physical acceptance in Notes, TextEdit,
 Codex, Claude Code, other Electron editors, or over the Continuity chain.
