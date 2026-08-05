@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import XCTest
 @testable import SpeakPaste
@@ -246,6 +247,60 @@ final class MacPersistenceStoreTests: XCTestCase {
             reloaded = MacHistoryStore(defaults: defaults, directory: directory)
             XCTAssertEqual(reloaded.records.map(\.id), [older.id])
             XCTAssertEqual(reloaded.records.first?.text, "Corrected older transcript")
+        }
+    }
+
+    func testHistoryAudioReferenceMigrationIsExactAndPreservesTheTranscript() async throws {
+        try await MainActor.run {
+            let scratch = try makePersistenceScratchDirectory()
+            defer { try? FileManager.default.removeItem(at: scratch) }
+            let (suiteName, defaults) = makePersistenceDefaults()
+            defer { defaults.removePersistentDomain(forName: suiteName) }
+            let directory = scratch.appendingPathComponent("HistoryStore", isDirectory: true)
+            let store = MacHistoryStore(defaults: defaults, directory: directory)
+            let id = UUID()
+            let sourcePendingAudioID = UUID()
+            let oldFileName = "\(id.uuidString.lowercased()).wav"
+            let replacementFileName = "\(id.uuidString.lowercased()).m4a"
+            let record = MacTranscriptRecord(
+                id: id,
+                createdAt: Date(timeIntervalSinceReferenceDate: 123),
+                text: "Preserve this exact transcript",
+                destination: "Editor",
+                deviceName: "Microphone",
+                recordingDuration: 42,
+                retainedAudioFileName: oldFileName,
+                sourcePendingAudioID: sourcePendingAudioID
+            )
+
+            XCTAssertTrue(store.append(record))
+            XCTAssertTrue(
+                store.replaceRetainedAudioReference(
+                    for: id,
+                    expectedFileName: oldFileName,
+                    with: replacementFileName
+                )
+            )
+            let migrated = try XCTUnwrap(store.records.first)
+            XCTAssertEqual(migrated.id, record.id)
+            XCTAssertEqual(migrated.createdAt, record.createdAt)
+            XCTAssertEqual(migrated.text, record.text)
+            XCTAssertEqual(migrated.destination, record.destination)
+            XCTAssertEqual(migrated.deviceName, record.deviceName)
+            XCTAssertEqual(migrated.recordingDuration, record.recordingDuration)
+            XCTAssertEqual(migrated.sourcePendingAudioID, sourcePendingAudioID)
+            XCTAssertEqual(migrated.retainedAudioFileName, replacementFileName)
+
+            XCTAssertFalse(
+                store.replaceRetainedAudioReference(
+                    for: id,
+                    expectedFileName: oldFileName,
+                    with: replacementFileName
+                )
+            )
+            XCTAssertEqual(store.records.first, migrated)
+            let reloaded = MacHistoryStore(defaults: defaults, directory: directory)
+            XCTAssertEqual(reloaded.records.first, migrated)
         }
     }
 
@@ -561,7 +616,8 @@ final class MacPersistenceStoreTests: XCTestCase {
         try payload.write(to: source)
         let store = MacHistoryAudioStore(
             directoryURL: directory,
-            availableCapacityProvider: { _ in Int64.max }
+            availableCapacityProvider: { _ in Int64.max },
+            audioEncoder: historyAudioPassthroughEncoder
         )
         let keptID = UUID()
         let removedID = UUID()
@@ -588,6 +644,84 @@ final class MacPersistenceStoreTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: unknown.path))
     }
 
+    func testHistoryAudioStoreEncodesNewRetainedCopyAsCompactPlayableM4A() throws {
+        let scratch = try makePersistenceScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let directory = scratch.appendingPathComponent("HistoryAudio", isDirectory: true)
+        let source = scratch.appendingPathComponent("source.wav")
+        try makePCM16MonoWAV(seconds: 2).write(to: source)
+        let sourceBytes = try XCTUnwrap(
+            FileManager.default.attributesOfItem(atPath: source.path)[.size] as? NSNumber
+        ).int64Value
+        let store = MacHistoryAudioStore(
+            directoryURL: directory,
+            availableCapacityProvider: { _ in Int64.max }
+        )
+
+        let fileName = try store.retain(sourceURL: source, historyRecordID: UUID())
+        let retainedURL = try store.audioURL(for: fileName)
+        let retainedBytes = try XCTUnwrap(
+            FileManager.default.attributesOfItem(atPath: retainedURL.path)[.size] as? NSNumber
+        ).int64Value
+        let playableFile = try AVAudioFile(forReading: retainedURL)
+
+        XCTAssertEqual(retainedURL.pathExtension, "m4a")
+        XCTAssertGreaterThan(playableFile.length, 0)
+        XCTAssertLessThan(retainedBytes * 10, sourceBytes)
+        XCTAssertEqual(
+            Double(playableFile.length) / playableFile.processingFormat.sampleRate,
+            2,
+            accuracy: 0.05
+        )
+        XCTAssertTrue(store.publish(fileName))
+    }
+
+    func testHistoryAudioReplacementSubtractsOnlyTheSameHistoryRecordAndKeepsOldFile() throws {
+        let scratch = try makePersistenceScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let directory = scratch.appendingPathComponent("HistoryAudio", isDirectory: true)
+        let source = scratch.appendingPathComponent("source.wav")
+        let payload = Data(repeating: 0x48, count: 32)
+        try payload.write(to: source)
+        let recordID = UUID()
+        let oldName = "\(recordID.uuidString.lowercased()).wav"
+        let oldURL = directory.appendingPathComponent(oldName)
+        let store = MacHistoryAudioStore(
+            directoryURL: directory,
+            maximumRetainedHistoryAudioBytes: Int64(payload.count),
+            minimumFreeSpaceAfterRetentionBytes: 0,
+            availableCapacityProvider: { _ in Int64.max },
+            audioEncoder: historyAudioPassthroughEncoder
+        )
+        try MacPrivateStoreIO.copyRegularFile(from: source, to: oldURL)
+
+        let newName = try store.retain(
+            sourceURL: oldURL,
+            historyRecordID: recordID,
+            replacingRetainedFileName: oldName
+        )
+
+        XCTAssertEqual(newName, "\(recordID.uuidString.lowercased()).m4a")
+        XCTAssertEqual(try Data(contentsOf: oldURL), payload)
+        XCTAssertEqual(try Data(contentsOf: store.audioURL(for: newName)), payload)
+
+        XCTAssertThrowsError(
+            try store.retain(
+                sourceURL: oldURL,
+                historyRecordID: UUID(),
+                replacingRetainedFileName: oldName
+            )
+        ) { error in
+            guard
+                let audioError = error as? MacHistoryAudioStoreError,
+                case .unsafeFileName = audioError
+            else {
+                return XCTFail("Expected a mismatched replacement-name error, got \(error)")
+            }
+        }
+        XCTAssertEqual(try Data(contentsOf: oldURL), payload)
+    }
+
     func testHistoryAudioStoreRefusesCopyBeforeExceedingManagedByteQuota() throws {
         let scratch = try makePersistenceScratchDirectory()
         defer { try? FileManager.default.removeItem(at: scratch) }
@@ -599,7 +733,8 @@ final class MacPersistenceStoreTests: XCTestCase {
             directoryURL: directory,
             maximumRetainedHistoryAudioBytes: Int64(payload.count),
             minimumFreeSpaceAfterRetentionBytes: 0,
-            availableCapacityProvider: { _ in Int64.max }
+            availableCapacityProvider: { _ in Int64.max },
+            audioEncoder: historyAudioPassthroughEncoder
         )
 
         let firstName = try store.retain(sourceURL: source, historyRecordID: UUID())
@@ -616,7 +751,7 @@ final class MacPersistenceStoreTests: XCTestCase {
         }
 
         let rejectedURL = directory.appendingPathComponent(
-            "\(rejectedID.uuidString.lowercased()).wav"
+            "\(rejectedID.uuidString.lowercased()).m4a"
         )
         XCTAssertFalse(FileManager.default.fileExists(atPath: rejectedURL.path))
         XCTAssertEqual(try Data(contentsOf: source), payload)
@@ -638,7 +773,8 @@ final class MacPersistenceStoreTests: XCTestCase {
             directoryURL: directory,
             maximumRetainedHistoryAudioBytes: Int64(payload.count),
             minimumFreeSpaceAfterRetentionBytes: 0,
-            availableCapacityProvider: { _ in Int64.max }
+            availableCapacityProvider: { _ in Int64.max },
+            audioEncoder: historyAudioPassthroughEncoder
         )
 
         let unknown = directory.appendingPathComponent("user-owned.wav")
@@ -675,7 +811,8 @@ final class MacPersistenceStoreTests: XCTestCase {
             directoryURL: directory,
             maximumRetainedHistoryAudioBytes: 1_024,
             minimumFreeSpaceAfterRetentionBytes: requiredReserve,
-            availableCapacityProvider: { _ in reportedCapacity }
+            availableCapacityProvider: { _ in reportedCapacity },
+            audioEncoder: historyAudioPassthroughEncoder
         )
         let rejectedID = UUID()
 
@@ -691,7 +828,7 @@ final class MacPersistenceStoreTests: XCTestCase {
         }
 
         let rejectedURL = directory.appendingPathComponent(
-            "\(rejectedID.uuidString.lowercased()).wav"
+            "\(rejectedID.uuidString.lowercased()).m4a"
         )
         XCTAssertFalse(FileManager.default.fileExists(atPath: rejectedURL.path))
         XCTAssertEqual(try Data(contentsOf: source), payload)
@@ -710,7 +847,8 @@ final class MacPersistenceStoreTests: XCTestCase {
             directoryURL: directory,
             maximumRetainedHistoryAudioBytes: 1_024,
             minimumFreeSpaceAfterRetentionBytes: 0,
-            availableCapacityProvider: { _ in Int64.max }
+            availableCapacityProvider: { _ in Int64.max },
+            audioEncoder: historyAudioPassthroughEncoder
         )
         let rejectedID = UUID()
 
@@ -727,7 +865,7 @@ final class MacPersistenceStoreTests: XCTestCase {
         XCTAssertFalse(
             FileManager.default.fileExists(
                 atPath: directory.appendingPathComponent(
-                    "\(rejectedID.uuidString.lowercased()).wav"
+                    "\(rejectedID.uuidString.lowercased()).m4a"
                 ).path
             )
         )
@@ -745,7 +883,8 @@ final class MacPersistenceStoreTests: XCTestCase {
             directoryURL: directory,
             maximumRetainedHistoryAudioBytes: Int64(payload.count),
             minimumFreeSpaceAfterRetentionBytes: 0,
-            availableCapacityProvider: { _ in Int64.max }
+            availableCapacityProvider: { _ in Int64.max },
+            audioEncoder: historyAudioPassthroughEncoder
         )
         let recordIDs = [UUID(), UUID()]
 
@@ -788,6 +927,41 @@ private func makePersistenceScratchDirectory() throws -> URL {
         .appendingPathComponent("SpeakPaste-store-tests-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     return directory
+}
+
+private let historyAudioPassthroughEncoder: MacHistoryAudioStore.AudioEncoder = {
+    sourceURL,
+    destinationURL in
+    try MacPrivateStoreIO.copyRegularFile(from: sourceURL, to: destinationURL)
+}
+
+private func makePCM16MonoWAV(seconds: Int, sampleRate: Int = 48_000) -> Data {
+    let sampleCount = seconds * sampleRate
+    let dataByteCount = sampleCount * MemoryLayout<Int16>.size
+    var data = Data()
+
+    func appendASCII(_ value: String) {
+        data.append(contentsOf: value.utf8)
+    }
+    func appendLE<T: FixedWidthInteger>(_ value: T) {
+        var littleEndian = value.littleEndian
+        withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
+    }
+
+    appendASCII("RIFF")
+    appendLE(UInt32(36 + dataByteCount))
+    appendASCII("WAVEfmt ")
+    appendLE(UInt32(16))
+    appendLE(UInt16(1))
+    appendLE(UInt16(1))
+    appendLE(UInt32(sampleRate))
+    appendLE(UInt32(sampleRate * MemoryLayout<Int16>.size))
+    appendLE(UInt16(MemoryLayout<Int16>.size))
+    appendLE(UInt16(16))
+    appendASCII("data")
+    appendLE(UInt32(dataByteCount))
+    data.append(Data(count: dataByteCount))
+    return data
 }
 
 private func posixPermissions(of url: URL) throws -> Int {

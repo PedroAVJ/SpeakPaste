@@ -313,7 +313,12 @@ final class MacAppModel: ObservableObject {
                 forKey: Self.retainSuccessfulAudioKey
             )
             historyActionError = nil
-            if !retainSuccessfulAudio { removeAllRetainedHistoryAudio() }
+            if retainSuccessfulAudio {
+                startRetainedHistoryAudioMigration()
+            } else {
+                historyAudioMigrationTask?.cancel()
+                removeAllRetainedHistoryAudio()
+            }
         }
     }
     @Published private(set) var reprocessingHistoryRecordIDs = Set<UUID>()
@@ -392,6 +397,11 @@ final class MacAppModel: ObservableObject {
     private var historyPlaybackSound: NSSound?
     private var historyPlaybackResetTask: Task<Void, Never>?
     private var historyReprocessTasks: [UUID: Task<Void, Never>] = [:]
+    /// Legacy builds retained successful microphone captures as raw Float32
+    /// WAV. Migration changes one optional History reference at a time only
+    /// after its compact M4A replacement is durable.
+    private var historyAudioMigrationTask: Task<Void, Never>?
+    private var migratingHistoryAudioRecordID: UUID?
     /// An import is not crash-safe until its security-scoped source has been
     /// copied and synchronously staged in PendingAudio. Normal Quit waits for
     /// these short-lived staging tasks; network transcription is already
@@ -831,6 +841,7 @@ final class MacAppModel: ObservableObject {
             pasteLast: { [weak self] in self?.pasteLastTranscript() },
             copyLast: { [weak self] in self?.copyTranscript() }
         )
+        startRetainedHistoryAudioMigration()
     }
 
     var selectedDevice: MacAudioInputDevice? {
@@ -1458,7 +1469,10 @@ final class MacAppModel: ObservableObject {
         // retained under the previous mode.
         if days == -1 {
             successfulAudioRetentionGeneration &+= 1
+            historyAudioMigrationTask?.cancel()
             removeAllRetainedHistoryAudio()
+        } else {
+            startRetainedHistoryAudioMigration()
         }
     }
 
@@ -1468,6 +1482,10 @@ final class MacAppModel: ObservableObject {
     }
 
     func toggleHistoryAudioPlayback(_ record: MacTranscriptRecord) {
+        guard migratingHistoryAudioRecordID != record.id else {
+            historyActionError = "That recording is being compacted for History. Try again in a moment."
+            return
+        }
         if playingHistoryRecordID == record.id {
             stopHistoryAudioPlayback()
             return
@@ -1508,6 +1526,7 @@ final class MacAppModel: ObservableObject {
         historyPlaybackSound?.stop()
         historyPlaybackSound = nil
         playingHistoryRecordID = nil
+        startRetainedHistoryAudioMigration()
     }
 
     /// History text and a same-ID delivery escrow must always describe the same
@@ -1546,6 +1565,10 @@ final class MacAppModel: ObservableObject {
     /// reprocess never pastes into an app or triggers auto-send as a side
     /// effect.
     func reprocessHistoryRecord(_ record: MacTranscriptRecord) {
+        guard migratingHistoryAudioRecordID != record.id else {
+            historyActionError = "That recording is being compacted for History. Try again in a moment."
+            return
+        }
         guard !reprocessingHistoryRecordIDs.contains(record.id) else { return }
         guard historyRecordCanBeModified(record) else {
             historyActionError = "Resolve this transcript's waiting delivery before processing its recording again."
@@ -1573,6 +1596,7 @@ final class MacAppModel: ObservableObject {
             defer {
                 self.reprocessingHistoryRecordIDs.remove(record.id)
                 self.historyReprocessTasks[record.id] = nil
+                self.startRetainedHistoryAudioMigration()
             }
             do {
                 let result = try await self.client.transcribe(
@@ -1639,6 +1663,105 @@ final class MacAppModel: ObservableObject {
         guard historyAudioStore.reconcile(referencedFileNames: referencedFileNames) else {
             historyActionError = "Retained History audio needs cleanup: \(historyAudioStore.lastPersistenceError ?? "the audio folder could not be updated")"
             return
+        }
+    }
+
+    /// Reclaims the space wasted by builds that byte-copied the recorder's raw
+    /// Float32 WAV into successful History. The old recording remains both
+    /// referenced and playable until its compact replacement is encoded and
+    /// the exact row is durably changed with a compare-and-swap write.
+    private func startRetainedHistoryAudioMigration() {
+        guard
+            historyAudioMigrationTask == nil,
+            keepsSuccessfulHistoryAudio,
+            history.isPendingAudioRecoveryAuthorityTrusted,
+            history.records.contains(where: {
+                $0.retainedAudioFileName?.lowercased().hasSuffix(".wav") == true
+            })
+        else {
+            return
+        }
+
+        let retentionGeneration = successfulAudioRetentionGeneration
+        historyAudioMigrationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            var failedRecordIDs = Set<UUID>()
+            defer {
+                self.migratingHistoryAudioRecordID = nil
+                self.historyAudioMigrationTask = nil
+                if !failedRecordIDs.isEmpty, self.historyActionError == nil {
+                    let count = failedRecordIDs.count
+                    self.historyActionError = "\(count) older History recording\(count == 1 ? "" : "s") could not be compacted; the original audio was preserved."
+                }
+            }
+
+            while
+                !Task.isCancelled,
+                retentionGeneration == self.successfulAudioRetentionGeneration,
+                self.keepsSuccessfulHistoryAudio
+            {
+                guard let record = self.history.records.reversed().first(where: { record in
+                    guard
+                        let fileName = record.retainedAudioFileName,
+                        fileName.lowercased().hasSuffix(".wav"),
+                        !failedRecordIDs.contains(record.id),
+                        self.playingHistoryRecordID != record.id,
+                        !self.reprocessingHistoryRecordIDs.contains(record.id)
+                    else {
+                        return false
+                    }
+                    return true
+                }), let oldFileName = record.retainedAudioFileName else {
+                    break
+                }
+
+                self.migratingHistoryAudioRecordID = record.id
+                do {
+                    let audioStore = self.historyAudioStore
+                    let sourceURL = try audioStore.audioURL(for: oldFileName)
+                    let recordID = record.id
+                    let newFileName = try await Task.detached(priority: .utility) {
+                        try audioStore.retain(
+                            sourceURL: sourceURL,
+                            historyRecordID: recordID,
+                            replacingRetainedFileName: oldFileName
+                        )
+                    }.value
+
+                    guard
+                        !Task.isCancelled,
+                        retentionGeneration == self.successfulAudioRetentionGeneration,
+                        self.keepsSuccessfulHistoryAudio
+                    else {
+                        _ = audioStore.remove(newFileName)
+                        break
+                    }
+
+                    guard self.history.replaceRetainedAudioReference(
+                        for: recordID,
+                        expectedFileName: oldFileName,
+                        with: newFileName
+                    ) else {
+                        _ = audioStore.remove(newFileName)
+                        failedRecordIDs.insert(recordID)
+                        self.migratingHistoryAudioRecordID = nil
+                        continue
+                    }
+
+                    if !audioStore.publish(newFileName) {
+                        failedRecordIDs.insert(recordID)
+                    }
+                    _ = audioStore.reconcile(
+                        referencedFileNames: self.history.referencedAudioFileNames
+                    )
+                } catch is CancellationError {
+                    break
+                } catch {
+                    failedRecordIDs.insert(record.id)
+                }
+                self.migratingHistoryAudioRecordID = nil
+                await Task.yield()
+            }
         }
     }
 
@@ -1935,6 +2058,9 @@ final class MacAppModel: ObservableObject {
     }
 
     private func finishSessionTracking() {
+        historyAudioMigrationTask?.cancel()
+        historyAudioMigrationTask = nil
+        migratingHistoryAudioRecordID = nil
         if let captureID = hudPipeline.capture?.id {
             var pipeline = hudPipeline
             pipeline.finish(id: captureID)
