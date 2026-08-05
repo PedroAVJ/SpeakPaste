@@ -1,3 +1,5 @@
+@preconcurrency import AVFoundation
+import AudioToolbox
 import Combine
 import Darwin
 import Foundation
@@ -493,6 +495,53 @@ final class MacHistoryStore: ObservableObject {
         return true
     }
 
+    /// Atomically moves one optional History row from its legacy recording to
+    /// an already-durable compact replacement. Exact old-name matching keeps a
+    /// concurrent delete, retention sweep, or privacy change from resurrecting
+    /// a stale audio reference.
+    @discardableResult
+    func replaceRetainedAudioReference(
+        for id: UUID,
+        expectedFileName: String,
+        with replacementFileName: String
+    ) -> Bool {
+        guard let index = records.firstIndex(where: { $0.id == id }) else {
+            lastPersistenceError = "The History row changed before its audio could be compacted."
+            return false
+        }
+        let current = records[index]
+        guard current.retainedAudioFileName == expectedFileName else {
+            lastPersistenceError = "The History audio reference changed before compaction finished."
+            return false
+        }
+        let replacementURL = URL(fileURLWithPath: replacementFileName)
+        guard
+            replacementFileName == replacementURL.lastPathComponent,
+            replacementURL.pathExtension.lowercased() == MacHistoryAudioEncoder.fileExtension,
+            UUID(
+                uuidString: replacementURL.deletingPathExtension().lastPathComponent
+            ) == id
+        else {
+            lastPersistenceError = "History received an invalid compact-audio reference."
+            return false
+        }
+
+        var proposed = records
+        proposed[index] = MacTranscriptRecord(
+            id: current.id,
+            createdAt: current.createdAt,
+            text: current.text,
+            destination: current.destination,
+            deviceName: current.deviceName,
+            recordingDuration: current.recordingDuration,
+            retainedAudioFileName: replacementFileName,
+            sourcePendingAudioID: current.sourcePendingAudioID
+        )
+        guard persist(proposed) else { return false }
+        records = proposed
+        return true
+    }
+
     /// Day arithmetic goes through Calendar rather than a multiple of 86 400 so
     /// that a daylight-saving shift cannot expire a record an hour early.
     private func sweepExpired() {
@@ -768,6 +817,7 @@ private struct LossyHistoryRecord: Decodable {
 
 enum MacHistoryAudioStoreError: LocalizedError {
     case unsupportedAudioType
+    case audioEncodingFailed
     case unsafeFileName
     case audioMissing
     case unsafeAudioSource
@@ -778,6 +828,8 @@ enum MacHistoryAudioStoreError: LocalizedError {
         switch self {
         case .unsupportedAudioType:
             "The recording format cannot be retained in History."
+        case .audioEncodingFailed:
+            "The recording could not be compressed for History."
         case .unsafeFileName:
             "History contained an unsafe audio filename."
         case .audioMissing:
@@ -796,12 +848,105 @@ enum MacHistoryAudioStoreError: LocalizedError {
     }
 }
 
+/// Converts successful recordings to a compact, broadly playable History
+/// format. PendingAudio keeps the original recording until its recovery
+/// transaction closes; only the optional long-lived History copy is encoded.
+enum MacHistoryAudioEncoder {
+    static let fileExtension = "m4a"
+
+    static func encodeAAC(from sourceURL: URL, to destinationURL: URL) throws {
+        let asset = AVURLAsset(url: sourceURL)
+        guard let audioTrack = asset.tracks(withMediaType: .audio).first else {
+            throw MacHistoryAudioStoreError.audioEncodingFailed
+        }
+        let reader = try AVAssetReader(asset: asset)
+        let readerOutput = AVAssetReaderTrackOutput(
+            track: audioTrack,
+            outputSettings: [
+                AVFormatIDKey: kAudioFormatLinearPCM,
+                AVSampleRateKey: 48_000,
+                AVNumberOfChannelsKey: 1,
+                AVLinearPCMBitDepthKey: 16,
+                AVLinearPCMIsFloatKey: false,
+                AVLinearPCMIsBigEndianKey: false,
+                AVLinearPCMIsNonInterleaved: false,
+            ]
+        )
+        guard reader.canAdd(readerOutput) else {
+            throw MacHistoryAudioStoreError.audioEncodingFailed
+        }
+        reader.add(readerOutput)
+
+        let writer = try AVAssetWriter(outputURL: destinationURL, fileType: .m4a)
+        let writerInput = AVAssetWriterInput(
+            mediaType: .audio,
+            outputSettings: [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: 48_000,
+                AVNumberOfChannelsKey: 1,
+                AVEncoderBitRateKey: 64_000,
+                AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
+            ]
+        )
+        writerInput.expectsMediaDataInRealTime = false
+        guard writer.canAdd(writerInput) else {
+            throw MacHistoryAudioStoreError.audioEncodingFailed
+        }
+        writer.add(writerInput)
+        guard writer.startWriting(), reader.startReading() else {
+            throw writer.error ?? reader.error ?? MacHistoryAudioStoreError.audioEncodingFailed
+        }
+        writer.startSession(atSourceTime: .zero)
+        let encodingDeadline = Date().addingTimeInterval(120)
+
+        while reader.status == .reading {
+            guard !Task.isCancelled, Date() < encodingDeadline else {
+                reader.cancelReading()
+                writer.cancelWriting()
+                throw CancellationError()
+            }
+            guard writer.status == .writing else {
+                reader.cancelReading()
+                throw writer.error ?? MacHistoryAudioStoreError.audioEncodingFailed
+            }
+            guard writerInput.isReadyForMoreMediaData else {
+                Thread.sleep(forTimeInterval: 0.001)
+                continue
+            }
+            guard let sampleBuffer = readerOutput.copyNextSampleBuffer() else { break }
+            guard writerInput.append(sampleBuffer) else {
+                reader.cancelReading()
+                writer.cancelWriting()
+                throw writer.error ?? MacHistoryAudioStoreError.audioEncodingFailed
+            }
+        }
+        guard reader.status == .completed else {
+            writer.cancelWriting()
+            throw reader.error ?? MacHistoryAudioStoreError.audioEncodingFailed
+        }
+        writerInput.markAsFinished()
+
+        let completion = DispatchSemaphore(value: 0)
+        writer.finishWriting {
+            completion.signal()
+        }
+        guard completion.wait(timeout: .now() + .seconds(30)) == .success else {
+            writer.cancelWriting()
+            throw MacHistoryAudioStoreError.audioEncodingFailed
+        }
+        guard writer.status == .completed else {
+            throw writer.error ?? MacHistoryAudioStoreError.audioEncodingFailed
+        }
+    }
+}
+
 /// Private successful-audio storage used only when the user keeps History
 /// audio. It is intentionally separate from PendingAudio: the latter is a
 /// recovery authority and may not be repurposed as a media library after its
 /// completion transaction closes.
 final class MacHistoryAudioStore: @unchecked Sendable {
     typealias AvailableCapacityProvider = @Sendable (URL) throws -> Int64
+    typealias AudioEncoder = @Sendable (URL, URL) throws -> Void
 
     /// Successful recordings are useful, but they must never become an
     /// unbounded media cache. One GiB is intentionally conservative while
@@ -815,6 +960,7 @@ final class MacHistoryAudioStore: @unchecked Sendable {
     private let retainedAudioByteQuota: Int64
     private let freeSpaceReserveBytes: Int64
     private let availableCapacityProvider: AvailableCapacityProvider
+    private let audioEncoder: AudioEncoder
     private let lock = NSLock()
     private var persistenceError: String?
     /// A detached copy exists before its History row can be committed on the
@@ -822,6 +968,10 @@ final class MacHistoryAudioStore: @unchecked Sendable {
     /// an orphan. The set is process-local on purpose: after a crash, launch
     /// reconciliation should remove any copy that never gained a durable row.
     private var provisionalFileNames = Set<String>()
+    /// Safe UUID-named inputs and outputs currently being encoded. They are
+    /// ignored by reconciliation but not exposed to History, and encoding is
+    /// deliberately performed without holding `lock`.
+    private var transcodingFileNames = Set<String>()
 
     var lastPersistenceError: String? {
         withLock { persistenceError }
@@ -838,7 +988,8 @@ final class MacHistoryAudioStore: @unchecked Sendable {
         fileManager: FileManager = .default,
         maximumRetainedHistoryAudioBytes: Int64 = MacHistoryAudioStore.maximumRetainedHistoryAudioBytes,
         minimumFreeSpaceAfterRetentionBytes: Int64 = MacHistoryAudioStore.minimumFreeSpaceAfterRetentionBytes,
-        availableCapacityProvider: AvailableCapacityProvider? = nil
+        availableCapacityProvider: AvailableCapacityProvider? = nil,
+        audioEncoder: @escaping AudioEncoder = MacHistoryAudioEncoder.encodeAAC
     ) {
         let applicationSupportURL = fileManager
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)
@@ -853,6 +1004,7 @@ final class MacHistoryAudioStore: @unchecked Sendable {
         freeSpaceReserveBytes = max(minimumFreeSpaceAfterRetentionBytes, 0)
         self.availableCapacityProvider = availableCapacityProvider
             ?? MacHistoryAudioStore.defaultAvailableCapacity
+        self.audioEncoder = audioEncoder
         do {
             try ensurePrivateDirectory()
         } catch {
@@ -863,26 +1015,108 @@ final class MacHistoryAudioStore: @unchecked Sendable {
     /// Makes a durable copy while PendingAudio still owns the source. The
     /// History record is committed only after this succeeds, so a referenced
     /// retained file is never merely aspirational.
-    func retain(sourceURL: URL, historyRecordID: UUID) throws -> String {
-        try withLock {
-            do {
-                let extensionName = sourceURL.pathExtension.lowercased()
-                guard Self.audioExtensions.contains(extensionName) else {
-                    throw MacHistoryAudioStoreError.unsupportedAudioType
-                }
+    func retain(
+        sourceURL: URL,
+        historyRecordID: UUID,
+        replacingRetainedFileName: String? = nil
+    ) throws -> String {
+        let extensionName = sourceURL.pathExtension.lowercased()
+        guard Self.audioExtensions.contains(extensionName) else {
+            let error = MacHistoryAudioStoreError.unsupportedAudioType
+            withLock { persistenceError = error.localizedDescription }
+            throw error
+        }
+        let fileName = "\(historyRecordID.uuidString.lowercased()).\(MacHistoryAudioEncoder.fileExtension)"
+        let sourceStageURL = directoryURL.appendingPathComponent(
+            "\(UUID().uuidString.lowercased()).\(extensionName)",
+            isDirectory: false
+        )
+        let encodedStageURL = directoryURL.appendingPathComponent(
+            "\(UUID().uuidString.lowercased()).\(MacHistoryAudioEncoder.fileExtension)",
+            isDirectory: false
+        )
+        let stagedNames = Set([
+            sourceStageURL.lastPathComponent.lowercased(),
+            encodedStageURL.lastPathComponent.lowercased(),
+        ])
+
+        do {
+            let sourceBytes = try Self.regularFileSize(at: sourceURL)
+            try withLock {
                 try ensurePrivateDirectory()
-                let fileName = "\(historyRecordID.uuidString.lowercased()).\(extensionName)"
+                _ = try safeAudioURL(for: fileName, requireExisting: false)
+                try verifyEncodingWorkspaceCapacity(sourceBytes: sourceBytes)
+                transcodingFileNames.formUnion(stagedNames)
+            }
+        } catch {
+            withLock { persistenceError = error.localizedDescription }
+            throw error
+        }
+
+        defer {
+            _ = try? MacPrivateStoreIO.removeRegularFile(at: sourceStageURL)
+            _ = try? MacPrivateStoreIO.removeRegularFile(at: encodedStageURL)
+            withLock { transcodingFileNames.subtract(stagedNames) }
+        }
+
+        do {
+            // Encode only from a private, descriptor-validated copy. This
+            // prevents a source-path swap from redirecting AVFoundation, and
+            // UUID names let launch reconciliation remove either artifact
+            // after a crash.
+            try MacPrivateStoreIO.copyRegularFile(from: sourceURL, to: sourceStageURL)
+            do {
+                try audioEncoder(sourceStageURL, encodedStageURL)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                throw MacHistoryAudioStoreError.audioEncodingFailed
+            }
+            try MacPrivateStoreIO.secureExistingStorage(at: encodedStageURL)
+            let encodedBytes = try Self.regularFileSize(at: encodedStageURL)
+            _ = try? MacPrivateStoreIO.removeRegularFile(at: sourceStageURL)
+
+            return try withLock {
                 let destinationURL = try safeAudioURL(for: fileName, requireExisting: false)
-                let sourceBytes = try Self.regularFileSize(at: sourceURL)
-                try verifyRetentionCapacity(sourceBytes: sourceBytes)
-                try MacPrivateStoreIO.copyRegularFile(from: sourceURL, to: destinationURL)
+                let managedBytes = try managedRetainedAudioBytes(
+                    excluding: transcodingFileNames
+                )
+                let replacedBytes: Int64
+                if let replacingRetainedFileName {
+                    guard URL(fileURLWithPath: replacingRetainedFileName)
+                        .deletingPathExtension().lastPathComponent.lowercased()
+                        == historyRecordID.uuidString.lowercased()
+                    else {
+                        throw MacHistoryAudioStoreError.unsafeFileName
+                    }
+                    let replacedURL = try safeAudioURL(
+                        for: replacingRetainedFileName,
+                        requireExisting: true
+                    )
+                    replacedBytes = try Self.regularFileSize(at: replacedURL)
+                } else {
+                    replacedBytes = 0
+                }
+                guard managedBytes >= replacedBytes else {
+                    throw MacHistoryAudioStoreError.unsafeAudioSource
+                }
+                let managedBytesBeforeRetention = managedBytes - replacedBytes
+                try verifyRetentionCapacity(
+                    retainedBytes: encodedBytes,
+                    managedBytesBeforeRetention: managedBytesBeforeRetention
+                )
+                try MacPrivateStoreIO.importRegularFile(
+                    from: encodedStageURL,
+                    to: destinationURL
+                )
                 provisionalFileNames.insert(fileName.lowercased())
+                transcodingFileNames.subtract(stagedNames)
                 persistenceError = nil
                 return fileName
-            } catch {
-                persistenceError = error.localizedDescription
-                throw error
             }
+        } catch {
+            withLock { persistenceError = error.localizedDescription }
+            throw error
         }
     }
 
@@ -947,6 +1181,7 @@ final class MacHistoryAudioStore: @unchecked Sendable {
                     guard
                         !normalizedReferences.contains(normalized),
                         !provisionalFileNames.contains(normalized),
+                        !transcodingFileNames.contains(normalized),
                         Self.isManagedFileName(entry.name)
                     else {
                         continue
@@ -963,19 +1198,7 @@ final class MacHistoryAudioStore: @unchecked Sendable {
         }
     }
 
-    private func verifyRetentionCapacity(sourceBytes: Int64) throws {
-        let managedBytes = try managedRetainedAudioBytes()
-        let (projectedBytes, quotaOverflow) = managedBytes.addingReportingOverflow(sourceBytes)
-        guard
-            !quotaOverflow,
-            sourceBytes <= retainedAudioByteQuota,
-            projectedBytes <= retainedAudioByteQuota
-        else {
-            throw MacHistoryAudioStoreError.retainedAudioQuotaExceeded(
-                limitBytes: retainedAudioByteQuota
-            )
-        }
-
+    private func verifyEncodingWorkspaceCapacity(sourceBytes: Int64) throws {
         let availableBytes = try availableCapacityProvider(directoryURL)
         let (requiredBytes, capacityOverflow) = sourceBytes.addingReportingOverflow(
             freeSpaceReserveBytes
@@ -988,13 +1211,43 @@ final class MacHistoryAudioStore: @unchecked Sendable {
         }
     }
 
+    private func verifyRetentionCapacity(
+        retainedBytes: Int64,
+        managedBytesBeforeRetention: Int64
+    ) throws {
+        let (projectedBytes, quotaOverflow) = managedBytesBeforeRetention
+            .addingReportingOverflow(retainedBytes)
+        guard
+            !quotaOverflow,
+            retainedBytes <= retainedAudioByteQuota,
+            projectedBytes <= retainedAudioByteQuota
+        else {
+            throw MacHistoryAudioStoreError.retainedAudioQuotaExceeded(
+                limitBytes: retainedAudioByteQuota
+            )
+        }
+
+        let availableBytes = try availableCapacityProvider(directoryURL)
+        guard availableBytes >= freeSpaceReserveBytes else {
+            throw MacHistoryAudioStoreError.insufficientFreeSpace(
+                requiredBytes: freeSpaceReserveBytes,
+                availableBytes: availableBytes
+            )
+        }
+    }
+
     /// Counts only this schema's regular, single-link UUID audio entries. The
     /// directory and each entry are inspected with no-follow syscalls, so an
     /// unknown file or managed-looking symlink can neither consume the quota
     /// nor redirect accounting outside the owned directory.
-    private func managedRetainedAudioBytes() throws -> Int64 {
+    private func managedRetainedAudioBytes(
+        excluding excludedFileNames: Set<String> = []
+    ) throws -> Int64 {
         let entries = try MacPrivateStoreIO.regularFileEntries(in: directoryURL)
-            .filter { Self.isManagedFileName($0.name) }
+            .filter {
+                Self.isManagedFileName($0.name)
+                    && !excludedFileNames.contains($0.name.lowercased())
+            }
         let directoryDescriptor = Darwin.open(
             directoryURL.path,
             O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC

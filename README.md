@@ -272,9 +272,11 @@ it is an alternative automation surface rather than the primary keyboard UX.
 - On macOS, audio is staged in a private recovery journal before upload.
   Interrupted, failed, or not-yet-durable work remains locally recoverable.
   After the recovery transaction closes, successful audio is retained by
-  default in a separate History library for playback and reprocessing. That
-  library is capped at 1 GiB, preserves a 2 GiB free-space reserve, follows the
-  History retention setting, and can be disabled or purged. **Never store**
+  default in a separate History library for playback and reprocessing. History
+  copies use speech-efficient AAC/M4A rather than duplicating the recorder's
+  large recovery WAV files; older WAV History copies are migrated in place.
+  The library is capped at 1 GiB, preserves a 2 GiB free-space reserve, follows
+  the History retention setting, and can be disabled or purged. **Never store**
   keeps neither completed History nor successful-audio copies. On iPhone,
   manual in-app recordings are retained after an API failure so Retry can reuse
   them. Shortcut-driven background recordings are deleted after success,

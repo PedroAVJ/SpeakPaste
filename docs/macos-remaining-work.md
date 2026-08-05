@@ -140,9 +140,12 @@ TCC grants, or Application Support.
       successful-audio controls disable appropriately, and Delete All is disabled
       when there is nothing to delete.
 - [ ] Seed disposable History records and retained audio. Exercise search, Play,
-      Stop, Edit Save/Cancel, per-record delete confirm/Cancel, Delete All
-      confirm/Cancel, Process Again, and Process Again cancellation. During
-      reprocessing, actions that could race the record must stay disabled.
+  Stop, Edit Save/Cancel, per-record delete confirm/Cancel, Delete All
+  confirm/Cancel, Process Again, and Process Again cancellation. During
+  reprocessing, actions that could race the record must stay disabled.
+- [ ] Seed referenced legacy WAV History copies and verify launch migration to
+  AAC/M4A preserves every transcript, Play, Process Again, private permissions,
+  and crash recovery at each file/reference handoff boundary.
 - [ ] Fill retained History audio to the 1 GiB quota and simulate the 2 GiB
       free-space reserve boundary. In both cases the transcript must remain saved,
       the optional audio omission must be visible, and existing retained files
