@@ -51,6 +51,8 @@ SpeakPaste is an open-source native Swift dictation project. It contains a macOS
 
 ## macOS build
 
+To check that the project compiles:
+
 ```sh
 xcodebuild \
   -project SpeakPaste.xcodeproj \
@@ -62,5 +64,26 @@ xcodebuild \
   DEVELOPMENT_TEAM= \
   build
 ```
+
+This proves compilation only. It builds the repo's generic
+`com.example.SpeakPasteMac` under local ad-hoc signing and leaves the product in
+`/tmp`, so the app in `/Applications` still runs the previous code. Never report
+a change as runnable on the strength of this command.
+
+## macOS install
+
+To make a change usable in the installed app, run `scripts/install-macos.sh`.
+
+macOS keys microphone and Accessibility grants to the bundle identifier and
+signature together, and keeps Application Support state — including the enrolled
+voice profile — per identifier. Installing under any other identity produces a
+second app with no permissions and no state rather than an upgrade, so the
+installer builds under the identity already in `/Applications`, reading the
+untracked `scripts/local-identity.env` and refusing to run on a mismatch. It
+quits SpeakPaste before replacing the bundle and relaunches it afterward.
+
+Do not pass one-off `PRODUCT_BUNDLE_IDENTIFIER` or `DEVELOPMENT_TEAM` overrides
+by hand to install; that is how a duplicate permission-less app gets created.
+Extend the script instead.
 
 See `README.md` for product behavior, installation, privacy, and current verification status.

@@ -130,6 +130,30 @@ xcodebuild \
   build
 ```
 
+That command answers "does it compile". It signs locally, ships the repo's
+generic `com.example.SpeakPasteMac` identifier, and leaves the product in
+`/tmp` — it does not touch the app in `/Applications`.
+
+To put the current checkout into `/Applications`, run:
+
+```sh
+scripts/install-macos.sh
+```
+
+macOS keys microphone and Accessibility grants to the bundle identifier and
+signature together, and keeps Application Support state per identifier. A build
+installed under a different identity is therefore a *different app* to the
+system: no permissions, no settings, no enrolled voice profile, and a duplicate
+entry in the Accessibility list. The installer avoids that by building under the
+identity the installed copy already uses. It reads your team and identifiers
+from the untracked `scripts/local-identity.env` described under
+[Run the iPhone app and keyboard](#run-the-iphone-app-and-keyboard), defaulting
+the macOS identifier to `${APP_BUNDLE_ID}Mac`, and refuses to install when that
+disagrees with what is already in `/Applications` rather than silently creating a
+second app. It quits SpeakPaste before replacing the bundle — both because a
+running bundle cannot be replaced and so the Continuity-microphone session is
+released cleanly — then relaunches it.
+
 Settings live behind **⌘,** and cover the full Scribe language catalog,
 delivery, sounds, capture-indicator placement, launch at login, the API key,
 custom vocabulary, text replacements, per-app rules, transcript history,
