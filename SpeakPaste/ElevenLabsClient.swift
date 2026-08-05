@@ -8,11 +8,29 @@ protocol ElevenLabsClientProtocol: Sendable {
         apiKey: String,
         language: TranscriptionLanguage,
         cleanSpeech: Bool,
-        keyterms: [String]
+        keyterms: [String],
+        diarize: Bool
     ) async throws -> TranscriptionResult
 }
 
 extension ElevenLabsClientProtocol {
+    func transcribe(
+        audioURL: URL,
+        apiKey: String,
+        language: TranscriptionLanguage,
+        cleanSpeech: Bool,
+        keyterms: [String]
+    ) async throws -> TranscriptionResult {
+        try await transcribe(
+            audioURL: audioURL,
+            apiKey: apiKey,
+            language: language,
+            cleanSpeech: cleanSpeech,
+            keyterms: keyterms,
+            diarize: false
+        )
+    }
+
     func transcribe(
         audioURL: URL,
         apiKey: String,
@@ -24,7 +42,8 @@ extension ElevenLabsClientProtocol {
             apiKey: apiKey,
             language: language,
             cleanSpeech: cleanSpeech,
-            keyterms: []
+            keyterms: [],
+            diarize: false
         )
     }
 }
@@ -344,7 +363,8 @@ final class ElevenLabsClient: ElevenLabsClientProtocol, @unchecked Sendable {
         apiKey: String,
         language: TranscriptionLanguage,
         cleanSpeech: Bool,
-        keyterms: [String]
+        keyterms: [String],
+        diarize: Bool
     ) async throws -> TranscriptionResult {
         // Admission covers multipart preparation, retries, and response decode.
         // Eight simultaneous twenty-minute WAVs must not each allocate/build a
@@ -356,7 +376,8 @@ final class ElevenLabsClient: ElevenLabsClientProtocol, @unchecked Sendable {
                 apiKey: apiKey,
                 language: language,
                 cleanSpeech: cleanSpeech,
-                keyterms: keyterms
+                keyterms: keyterms,
+                diarize: diarize
             )
             await limiter.release()
             return result
@@ -371,7 +392,8 @@ final class ElevenLabsClient: ElevenLabsClientProtocol, @unchecked Sendable {
         apiKey: String,
         language: TranscriptionLanguage,
         cleanSpeech: Bool,
-        keyterms: [String]
+        keyterms: [String],
+        diarize: Bool
     ) async throws -> TranscriptionResult {
         try Task.checkCancellation()
         let boundary = "SpeakPaste-\(UUID().uuidString)"
@@ -393,7 +415,8 @@ final class ElevenLabsClient: ElevenLabsClientProtocol, @unchecked Sendable {
             audioContentType: Self.audioContentType(for: audioURL),
             languageCode: language.apiCode,
             cleanSpeech: cleanSpeech,
-            keyterms: Self.validKeyterms(keyterms)
+            keyterms: Self.validKeyterms(keyterms),
+            diarize: diarize
         )
         try Task.checkCancellation()
 
@@ -488,7 +511,8 @@ final class ElevenLabsClient: ElevenLabsClientProtocol, @unchecked Sendable {
             return TranscriptionResult(
                 text: trimmedText,
                 languageCode: result.languageCode,
-                languageProbability: result.languageProbability
+                languageProbability: result.languageProbability,
+                words: result.words
             )
         }
 
@@ -559,7 +583,8 @@ final class ElevenLabsClient: ElevenLabsClientProtocol, @unchecked Sendable {
         audioContentType: String,
         languageCode: String?,
         cleanSpeech: Bool,
-        keyterms: [String]
+        keyterms: [String],
+        diarize: Bool
     ) throws {
         _ = FileManager.default.createFile(
             atPath: destinationURL.path,
@@ -582,6 +607,16 @@ final class ElevenLabsClient: ElevenLabsClientProtocol, @unchecked Sendable {
         try appendField(name: "model_id", value: "scribe_v2")
         try appendField(name: "no_verbatim", value: cleanSpeech ? "true" : "false")
         try appendField(name: "tag_audio_events", value: "false")
+        // Word timestamps are what make diarization actionable: without them a
+        // speaker label cannot be traced back to the audio it came from, so the
+        // caller could never check the label against a known voice. No
+        // `num_speakers` hint accompanies this — the real number of voices in a
+        // room is unknowable at request time, and a wrong hint corrupts the
+        // label assignment rather than merely limiting it.
+        if diarize {
+            try appendField(name: "diarize", value: "true")
+            try appendField(name: "timestamps_granularity", value: "word")
+        }
         if let languageCode {
             try appendField(name: "language_code", value: languageCode)
         }

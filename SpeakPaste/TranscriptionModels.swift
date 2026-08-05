@@ -184,15 +184,145 @@ struct TranscriptionLanguage: RawRepresentable, CaseIterable, Codable, Hashable,
     )
 }
 
-struct TranscriptionResult: Decodable, Equatable {
+/// One entry of Scribe's timestamped transcript. Diarized requests tag each
+/// entry with the speaker it was attributed to, which is what lets a caller
+/// keep one person's words and discard everyone else's.
+struct TranscribedWord: Decodable, Equatable, Sendable {
+    /// Scribe's own vocabulary, kept open-ended. An unrecognized kind must not
+    /// fail the whole decode: the transcript is still usable, and a new entry
+    /// type is an additive API change rather than a broken response.
+    enum Kind: Equatable, Sendable {
+        case word
+        case spacing
+        case audioEvent
+        case other(String)
+
+        init(rawValue: String) {
+            switch rawValue {
+            case "word": self = .word
+            case "spacing": self = .spacing
+            case "audio_event": self = .audioEvent
+            default: self = .other(rawValue)
+            }
+        }
+
+        /// Whether the entry carries transcript text a reader should see.
+        /// Audio events are bracketed descriptions of non-speech sound, not
+        /// something the user dictated.
+        var carriesTranscriptText: Bool {
+            switch self {
+            case .word, .spacing: true
+            case .audioEvent, .other: false
+            }
+        }
+    }
+
+    let text: String
+    /// Absent when the request asked for no timestamp granularity.
+    let start: TimeInterval?
+    let end: TimeInterval?
+    let kind: Kind
+    /// Absent on non-diarized responses.
+    let speakerID: String?
+
+    enum CodingKeys: String, CodingKey {
+        case text
+        case start
+        case end
+        case type
+        case speakerID = "speaker_id"
+    }
+
+    init(
+        text: String,
+        start: TimeInterval? = nil,
+        end: TimeInterval? = nil,
+        kind: Kind,
+        speakerID: String? = nil
+    ) {
+        self.text = text
+        self.start = start
+        self.end = end
+        self.kind = kind
+        self.speakerID = speakerID
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        text = try container.decodeIfPresent(String.self, forKey: .text) ?? ""
+        start = try container.decodeIfPresent(TimeInterval.self, forKey: .start)
+        end = try container.decodeIfPresent(TimeInterval.self, forKey: .end)
+        kind = Kind(
+            rawValue: try container.decodeIfPresent(String.self, forKey: .type) ?? "word"
+        )
+        speakerID = try container.decodeIfPresent(String.self, forKey: .speakerID)
+    }
+
+    /// The span this entry occupies, when Scribe timestamped it. Zero- and
+    /// negative-length spans are rejected so a caller cannot build an empty or
+    /// reversed read range out of them.
+    var timeRange: ClosedRange<TimeInterval>? {
+        guard
+            let start,
+            let end,
+            start.isFinite,
+            end.isFinite,
+            end > start,
+            start >= 0
+        else {
+            return nil
+        }
+        return start...end
+    }
+}
+
+struct TranscriptionResult: Decodable, Equatable, Sendable {
     let text: String
     let languageCode: String?
     let languageProbability: Double?
+    /// Empty unless the request opted into diarization and timestamps.
+    let words: [TranscribedWord]
 
     enum CodingKeys: String, CodingKey {
         case text
         case languageCode = "language_code"
         case languageProbability = "language_probability"
+        case words
+    }
+
+    init(
+        text: String,
+        languageCode: String?,
+        languageProbability: Double?,
+        words: [TranscribedWord] = []
+    ) {
+        self.text = text
+        self.languageCode = languageCode
+        self.languageProbability = languageProbability
+        self.words = words
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        text = try container.decode(String.self, forKey: .text)
+        languageCode = try container.decodeIfPresent(String.self, forKey: .languageCode)
+        languageProbability = try container.decodeIfPresent(
+            Double.self,
+            forKey: .languageProbability
+        )
+        words = try container.decodeIfPresent([TranscribedWord].self, forKey: .words) ?? []
+    }
+
+    /// The distinct speakers Scribe attributed spoken words to. Only `.word`
+    /// entries count: the whitespace between two people has to be attributed to
+    /// one of them, and letting that decide speaker identity would invent a
+    /// participant out of punctuation.
+    var speakerIDs: Set<String> {
+        Set(
+            words
+                .filter { $0.kind == .word && !$0.text.isEmpty }
+                .compactMap(\.speakerID)
+        )
     }
 }
 

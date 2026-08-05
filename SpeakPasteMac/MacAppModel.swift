@@ -308,6 +308,7 @@ final class MacAppModel: ObservableObject {
     let vocabulary = MacVocabularyStore()
     let replacements = MacReplacementStore()
     let history = MacHistoryStore()
+    let speakerProfile = MacSpeakerProfileStore()
     let sounds = MacSoundEffects()
     let permissions = MacPermissionsModel()
     let deliveryPolicies = MacDeliveryPolicyStore()
@@ -2721,6 +2722,32 @@ final class MacAppModel: ObservableObject {
         return true
     }
 
+    /// Separates the enrolled owner's dictation from any other voice the room
+    /// leaked into the recording — a television, a conversation nearby — before
+    /// the text is treated as something the user said.
+    ///
+    /// The work runs off the main actor because it re-reads the recording and
+    /// runs an FFT across it while the HUD is still animating.
+    private func resolveOwnVoice(
+        in result: TranscriptionResult,
+        audioURL: URL
+    ) async -> MacSpeakerFilter.Outcome {
+        let profile = speakerProfile.profile
+        return await Task.detached(priority: .userInitiated) {
+            MacSpeakerFilter.apply(to: result, profile: profile) { ranges in
+                guard
+                    let audio = MacDictationAudioReader.samples(at: audioURL, ranges: ranges)
+                else {
+                    return nil
+                }
+                return MacVoiceAnalysis.signature(
+                    samples: audio.samples,
+                    sampleRate: audio.sampleRate
+                )
+            }
+        }.value
+    }
+
     /// Transcribes one dictation. Several of these can be in flight at once;
     /// each takes a ticket so delivery still happens in spoken order. When
     /// `interruption` is set, the audio is a partial dictation salvaged from a
@@ -2762,10 +2789,15 @@ final class MacAppModel: ObservableObject {
                 apiKey: apiKey,
                 language: requestedLanguage,
                 cleanSpeech: cleanSpeech,
-                keyterms: requestKeyterms(for: target)
+                keyterms: requestKeyterms(for: target),
+                diarize: true
             )
+            let ownVoice = await resolveOwnVoice(in: result, audioURL: audioURL)
+            if let candidate = ownVoice.enrollmentCandidate {
+                speakerProfile.enroll(candidate)
+            }
             let preparedChunk = MacTranscriptPostProcessor.prepare(
-                result.text,
+                ownVoice.text,
                 replacements: replacements.replacements,
                 spokenFormattingCommands: spokenFormattingCommands
             )
