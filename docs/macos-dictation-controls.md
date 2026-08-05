@@ -13,7 +13,7 @@ cannot drift from what the keys do.
 | right ⌘ | Mac mic: start / pause / resume |
 | right ⌥ | iPhone mic: start / pause / resume |
 | fn | End: close the dictation, deliver everything banked |
-| Esc | Cancel: discard; transcribed segments stay recoverable |
+| Esc | Cancel: close toward discard; reversible during the closing window |
 
 - A source key can never deliver text and never destroy it. `fn` always
   delivers. `Esc` always discards. No key changes consequence class with
@@ -27,19 +27,25 @@ cannot drift from what the keys do.
 ## State machine
 
 A dictation is an ordered list of segments plus at most one hot or
-pending capture. States: **Idle**, **Connecting(source)**,
-**Recording(source)**, **Paused**.
+pending capture. **There is only ever one dictation.** States: **Idle**,
+**Connecting(source)**, **Recording(source)**, **Paused**, and
+**Draining** — ended, delivery not yet landed.
 
 | | right ⌘ | right ⌥ | fn | Esc |
 |---|---|---|---|---|
 | Idle | start Mac | start iPhone | inert | inert |
 | Connecting Mac | inert | inert + HUD nudge | deliver banked, abort¹ | abort → safe floor |
 | Connecting iPhone | inert + HUD nudge | inert | deliver banked, abort¹ | abort → safe floor |
-| Recording Mac | **pause** | inert + HUD nudge | end | discard |
-| Recording iPhone | inert + HUD nudge | **pause** | end | discard |
-| Paused | resume Mac | resume iPhone | end | discard all |
+| Recording Mac | **pause** | inert + HUD nudge | end | discard² |
+| Recording iPhone | inert + HUD nudge | **pause** | end | discard² |
+| Paused | resume Mac | resume iPhone | end | discard all² |
+| Draining | **reopen** on Mac | **reopen** on iPhone | inert | abort → recovery² |
 
 ¹ Inert when nothing is banked.
+² Esc opens a short cancel window rather than discarding instantly.
+During it every key keeps its meaning: a source key reopens, fn
+delivers after all. When it lapses, the dictation is discarded for
+real. No confirmation prompt anywhere — reversal replaces confirmation.
 
 - **While any capture exists — connecting or recording — the other
   source key does nothing** beyond a HUD nudge. Switching sources =
@@ -52,13 +58,22 @@ pending capture. States: **Idle**, **Connecting(source)**,
 
 ## Delivery
 
-While a dictation is open, nothing reaches the cursor. Delivery happens
-only at End, segments in order. Pause finalizes eagerly — the microphone
-is released first, then the segment transcribes immediately — so End
-after a pause is typically instant.
+While a dictation is open, nothing reaches the cursor. **Delivery is
+atomic**: End closes the dictation, and when every segment's transcript
+is in, the whole message lands at the cursor as one delivery. The first
+landed character **seals** the dictation — until then a source key
+**reopens** it (back to recording; delivery called off) and Esc aborts
+it to recovery. After the seal it is immutable and leaves the HUD.
+There is no queue of concurrent dictations: starting during Draining is
+a reopen, not a second message. Pause finalizes eagerly — the
+microphone is released first, then the segment transcribes immediately —
+so End after a pause is typically near-instant, and the reopen window
+correspondingly short.
 
-Esc never delivers; already-transcribed segments become recovery
-entries, not oblivion. No confirmation prompt.
+Esc never delivers. Its cancel window applies to every dictation, short
+or long; when it lapses, the dictation is gone. Already-transcribed
+segments remain recovery entries; the fn path takes no artificial delay
+— delivery is only ever as slow as transcription itself.
 
 ## Menu bar keyboard sheet
 
@@ -75,24 +90,16 @@ keyboard map, replacing menu items.
 - Opening the panel never grants Dock or Command-Tab presence.
 - Footer only: Settings, Quit, readiness/offline notices.
 
-## Resting in the HUD
+## fn requires the 🌐 setting
 
-Pause adds nothing visually: the front card goes still and dim, and the
-rails behind it may keep moving. It is **sourceless** — no laptop or phone
-glyph, because no microphone is live and the next source key decides. It
-never times out; the existing visibility caps apply to the rails, not to a
-resting dictation.
+A modifier's `flagsChanged` cannot be suppressed without breaking that
+key for everything else, so a bare `fn` tap also triggers whatever
+System Settings has under "Press 🌐 to" — physically confirmed: at the
+macOS default it opens the emoji picker alongside End. fn therefore
+requires "Press 🌐 to: Do Nothing" (`AppleFnUsageType = 0`). Onboarding
+must detect the setting and offer a one-click fix; without it, End still
+fires but the OS action fires too.
 
-Open: compression when resting holds many segments. It currently uses the
-stack's ordinary three-card budget with the numeric `+N` badge.
-
-## fn is unverified
-
-A modifier's `flagsChanged` cannot be suppressed without breaking that key
-for everything else, so a bare `fn` tap also triggers whatever System
-Settings has under "Press 🌐 to". Whether that is tolerable needs a
-physical pass.
-
-If it is not, the End verb moves to right ⇧: one constant in
-`MacDictationKey` and one bit in `MacModifierSide`. Nothing else about the
-model changes.
+If that proves intolerable, the End verb moves to right ⇧: one constant
+in `MacDictationKey` and one bit in `MacModifierSide`. Nothing else
+about the model changes.
