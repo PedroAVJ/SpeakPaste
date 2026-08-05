@@ -25,9 +25,9 @@ private struct MacFinishedDictation {
     /// Capture/import time, not the later instant when the network finished.
     let createdAt: Date
     let target: MacDeliveryTarget?
-    /// Present only when provisional realtime text still owns an exact AX
-    /// range and should become the final durable delivery in place.
-    let realtimeEditor: MacRealtimeInlineTextSession?
+    /// Present only while provisional realtime text still owns one marked
+    /// composition that can become the final durable delivery in place.
+    let realtimeComposition: MacRealtimeCompositionSession?
     let deviceName: String
     let recordingDuration: TimeInterval
     let transcriptionDuration: TimeInterval
@@ -48,13 +48,13 @@ private struct MacTerminationRecording {
     let recordingDuration: TimeInterval
 }
 
-/// One opt-in live session. Its AX editor owns only the range created from the
-/// captured collapsed caret, while the WAV remains the durable fallback.
+/// One opt-in live session. Its input-method client owns one marked
+/// composition at the captured caret, while the WAV remains the durable fallback.
 private struct MacActiveRealtimeDictation {
     let id: UUID
     let session: any MacRealtimeScribeSessionProtocol
     let pump: MacRealtimeAudioPump
-    let editor: MacRealtimeInlineTextSession
+    let composition: MacRealtimeCompositionSession
     let target: MacDeliveryTarget
 }
 
@@ -63,13 +63,13 @@ private enum MacRealtimeStopResolution {
     case completed(
         result: TranscriptionResult,
         target: MacDeliveryTarget,
-        editor: MacRealtimeInlineTextSession
+        composition: MacRealtimeCompositionSession
     )
     case batchFallback(
         target: MacDeliveryTarget?,
         requiresManualOutput: Bool,
         precomputedResult: TranscriptionResult?,
-        editor: MacRealtimeInlineTextSession?
+        composition: MacRealtimeCompositionSession?
     )
 }
 
@@ -183,8 +183,8 @@ enum MacHUDPlacement: String, CaseIterable, Identifiable {
 
 /// The capture interaction state. Batch transcription deliberately lives
 /// outside this machine. The experimental realtime lane keeps `finalizing`
-/// only long enough, after hardware release, to resolve the provisional AX
-/// range before another capture can claim the same caret.
+/// only long enough, after hardware release, to resolve the provisional marked
+/// composition before another capture can claim the same caret.
 enum MacCapturePhase: Equatable {
     case ready
     case connecting
@@ -298,6 +298,7 @@ final class MacAppModel: ObservableObject {
     @Published private(set) var recoveryNotice: String?
     @Published private(set) var realtimeModeNotice: String?
     @Published private(set) var realtimeCommitInProgress = false
+    @Published private(set) var realtimeCompositionActive = false
     /// Global Accessibility coordinates for the separate, wordless caret
     /// marker. Nil hides it; live transcript text never enters the status HUD.
     @Published private(set) var realtimeCaretFrame: CGRect?
@@ -479,14 +480,22 @@ final class MacAppModel: ObservableObject {
     private var terminationBlockedByUnjournaledRecording = false
     private var pendingTerminationRecording: MacTerminationRecording?
     private var activeRealtimeDictation: MacActiveRealtimeDictation?
-    /// Blocks older completed dictations from pasting through a newer live AX
-    /// range. Ownership is generation-scoped so a canceled handshake cannot
+    /// Blocks older completed dictations from pasting through a newer live
+    /// composition. Ownership is generation-scoped so a canceled handshake cannot
     /// clear the barrier belonging to its replacement capture.
     private var realtimeDeliveryBarrierID: UUID?
     private var realtimeDeliveryBarrierActive: Bool {
         realtimeDeliveryBarrierID != nil
     }
     private var realtimeLastAppliedRevision: UInt64 = 0
+    /// Input-method updates can be slower than Scribe's partial cadence. Keep
+    /// only the newest waiting hypothesis while one exact replacement is in
+    /// flight instead of replaying stale revisions into the editor.
+    private var pendingRealtimeUpdate: (
+        sessionID: UUID,
+        update: MacRealtimeTranscriptUpdate
+    )?
+    private var realtimeUpdateWorkerSessionID: UUID?
 
     private static let chosenDeviceKey = "mac-chosen-device-id"
     private static let preferredDeviceIDsKey = "mac-preferred-device-ids"
@@ -1100,12 +1109,15 @@ final class MacAppModel: ObservableObject {
             captureStartTask = nil
             let realtime = detachActiveRealtimeForCancellation()
             if let realtime {
+                // Changing source abandons this never-started composition.
+                // Clear it before Continuity teardown so a click or keystroke
+                // cannot implicitly commit provisional text while we wait.
+                realtime.composition.cancelImmediately()
                 phase = .finalizing
                 Task { [weak self] in
                     guard let self else { return }
                     await realtime.session.cancel()
                     await self.recorder.disconnectAndWait()
-                    _ = await realtime.editor.rollback()
                     self.releaseRealtimeDeliveryBarrier(for: realtime.id)
                     self.isMicrophoneConnected = false
                     self.connectedDeviceID = nil
@@ -2076,7 +2088,7 @@ final class MacAppModel: ObservableObject {
             Task { await realtime.session.cancel() }
         }
         recorder.disconnectSynchronously()
-        _ = realtime?.editor.rollbackImmediately()
+        realtime?.composition.cancelImmediately()
         releaseRealtimeDeliveryBarrier(scheduleDrain: false)
         endRecordingActivity()
         networkMonitor.cancel()
@@ -2171,7 +2183,9 @@ final class MacAppModel: ObservableObject {
             let realtime = detachActiveRealtimeForCancellation()
             if let realtime { await realtime.session.cancel() }
             await recorder.disconnectAndWait()
-            if let realtime { _ = await realtime.editor.rollback() }
+            if let realtime {
+                _ = await realtime.composition.cancel()
+            }
             if let realtime {
                 releaseRealtimeDeliveryBarrier(for: realtime.id)
             } else {
@@ -2189,8 +2203,8 @@ final class MacAppModel: ObservableObject {
         let realtime = detachActiveRealtimeForCancellation()
         if let realtime {
             await realtime.session.cancel()
-            if !(await realtime.editor.rollback()) {
-                realtimeModeNotice = "Quit preserved the recording but left provisional text untouched because the destination changed before safe rollback."
+            if !(await realtime.composition.cancel()) {
+                realtimeModeNotice = "Quit preserved the recording; the input client had already detached from its provisional composition."
             }
             releaseRealtimeDeliveryBarrier(for: realtime.id, scheduleDrain: false)
         } else {
@@ -2458,17 +2472,27 @@ final class MacAppModel: ObservableObject {
     ) async {
         realtimeModeNotice = nil
         realtimeCaretFrame = nil
+        // HUD suppression belongs only to the capture being armed. A marked
+        // composition from an older dictation may still be awaiting durable
+        // delivery, but it must not hide a newer batch capture's HUD.
+        realtimeCompositionActive = false
         guard realtimeDictationEnabled else { return }
+        MacRealtimeTrace.event(
+            "arm_requested target=\(target?.bundleIdentifier ?? "none")"
+        )
         guard autoPaste else {
+            MacRealtimeTrace.event("arm_skipped reason=auto_paste_off")
             realtimeModeNotice = "Realtime stayed on batch because automatic paste is off."
             return
         }
         guard let target else {
+            MacRealtimeTrace.event("arm_skipped reason=no_target")
             realtimeModeNotice = "Realtime stayed on batch because no exact external text field was captured."
             return
         }
         if let policy = deliveryPolicy(for: target),
            policy.deliveryMethod != .automatic || policy.autoSend {
+            MacRealtimeTrace.event("arm_skipped reason=delivery_rule")
             realtimeModeNotice = "Realtime stayed on batch for this app's delivery rule."
             return
         }
@@ -2481,6 +2505,7 @@ final class MacAppModel: ObservableObject {
             !isDeliveringHeldTranscripts,
             activeDeliveryEscrowIDs.isEmpty
         else {
+            MacRealtimeTrace.event("arm_skipped reason=delivery_busy")
             realtimeModeNotice = "Realtime stayed on batch because an earlier dictation is still being delivered."
             return
         }
@@ -2490,10 +2515,44 @@ final class MacAppModel: ObservableObject {
         // the network, and only this generation may release the reservation.
         let sessionID = UUID()
         realtimeDeliveryBarrierID = sessionID
-        guard let editor = target.makeRealtimeInlineTextSession() else {
+        guard let targetBundleID = target.bundleIdentifier else {
             releaseRealtimeDeliveryBarrier(for: sessionID)
-            realtimeModeNotice = "Realtime stayed on batch because this field does not expose a safely editable text range."
+            MacRealtimeTrace.event("arm_skipped reason=missing_bundle_id")
+            realtimeModeNotice = "Realtime stayed on batch because macOS could not identify this app's input client."
             return
+        }
+        guard target.isStillRealtimeAttachmentTarget else {
+            releaseRealtimeDeliveryBarrier(for: sessionID)
+            MacRealtimeTrace.event("arm_skipped reason=target_changed_before_attach")
+            realtimeModeNotice = "Realtime stayed on batch because the text field changed during setup."
+            return
+        }
+
+        let composition: MacRealtimeCompositionSession
+        do {
+            composition = try await MacRealtimeInputMethodClient.shared.attach(
+                sessionID: sessionID,
+                targetBundleID: targetBundleID
+            )
+        } catch {
+            releaseRealtimeDeliveryBarrier(for: sessionID)
+            MacRealtimeTrace.event("arm_skipped reason=input_method_attach")
+            realtimeModeNotice = "Realtime stayed on batch because its native text composition could not attach: \(diagnosticMessage(for: error))"
+            return
+        }
+        guard target.isStillRealtimeAttachmentTarget else {
+            _ = await composition.cancel()
+            releaseRealtimeDeliveryBarrier(for: sessionID)
+            MacRealtimeTrace.event("arm_skipped reason=target_changed_during_attach")
+            realtimeModeNotice = "Realtime stayed on batch because the text field changed during setup."
+            return
+        }
+        composition.onDetach = { [weak self] reason in
+            guard let self else { return }
+            self.realtimeCompositionActive = false
+            self.realtimeCaretFrame = nil
+            self.realtimeModeNotice = "Realtime stopped editing because the input client changed. The final result will be held for manual placement."
+            MacRealtimeTrace.event("composition_detached reason=\(reason)")
         }
 
         let session = realtimeFactory.makeSession()
@@ -2507,12 +2566,16 @@ final class MacAppModel: ObservableObject {
                 )
             ) { [weak self] update in
                 Task { @MainActor [weak self] in
-                    await self?.receiveRealtimeUpdate(update, sessionID: sessionID)
+                    self?.enqueueRealtimeUpdate(update, sessionID: sessionID)
                 }
             }
         } catch {
             await session.cancel()
+            _ = await composition.cancel()
             releaseRealtimeDeliveryBarrier(for: sessionID)
+            MacRealtimeTrace.event(
+                "arm_failed reason=\(MacRealtimeTrace.failureCode(for: error))"
+            )
             guard captureRequestID == requestID, !Task.isCancelled else { return }
             realtimeModeNotice = "Realtime could not start, so this dictation is using batch Scribe: \(diagnosticMessage(for: error))"
             return
@@ -2520,30 +2583,105 @@ final class MacAppModel: ObservableObject {
 
         guard captureRequestID == requestID, !Task.isCancelled else {
             await session.cancel()
+            _ = await composition.cancel()
             releaseRealtimeDeliveryBarrier(for: sessionID)
+            return
+        }
+        guard
+            !composition.isDetached,
+            !composition.isClosed,
+            target.isStillRealtimeAttachmentTarget
+        else {
+            await session.cancel()
+            _ = await composition.cancel()
+            releaseRealtimeDeliveryBarrier(for: sessionID)
+            MacRealtimeTrace.event("arm_failed reason=composition_detached")
+            realtimeModeNotice = "Realtime stayed on batch because the input client changed during setup."
             return
         }
         activeRealtimeDictation = MacActiveRealtimeDictation(
             id: sessionID,
             session: session,
             pump: MacRealtimeAudioPump(session: session),
-            editor: editor,
+            composition: composition,
             target: target
         )
         realtimeLastAppliedRevision = 0
-        realtimeCaretFrame = editor.caretFrame
+        pendingRealtimeUpdate = nil
+        realtimeUpdateWorkerSessionID = nil
+        realtimeCompositionActive = true
+        realtimeCaretFrame = target.realtimeCaretFrame
+        MacRealtimeTrace.event("arm_succeeded")
     }
 
-    private func receiveRealtimeUpdate(
+    private func enqueueRealtimeUpdate(
         _ update: MacRealtimeTranscriptUpdate,
         sessionID: UUID
-    ) async {
+    ) {
         guard
             let active = activeRealtimeDictation,
             active.id == sessionID,
             update.revision > realtimeLastAppliedRevision
         else {
             return
+        }
+        if let pending = pendingRealtimeUpdate,
+           pending.sessionID == sessionID,
+           pending.update.revision >= update.revision {
+            return
+        }
+        pendingRealtimeUpdate = (sessionID, update)
+        guard realtimeUpdateWorkerSessionID != sessionID else { return }
+        realtimeUpdateWorkerSessionID = sessionID
+        Task { @MainActor [weak self] in
+            await self?.drainRealtimeUpdates(sessionID: sessionID)
+        }
+    }
+
+    private func drainRealtimeUpdates(sessionID: UUID) async {
+        while
+            activeRealtimeDictation?.id == sessionID,
+            let pending = pendingRealtimeUpdate,
+            pending.sessionID == sessionID
+        {
+            pendingRealtimeUpdate = nil
+            guard await applyRealtimeUpdate(
+                pending.update,
+                sessionID: sessionID
+            ) else {
+                if pendingRealtimeUpdate?.sessionID == sessionID {
+                    pendingRealtimeUpdate = nil
+                }
+                break
+            }
+        }
+        if realtimeUpdateWorkerSessionID == sessionID {
+            realtimeUpdateWorkerSessionID = nil
+        }
+    }
+
+    private func applyRealtimeUpdate(
+        _ update: MacRealtimeTranscriptUpdate,
+        sessionID: UUID
+    ) async -> Bool {
+        guard
+            let active = activeRealtimeDictation,
+            active.id == sessionID,
+            update.revision > realtimeLastAppliedRevision
+        else {
+            return false
+        }
+        guard active.target.isStillRealtimeAttachmentTarget else {
+            // Some InputMethodKit clients reuse one controller across fields
+            // without issuing a lifecycle callback. The app-wide interaction
+            // generation is the authoritative focus/caret boundary in that
+            // case; clear the old mark before accepting another hypothesis.
+            active.composition.cancelImmediately()
+            realtimeCompositionActive = false
+            realtimeCaretFrame = nil
+            realtimeModeNotice = "Realtime stopped editing because the text field changed. The final result will be held for manual placement."
+            MacRealtimeTrace.event("composition_detached reason=target_changed")
+            return false
         }
         realtimeLastAppliedRevision = update.revision
         let previewChunk = MacTranscriptPostProcessor.prepare(
@@ -2555,38 +2693,83 @@ final class MacAppModel: ObservableObject {
             previewChunk,
             after: active.target.precedingText
         )
-        let didUpdate = await active.editor.update(text: preview)
-        guard activeRealtimeDictation?.id == sessionID else { return }
+        let didUpdate = await active.composition.update(
+            revision: update.revision,
+            text: preview
+        )
+        guard activeRealtimeDictation?.id == sessionID else { return false }
         guard didUpdate else {
+            realtimeCompositionActive = false
             realtimeCaretFrame = nil
-            realtimeModeNotice = "Realtime stopped editing because the field, caret, or focus changed. The final result will be held for manual placement."
-            return
+            realtimeModeNotice = "Realtime stopped editing because the input client changed. The final result will be held for manual placement."
+            MacRealtimeTrace.event("composition_detached revision=\(update.revision)")
+            return false
         }
-        realtimeCaretFrame = active.editor.caretFrame
+        realtimeCaretFrame = active.target.realtimeCaretFrame
+        return true
+    }
+
+    /// The realtime actor enqueues its final update before `finish()` returns.
+    /// Let that update and any in-flight input-method request settle before the
+    /// composition is handed to final delivery, so finish cannot race an older
+    /// provisional revision.
+    private func settleRealtimeUpdates(sessionID: UUID) async -> Bool {
+        for _ in 0..<100 {
+            await Task.yield()
+            if pendingRealtimeUpdate?.sessionID == sessionID,
+               realtimeUpdateWorkerSessionID != sessionID {
+                realtimeUpdateWorkerSessionID = sessionID
+                await drainRealtimeUpdates(sessionID: sessionID)
+            }
+            let hasPending = pendingRealtimeUpdate?.sessionID == sessionID
+            let hasWorker = realtimeUpdateWorkerSessionID == sessionID
+            if !hasPending, !hasWorker {
+                // Close the scheduling gap between the WebSocket callback and
+                // the callback's MainActor enqueue task.
+                await Task.yield()
+                if pendingRealtimeUpdate?.sessionID != sessionID,
+                   realtimeUpdateWorkerSessionID != sessionID {
+                    return true
+                }
+            }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        MacRealtimeTrace.event("update_drain_timed_out")
+        return false
     }
 
     /// Called only after the recorder has returned its release receipt. Audio
     /// frames are drained in order, then the manual commit is awaited. The
-    /// provisional AX range remains owned until History/escrow are durable and
-    /// the final processed text replaces that range in place.
+    /// provisional marked composition remains owned until History/escrow are
+    /// durable and the final processed text commits it exactly once.
     private func finalizeRealtimeAfterRecorderRelease() async -> MacRealtimeStopResolution {
         guard let active = activeRealtimeDictation else { return .inactive }
         recorder.finishRealtimeAudioStreaming()
         do {
             let sentByteCount = try await active.pump.finish()
+            MacRealtimeTrace.event("audio_pump_finished bytes=\(sentByteCount)")
             guard sentByteCount >= 3_200 else {
                 throw MacRealtimeScribeError.noConvertedAudio
             }
             let result = try await active.session.finish()
+            guard await settleRealtimeUpdates(sessionID: active.id) else {
+                active.composition.cancelImmediately()
+                realtimeCompositionActive = false
+                realtimeCaretFrame = nil
+                throw MacRealtimeScribeError.commitTimedOut
+            }
             activeRealtimeDictation = nil
             releaseRealtimeDeliveryBarrier(for: active.id)
             realtimeCaretFrame = nil
             return .completed(
                 result: result,
                 target: active.target,
-                editor: active.editor
+                composition: active.composition
             )
         } catch {
+            MacRealtimeTrace.event(
+                "realtime_fallback reason=\(MacRealtimeTrace.failureCode(for: error))"
+            )
             active.pump.cancel()
             await active.session.cancel()
             activeRealtimeDictation = nil
@@ -2597,23 +2780,25 @@ final class MacAppModel: ObservableObject {
                 target: active.target,
                 requiresManualOutput: false,
                 precomputedResult: nil,
-                editor: active.editor
+                composition: active.composition
             )
         }
     }
 
-    /// Invalidates the socket/audio producer and returns the detached editor so
+    /// Invalidates the socket/audio producer and returns the composition so
     /// callers can preserve hardware-release ordering. Explicit cancel and
-    /// unrecoverable no-audio failures roll back; recoverable batch fallback
-    /// keeps this editor and finalizes its owned range in place.
+    /// unrecoverable no-audio failures clear it; recoverable batch fallback
+    /// keeps it marked and commits the eventual result in place.
     private func detachActiveRealtimeForCancellation() -> MacActiveRealtimeDictation? {
         recorder.cancelRealtimeAudioStreaming()
         guard let active = activeRealtimeDictation else {
+            realtimeCompositionActive = false
             realtimeCaretFrame = nil
             return nil
         }
         activeRealtimeDictation = nil
         active.pump.cancel()
+        realtimeCompositionActive = false
         realtimeCaretFrame = nil
         return active
     }
@@ -2702,9 +2887,9 @@ final class MacAppModel: ObservableObject {
         } catch {
             let active = detachActiveRealtimeForCancellation()
             if let active {
+                active.composition.cancelImmediately()
                 await active.session.cancel()
                 await recorder.disconnectAndWait()
-                _ = await active.editor.rollback()
                 releaseRealtimeDeliveryBarrier(for: active.id)
             }
             guard captureRequestID == requestID else { return }
@@ -2762,7 +2947,7 @@ final class MacAppModel: ObservableObject {
                     deviceName: deviceName,
                     recordingDuration: recordingDuration,
                     interruption: interruption ?? diagnosticMessage(for: salvaged.underlying),
-                    realtimeEditor: realtime?.editor,
+                    realtimeComposition: realtime?.composition,
                     hudCardID: hudCapture?.id,
                     hudOrdinal: hudCapture?.ordinal
                 )
@@ -2777,7 +2962,9 @@ final class MacAppModel: ObservableObject {
             // No recoverable audio means no final result can replace the live
             // hypothesis. Explicitly restore the original field when it is
             // still safe; otherwise leave the user's field untouched.
-            if let realtime { _ = await realtime.editor.rollback() }
+            if let realtime {
+                _ = await realtime.composition.cancel()
+            }
             deliveryTarget = nil
             recordFailure(
                 diagnosticMessage(for: error),
@@ -2800,7 +2987,7 @@ final class MacAppModel: ObservableObject {
         let resumesCapture = settleInputModeAfterFinalization()
 
         // The microphone is released and the audio is on disk. Batch capture
-        // can hand off immediately; realtime first resolves its provisional AX
+        // can hand off immediately; realtime first resolves its provisional
         // ownership above, then both modes enter the same durable background
         // transcription/delivery pipeline.
         recordingWarning = nil
@@ -2820,7 +3007,7 @@ final class MacAppModel: ObservableObject {
                 hudCardID: hudCapture?.id,
                 hudOrdinal: hudCapture?.ordinal
             )
-        case let .completed(result, target, editor):
+        case let .completed(result, target, composition):
             handoffIsDurable = startTranscription(
                 audioURL: segment.url,
                 target: target,
@@ -2828,11 +3015,11 @@ final class MacAppModel: ObservableObject {
                 recordingDuration: recordingDuration,
                 interruption: interruption,
                 precomputedResult: result,
-                realtimeEditor: editor,
+                realtimeComposition: composition,
                 hudCardID: hudCapture?.id,
                 hudOrdinal: hudCapture?.ordinal
             )
-        case let .batchFallback(target, requiresManualOutput, precomputedResult, editor):
+        case let .batchFallback(target, requiresManualOutput, precomputedResult, composition):
             handoffIsDurable = startTranscription(
                 audioURL: segment.url,
                 target: target ?? capturedTarget,
@@ -2841,7 +3028,7 @@ final class MacAppModel: ObservableObject {
                 interruption: interruption,
                 requiresManualOutput: requiresManualOutput,
                 precomputedResult: precomputedResult,
-                realtimeEditor: editor,
+                realtimeComposition: composition,
                 hudCardID: hudCapture?.id,
                 hudOrdinal: hudCapture?.ordinal
             )
@@ -2887,10 +3074,18 @@ final class MacAppModel: ObservableObject {
         isImport: Bool = false,
         requiresManualOutput: Bool = false,
         precomputedResult: TranscriptionResult? = nil,
-        realtimeEditor: MacRealtimeInlineTextSession? = nil,
+        realtimeComposition: MacRealtimeCompositionSession? = nil,
         hudCardID: UUID? = nil,
         hudOrdinal: Int? = nil
     ) -> Bool {
+        var compositionWasHandedOff = realtimeComposition == nil
+        defer {
+            if !compositionWasHandedOff {
+                realtimeComposition?.cancelImmediately()
+                realtimeCompositionActive = false
+                realtimeCaretFrame = nil
+            }
+        }
         let record: MacPendingAudioRecord
         do {
             if let existingRecordID {
@@ -2995,13 +3190,14 @@ final class MacAppModel: ObservableObject {
                 isImport: isImport,
                 requiresManualOutput: requiresManualOutput,
                 precomputedResult: precomputedResult,
-                realtimeEditor: realtimeEditor,
+                realtimeComposition: realtimeComposition,
                 networkGenerationAtRequestStart: networkGenerationAtRequestStart,
                 workloadID: workloadID,
                 hudCardID: resolvedHUDCardID,
                 hudOrdinal: resolvedHUDOrdinal
             )
         }
+        compositionWasHandedOff = true
         return true
     }
 
@@ -3022,7 +3218,7 @@ final class MacAppModel: ObservableObject {
         isImport: Bool,
         requiresManualOutput: Bool,
         precomputedResult: TranscriptionResult?,
-        realtimeEditor: MacRealtimeInlineTextSession?,
+        realtimeComposition: MacRealtimeCompositionSession?,
         networkGenerationAtRequestStart: UInt64,
         workloadID: UUID,
         hudCardID: UUID,
@@ -3206,7 +3402,7 @@ final class MacAppModel: ObservableObject {
                 deliveryEscrowID: deliveryEscrowID,
                 createdAt: createdAt,
                 target: target,
-                realtimeEditor: realtimeEditor,
+                realtimeComposition: realtimeComposition,
                 deviceName: deviceName,
                 recordingDuration: recordingDuration,
                 transcriptionDuration: Date().timeIntervalSince(transcriptionStartedAt),
@@ -3227,6 +3423,11 @@ final class MacAppModel: ObservableObject {
                 await drainCompletedDictations()
             }
         } catch {
+            if let realtimeComposition {
+                _ = await realtimeComposition.cancel()
+                realtimeCompositionActive = false
+                realtimeCaretFrame = nil
+            }
             let connectivityFailure = isConnectivityFailure(error)
             var reason = connectivityFailure
                 ? "\(Self.connectivityRetryReason) \(diagnosticMessage(for: error))"
@@ -3269,7 +3470,7 @@ final class MacAppModel: ObservableObject {
                 deliveryEscrowID: nil,
                 createdAt: createdAt,
                 target: target,
-                realtimeEditor: nil,
+                realtimeComposition: nil,
                 deviceName: deviceName,
                 recordingDuration: recordingDuration,
                 transcriptionDuration: 0,
@@ -3472,6 +3673,10 @@ final class MacAppModel: ObservableObject {
         captureStartTask = nil
         stopMeter()
         let realtime = detachActiveRealtimeForCancellation()
+        // Escape is an immediate text cancellation. Hardware teardown may take
+        // longer, especially with Continuity, but provisional words must not
+        // remain live during that wait and accidentally commit on user input.
+        realtime?.composition.cancelImmediately()
         deliveryTarget = nil
         recordingWarning = nil
         automaticStopInProgress = false
@@ -3481,9 +3686,6 @@ final class MacAppModel: ObservableObject {
             guard let self else { return }
             if let realtime { await realtime.session.cancel() }
             await self.recorder.disconnectAndWait()
-            if let realtime, !(await realtime.editor.rollback()) {
-                self.realtimeModeNotice = "Realtime cancellation left the field untouched because SpeakPaste could no longer prove ownership of the provisional range."
-            }
             if let realtime {
                 self.releaseRealtimeDeliveryBarrier(for: realtime.id)
             } else {
@@ -3596,6 +3798,14 @@ final class MacAppModel: ObservableObject {
     }
 
     private func deliver(_ finished: MacFinishedDictation) async {
+        var realtimeCompositionWasResolved = finished.realtimeComposition == nil
+        defer {
+            if !realtimeCompositionWasResolved {
+                finished.realtimeComposition?.cancelImmediately()
+                realtimeCompositionActive = false
+                realtimeCaretFrame = nil
+            }
+        }
         guard !finished.text.isEmpty else {
             finishHUDCard(finished.hudCardID)
             recordCompletedFailure(
@@ -3759,7 +3969,7 @@ final class MacAppModel: ObservableObject {
             sourceText: finished.text
         )
         let deliveryOutcome: MacPasteDeliveryOutcome
-        if let realtimeEditor = finished.realtimeEditor,
+        if let realtimeComposition = finished.realtimeComposition,
            let target = finished.target {
             let finalText = MacTranscriptPostProcessor.fit(
                 finished.preparedChunk,
@@ -3767,10 +3977,13 @@ final class MacAppModel: ObservableObject {
             )
             deliveryOutcome = await pasteController.deliverRealtime(
                 finalText,
-                editor: realtimeEditor,
+                composition: realtimeComposition,
                 target: target,
                 heldClipboardOwner: heldClipboardOwner
             )
+            realtimeCompositionWasResolved = true
+            realtimeCompositionActive = false
+            realtimeCaretFrame = nil
         } else {
             deliveryOutcome = await pasteController.deliver(
                 finished.preparedChunk,
@@ -4826,7 +5039,9 @@ final class MacAppModel: ObservableObject {
                 self.releaseRealtimeDeliveryBarrier()
             }
             guard let salvagedAudioURL else {
-                if let realtime { _ = await realtime.editor.rollback() }
+                if let realtime {
+                    _ = await realtime.composition.cancel()
+                }
                 self.recordFailure(
                     self.diagnosticMessage(for: error),
                     deviceName: deviceName,
@@ -4846,7 +5061,7 @@ final class MacAppModel: ObservableObject {
                 deviceName: deviceName,
                 recordingDuration: recordingDuration,
                 interruption: interruption,
-                realtimeEditor: realtime?.editor,
+                realtimeComposition: realtime?.composition,
                 hudCardID: hudCapture?.id,
                 hudOrdinal: hudCapture?.ordinal
             )

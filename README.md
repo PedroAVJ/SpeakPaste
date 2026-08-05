@@ -346,23 +346,27 @@ speed-versus-quality selector: quality-first ElevenLabs Scribe v2 batch
 transcription remains the default product path.
 
 General settings also contain a default-off **Experimental realtime text at the
-cursor** switch for testing ElevenLabs `scribe_v2_realtime`. On a readable,
-settable Accessibility text field with a collapsed caret and ordinary automatic
-delivery, interim hypotheses replace one exact app-owned range at the captured
-caret while a tiny mic marker sits beside it. Enabling the experiment suppresses
-the ordinary top status HUD for the entire run, including targets that fall back
-to batch. The recoverable WAV is still recorded in parallel. To prove it still
-owns that range, the experiment reads and compares the full active field locally
-on every hypothesis; that text is never uploaded or written to disk. Very large
-fields therefore remain a physical performance check for this experiment.
-Stop releases the microphone first, drains and manually commits the stream,
-then durably saves the result before replacing the same owned live range with
-the fully post-processed final text. This avoids a second menu paste and the
-visible erase/reinsert gap. A changed field/caret/focus fails closed to manual
-placement. A nonempty selection, unsupported field, older delivery still in
-flight, special per-app delivery rule, realtime error, or disabled auto-paste
-uses the existing batch path. Escape never commits the stream. Compilation does
-not establish physical Accessibility or Continuity acceptance.
+cursor** switch for testing ElevenLabs `scribe_v2_realtime`. For an eligible
+collapsed caret under ordinary automatic delivery, SpeakPaste attaches a hidden
+InputMethodKit palette to the active text-input client. Each cumulative snapshot
+-- the stable committed prefix plus the changing provisional tail -- is one
+marked-text composition. A later snapshot replaces that same composition rather
+than appending or repeatedly pasting text. The recoverable WAV is still recorded
+in parallel.
+
+Only a successfully attached realtime composition suppresses the ordinary top
+status HUD and uses the tiny caret mic marker. If the palette is unavailable,
+the target cannot host a marked composition, or attachment fails, SpeakPaste
+keeps the existing batch path and its normal HUD instead of pretending realtime
+is active. Stop releases the microphone first, drains and manually commits the
+stream, and makes History and delivery escrow durable before the fully
+post-processed final text is inserted exactly once through the active input
+method. It does not follow that with a menu paste. Escape clears the provisional
+composition without committing it. Client, focus, or composition loss fails
+closed to manual placement; other unsupported delivery rules remain batch-only.
+The implementation follows the native marked-text pattern, but compilation and
+isolated callbacks do not establish physical acceptance in Notes, TextEdit,
+Codex, Claude Code, other Electron editors, or over the Continuity chain.
 
 The current macOS capability set and the features deliberately excluded from
 the product are recorded in [the product-parity ledger](docs/macos-feature-parity.md).

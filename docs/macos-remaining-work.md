@@ -8,7 +8,8 @@ set below is explicit rather than hidden behind a blanket parity claim.
 What remains is acceptance and release engineering. Partial isolated UI
 inspection is useful evidence, but it is not a full real-device run: the
 system-owned Continuity surface, physical microphone release, and destination
-apps' Accessibility behavior can only be proved on the actual Mac/iPhone chain.
+apps' Accessibility and marked-text behavior can only be proved on the actual
+Mac/iPhone chain.
 
 ## Deferred capability candidates
 
@@ -202,53 +203,68 @@ for the release evidence.
       iPhone's system-owned capture surface dismisses before transcription.
 - [ ] Repeat immediately to prove clean Continuity release and reconnect, not
       merely one successful transcription.
+- [ ] Install and enable the bundled hidden input-method palette through the
+      system prompt. Confirm it remains absent from the user's visible input
+      menu, selecting it does not change the active keyboard layout, and it
+      reconnects after both SpeakPaste and the target app relaunch.
 - [ ] Turn on **Experimental realtime text at the cursor**. In Notes and TextEdit,
       test an empty caret and a collapsed caret in the middle of existing text.
-      Confirm changing hypotheses replace one live span rather than append
-      duplicates, preserve all prefix/suffix text, and show only the tiny caret
-      mic marker — the ordinary top HUD must never appear. Then start with a
-      nonempty selection and confirm the run stays on batch with no top HUD: no
+      Confirm each cumulative hypothesis replaces one marked composition rather
+      than appending or pasting duplicates, preserves surrounding text, and shows
+      only the tiny caret mic marker. The ordinary top HUD must disappear only
+      after the composition attaches. Then start with a nonempty selection and
+      confirm the unsupported run stays on batch with its normal HUD: no
       provisional text appears, and ordinary final batch delivery replaces the
       captured selection exactly once.
 - [ ] Dictate text that makes the hypothesis grow, shrink, and rewrite. Stop
       normally and confirm the iPhone capture surface dismisses before realtime
-      commit finishes, the provisional span does not flash into a duplicate, and
-      exactly one fully post-processed final transcript remains at the original
-      cursor without an erase/reinsert gap or a second synthetic paste.
+      commit finishes, the provisional composition does not flash into a
+      duplicate, and exactly one fully post-processed final transcript remains
+      at the original cursor without an erase/reinsert gap, clipboard mutation,
+      or a second synthetic paste.
+- [ ] Repeat the grow, shrink, rewrite, normal stop, and Escape cases in Codex
+      and Claude Code. Confirm their editor state follows the marked composition,
+      the final text remains after focus changes, and SpeakPaste never reports a
+      successful insertion that exists only in the Accessibility tree.
 - [ ] After stopping, move the caret, select text, or type while the final result
-      is passing through History. The final paste must not follow the moved caret
-      or replace the new selection; it must wait for explicit manual placement.
+      is passing through History. The final insertion must not follow the moved
+      caret or replace the new selection; it must wait for explicit manual
+      placement.
 - [ ] During a live hypothesis, type a character, move the caret, change fields,
       switch apps, and close the target window in separate runs. Each run must
-      permanently stop live editing without erasing the user's change; the final
-      text must wait for manual placement rather than auto-paste elsewhere.
-- [ ] Press Escape after several live hypotheses. When exact ownership still
-      holds, the original value and collapsed caret must return. When ownership
-      was disturbed, SpeakPaste must touch nothing further. Repeat from a
-      nonempty selection and confirm the batch-only run leaves that selection and
-      its text unchanged. No run may commit or deliver a final transcript.
+      detach or cancel the marked composition without erasing the user's change;
+      the final text must wait for manual placement rather than auto-paste
+      elsewhere. Verify that ending composition never synthesizes Return or
+      submits an existing draft in Notes, Codex, Claude Code, or a browser editor.
+- [ ] Press Escape after several live hypotheses. The marked composition must
+      clear without becoming ordinary text, leaving surrounding text and the
+      collapsed caret intact. Repeat from a nonempty selection and confirm the
+      batch-only run leaves that selection and its text unchanged. No run may
+      commit or deliver a final transcript.
 - [ ] Disable the network or invalidate the realtime session while speaking.
       Stop normally and confirm the private WAV takes the batch fallback path.
-      The live owned range must remain visible and the batch result must finalize
-      it in place without a rollback or second automatic paste. Lost ownership
-      must leave the field untouched and hold one result manually.
+      A still-attached marked composition must finalize once with the batch
+      result and no follow-up paste. A detached composition must leave the field
+      untouched and hold one result manually. If attachment never succeeded, the
+      run must use ordinary batch delivery and the normal HUD.
 - [ ] With realtime enabled, test a secure field, an opaque Electron/browser
       editor, disabled auto-paste, and per-app clipboard-only, type-out, explicit
       Paste-menu, and auto-send rules. Each must stay on batch without synthetic
-      interim paste attempts or Return-key side effects.
+      interim paste attempts or Return-key side effects, and each fallback must
+      keep the ordinary batch HUD.
 - [ ] Run a dictation beyond 55 seconds to cross two 25-second manual-commit
       boundaries, then stop during active speech. Confirm every committed segment
       appears once, the trailing speech is present, and the resulting order
       matches speech.
-- [ ] Repeat live editing in a very large Notes or TextEdit document. Confirm the
-      full-field ownership comparisons do not produce unacceptable caret lag; if
-      they do, treat large fields as an experiment limitation rather than release
-      acceptance.
+- [ ] Repeat live editing in a very large Notes or TextEdit document. Confirm
+      marked-text replacement remains responsive without reading or rewriting
+      the complete document; treat any client-specific lag as an experiment
+      limitation rather than release acceptance.
 - [ ] Quit normally, force-quit a disposable candidate, sleep/wake, switch input
       mode, and trigger a mid-stream microphone loss while realtime is active.
-      Confirm hardware release, in-place batch finalization or manual-only hold,
-      one recoverable WAV where applicable, safe rollback only when no audio can
-      be recovered, and no unattended replay after relaunch.
+      Confirm hardware release, one input-method final insertion or manual-only
+      hold, one recoverable WAV where applicable, provisional-composition clear
+      when no audio can be recovered, and no unattended replay after relaunch.
 - [ ] Start in Mac mode, double-tap bare right Command while idle, and confirm
       iPhone mode is selected. Relaunch and confirm the mode persists. Double-tap
       back and verify Mac mode also persists.

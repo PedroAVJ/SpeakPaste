@@ -4,9 +4,9 @@ import Foundation
 enum MacHUDVisibilityPolicy {
     static func shouldPresent(
         hudEnabled: Bool,
-        realtimeDictationEnabled: Bool
+        realtimeCompositionActive: Bool
     ) -> Bool {
-        hudEnabled && !realtimeDictationEnabled
+        hudEnabled && !realtimeCompositionActive
     }
 }
 

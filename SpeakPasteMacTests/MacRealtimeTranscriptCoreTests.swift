@@ -114,7 +114,7 @@ final class MacRealtimeTranscriptCoreTests: XCTestCase {
         XCTAssertFalse(url.absoluteString.contains(secret))
     }
 
-    func testCommitAudioMessageUsesEmptyPCMChunkAndRequiredSampleRate() throws {
+    func testCommitAudioMessageUsesOfficialEmptyPCMCommitFrame() throws {
         let message = try MacRealtimeScribeRequestBuilder.audioMessage(
             data: Data(),
             commit: true

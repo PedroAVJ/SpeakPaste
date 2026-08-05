@@ -6,22 +6,28 @@ final class MacHUDVisibilityPolicyTests: XCTestCase {
         XCTAssertTrue(
             MacHUDVisibilityPolicy.shouldPresent(
                 hudEnabled: true,
-                realtimeDictationEnabled: false
+                realtimeCompositionActive: false
             )
         )
         XCTAssertFalse(
             MacHUDVisibilityPolicy.shouldPresent(
                 hudEnabled: false,
-                realtimeDictationEnabled: false
+                realtimeCompositionActive: false
             )
         )
     }
 
-    func testRealtimeToggleAlwaysSuppressesStatusHUD() {
+    func testOnlyAnAttachedRealtimeCompositionSuppressesStatusHUD() {
         XCTAssertFalse(
             MacHUDVisibilityPolicy.shouldPresent(
                 hudEnabled: true,
-                realtimeDictationEnabled: true
+                realtimeCompositionActive: true
+            )
+        )
+        XCTAssertTrue(
+            MacHUDVisibilityPolicy.shouldPresent(
+                hudEnabled: true,
+                realtimeCompositionActive: false
             )
         )
     }
