@@ -24,6 +24,20 @@ If automatic return is unavailable, SpeakPaste keeps recording and tells the
 user to swipe right along the bottom home bar. That fallback is part of the
 product, not an error that discards the recording.
 
+## What the app shows during a round trip
+
+SpeakPaste is only on screen for a moment, so a keyboard session replaces the
+dashboard with one hand-off surface covering three states: starting, recording,
+and transcribing. It shows the state, the way back, and where the transcript
+will land. The surface is up from the frame the keyboard hands off — before
+permission and audio activation have finished — through the end of capture. A
+failure hands the screen back to the dashboard, which owns retry, the API key,
+and the recovered recording.
+
+The launch screen is painted in the app's own background color. The default
+empty `UILaunchScreen` renders `systemBackground`, which flashed white on every
+cold-launch bounce.
+
 ## What Wispr documents
 
 Wispr's iPhone guide documents the same visible app bounce and a manual-swipe
@@ -108,6 +122,9 @@ The implementation is split across:
   host and retains older resolution paths as diagnostic fallbacks.
 - `SpeakPaste/AppModel.swift` — microphone capture, one-time explanation,
   background command monitor, and transcription.
+- `SpeakPaste/ContentView.swift` — `KeyboardSessionView`, the single-purpose
+  hand-off surface shown for the whole round trip, plus the dashboard used for
+  manual recording, transcripts, and failures.
 - `SpeakPaste/HostAppSwitcher.swift` — fixed supported-app catalog, URL return,
   and manual fallback.
 - `SpeakPaste/SharedDictation.swift` — App Group state and mirrored diagnostics.
@@ -140,6 +157,8 @@ on the physical iPhone:
 - Full Access disabled.
 - Microphone permission denied, then restored.
 - Cancel while recording.
+- Swipe back into SpeakPaste mid-dictation: the hand-off surface, not the
+  dashboard, and it names the host app it came from.
 - Transcription failure and Retry.
 - Unknown or unavailable return route, preserving the manual-swipe fallback.
 

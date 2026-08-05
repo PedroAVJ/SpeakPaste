@@ -205,6 +205,14 @@ Then:
    **Stop & Insert** in the keyboard to transcribe and insert the result at the
    existing cursor.
 
+While a keyboard dictation owns the app, SpeakPaste shows a single hand-off
+screen instead of its dashboard: the recording state, and how to get back where
+you were typing. No header, setup steps, or manual controls appear during a
+round trip, because none of them are actionable while another app owns the
+cursor. Swiping back into SpeakPaste mid-dictation lands on that same screen,
+which names the app you came from and keeps the manual-swipe instruction
+visible for hosts that cannot be returned to automatically.
+
 The keyboard renders its own QWERTY, number, and symbol planes because iOS does
 not place Apple's keyboard beneath a third-party keyboard extension. Its idle
 layout has the **Start** action; active dictation replaces the keys with

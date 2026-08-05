@@ -27,9 +27,21 @@ final class AppModel: ObservableObject {
     @Published var copiedRecently = false
     @Published var needsMicrophoneSettings = false
     @Published var keyboardReturnPrompt: KeyboardReturnPrompt?
+    /// Display-only name of the app this dictation came from. The prompt above
+    /// is cleared the moment an automatic return succeeds, but the user can
+    /// swipe back into SpeakPaste afterward and the screen should still be able
+    /// to name where they came from. This never drives a return:
+    /// `keyboardReturnPrompt` stays the only switchback authority.
+    @Published private(set) var keyboardHostAppName: String?
     @Published var showSwitchbackExplanation = false
     @Published var showManualReturnHint = false
     @Published private(set) var recordingNotice: String?
+    /// True from the instant a keyboard launch is claimed until capture has
+    /// either started or failed. `isKeyboardDictation` only turns true once the
+    /// recorder is running, and permission plus audio activation can take a
+    /// noticeable moment on a cold launch — without this the round trip shows
+    /// the dashboard for that whole window.
+    @Published private(set) var isPreparingKeyboardSession = false
 
     let recorder: AudioRecorder
     let history: HistoryStore
@@ -278,6 +290,7 @@ final class AppModel: ObservableObject {
             isStartingRecording = false
             return
         }
+        isPreparingKeyboardSession = true
         Task { await performRecordingStart(for: snapshot) }
     }
 
@@ -292,7 +305,12 @@ final class AppModel: ObservableObject {
     private func performRecordingStart(
         for incomingSharedSnapshot: SharedDictationSnapshot?
     ) async {
-        defer { isStartingRecording = false }
+        // By the time this returns, a successful start has already published
+        // `.recording`, so the keyboard surface stays up without a gap.
+        defer {
+            isStartingRecording = false
+            isPreparingKeyboardSession = false
+        }
         guard activeRecordingURL == nil else {
             let message = "An unfinished recording is ready to retry. Transcribe or discard it before starting another dictation."
             phase = .failed(message)
@@ -433,14 +451,16 @@ final class AppModel: ObservableObject {
                     return
                 }
                 startSharedCommandMonitor(sessionID: sharedSnapshot.sessionID)
+                let hostAppName = HostAppSwitcher.displayName(
+                    for: sharedSnapshot.returnBundleIdentifier
+                )
                 keyboardReturnPrompt = KeyboardReturnPrompt(
                     id: sharedSnapshot.sessionID,
                     bundleIdentifier: sharedSnapshot.returnBundleIdentifier,
                     processIdentifier: sharedSnapshot.returnProcessIdentifier,
-                    appName: HostAppSwitcher.displayName(
-                        for: sharedSnapshot.returnBundleIdentifier
-                    )
+                    appName: hostAppName
                 )
+                keyboardHostAppName = hostAppName
                 showManualReturnHint = false
                 if !HostAppSwitcher.supportsAutomaticReturn(
                     to: sharedSnapshot.returnBundleIdentifier
@@ -953,6 +973,8 @@ final class AppModel: ObservableObject {
         sharedMonitorTask = nil
         activeSharedSessionID = nil
         activeRecordingSessionID = nil
+        isPreparingKeyboardSession = false
+        keyboardHostAppName = nil
         transcriptionTask?.cancel()
         transcriptionTask = nil
         transcriptionAttemptID = nil

@@ -111,8 +111,15 @@
 			</array>
 		</dict>
 	</dict>
+	<!-- An empty UILaunchScreen renders systemBackground, which is white on a
+	     phone in light appearance. Every keyboard round trip cold-launches this
+	     app, so that default flashed white between the host app and SpeakPaste's
+	     dark UI. This color matches Theme.background. -->
 	<key>UILaunchScreen</key>
-	<dict/>
+	<dict>
+		<key>UIColorName</key>
+		<string>LaunchBackground</string>
+	</dict>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>

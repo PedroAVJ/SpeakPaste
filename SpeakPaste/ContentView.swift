@@ -71,30 +71,38 @@ struct ContentView: View {
         ZStack {
             Theme.backgroundGradient.ignoresSafeArea()
 
-            VStack(spacing: 0) {
-                header
-                    .padding(.horizontal, 20)
-                    .padding(.top, 8)
-
-                stage
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                if let message = errorMessage {
-                    ErrorCard(model: model, message: message)
+            if showsKeyboardSession {
+                KeyboardSessionView(model: model, recorder: model.recorder)
+            } else {
+                VStack(spacing: 0) {
+                    header
                         .padding(.horizontal, 20)
-                        .padding(.bottom, 14)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
+                        .padding(.top, 8)
 
-                if showsManualControls {
-                    RecordControls(model: model, recorder: model.recorder)
-                        .padding(.horizontal, 28)
-                        .padding(.bottom, 16)
+                    stage
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                    if let message = errorMessage {
+                        ErrorCard(model: model, message: message)
+                            .padding(.horizontal, 20)
+                            .padding(.bottom, 14)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
+
+                    if showsManualControls {
+                        RecordControls(model: model, recorder: model.recorder)
+                            .padding(.horizontal, 28)
+                            .padding(.bottom, 16)
+                    }
                 }
             }
         }
         .overlay(alignment: .top) { copiedPill }
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: model.phase)
+        .animation(
+            reduceMotion ? nil : .easeInOut(duration: 0.22),
+            value: showsKeyboardSession
+        )
         .tint(Theme.accent)
         .preferredColorScheme(.dark)
         .sheet(isPresented: $model.showHistory) {
@@ -105,7 +113,7 @@ struct ContentView: View {
             SettingsView()
                 .presentationDragIndicator(.visible)
         }
-        .alert("", isPresented: $model.showSwitchbackExplanation) {
+        .alert("Heading back", isPresented: $model.showSwitchbackExplanation) {
             Button("OK") {
                 model.confirmSwitchbackExplanation()
             }
@@ -141,6 +149,17 @@ struct ContentView: View {
             && (model.isRecording
                 || model.isTranscribing
                 || !model.transcriptText.isEmpty)
+    }
+
+    /// A keyboard round trip owns the whole screen, from the moment the
+    /// keyboard hands off until capture is done. A failure hands the screen
+    /// back to the dashboard, because that is where retry, the API key, and
+    /// the recovered recording live.
+    private var showsKeyboardSession: Bool {
+        if errorMessage != nil { return false }
+        return model.isPreparingKeyboardSession
+            || (model.isKeyboardDictation
+                && (model.isRecording || model.isTranscribing))
     }
 
     private var header: some View {
@@ -188,7 +207,6 @@ struct ContentView: View {
         case .recording:
             RecordingLiveView(
                 recorder: model.recorder,
-                isKeyboardDictation: model.isKeyboardDictation,
                 notice: model.recordingNotice
             )
         case .transcribing:
@@ -219,6 +237,241 @@ struct ContentView: View {
             value: model.copiedRecently
         )
         .padding(.top, 4)
+    }
+}
+
+/// The screen a keyboard dictation gets instead of the dashboard.
+///
+/// A round trip only borrows SpeakPaste for a moment: it takes the microphone
+/// and hands the user straight back to where they were typing. The dashboard —
+/// title, setup steps, manual fallback, History and Settings — turns that
+/// hand-off into a visible detour, and none of it is actionable while another
+/// app owns the cursor. This surface answers the only two questions the user
+/// has while standing here: is it listening, and how do I get back?
+private struct KeyboardSessionView: View {
+    private enum Stage: Equatable {
+        case starting
+        case listening
+        case transcribing
+    }
+
+    @ObservedObject var model: AppModel
+    @ObservedObject var recorder: AudioRecorder
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ScaledMetric(relativeTo: .largeTitle) private var timerSize: CGFloat = 64
+
+    private var stage: Stage {
+        if model.isTranscribing { return .transcribing }
+        return model.isRecording ? .listening : .starting
+    }
+
+    /// `HostAppSwitcher` falls back to a sentence fragment when the host is
+    /// unknown. A button and a headline need a real name or none at all.
+    private var hostName: String? {
+        guard
+            let name = model.keyboardReturnPrompt?.appName
+                ?? model.keyboardHostAppName,
+            name != "your previous app"
+        else {
+            return nil
+        }
+        return name
+    }
+
+    private var destination: String { hostName ?? "your app" }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Spacer(minLength: 8)
+            statusCapsule
+            Spacer(minLength: 20)
+            centerpiece
+            Spacer(minLength: 20)
+            actions
+            Spacer(minLength: 8)
+        }
+        .padding(.horizontal, 28)
+        .padding(.vertical, 28)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: stage)
+    }
+
+    private var statusCapsule: some View {
+        HStack(spacing: 8) {
+            switch stage {
+            case .starting:
+                ProgressView()
+                    .controlSize(.mini)
+                    .tint(Theme.accent)
+            case .listening:
+                Circle()
+                    .fill(Theme.danger)
+                    .frame(width: 10, height: 10)
+            case .transcribing:
+                Image(systemName: "waveform")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(Theme.accent)
+            }
+
+            Text(statusTitle)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Theme.ink)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(Capsule().fill(Theme.surface))
+        .overlay(Capsule().stroke(Theme.stroke))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(statusTitle)
+    }
+
+    private var statusTitle: String {
+        switch stage {
+        case .starting: "Starting"
+        case .listening: "Recording"
+        case .transcribing: "Transcribing"
+        }
+    }
+
+    @ViewBuilder
+    private var centerpiece: some View {
+        switch stage {
+        case .starting:
+            VStack(spacing: 16) {
+                Image(systemName: "mic.fill")
+                    .font(.system(size: 30, weight: .semibold))
+                    .foregroundStyle(Theme.accent)
+                    .frame(width: 84, height: 84)
+                    .background(Circle().fill(Theme.surface))
+                    .overlay(Circle().stroke(Theme.stroke))
+                    .accessibilityHidden(true)
+
+                Text("Getting the microphone")
+                    .font(.system(.title2, design: .rounded, weight: .semibold))
+                    .foregroundStyle(Theme.ink)
+                    .multilineTextAlignment(.center)
+
+                Text("You'll go straight back to \(destination).")
+                    .font(.subheadline)
+                    .foregroundStyle(Theme.inkMuted)
+                    .multilineTextAlignment(.center)
+            }
+            .accessibilityElement(children: .combine)
+
+        case .listening:
+            VStack(spacing: 22) {
+                Text(Theme.timeString(recorder.duration))
+                    .font(.system(size: timerSize, weight: .light, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(Theme.ink)
+                    .contentTransition(.numericText())
+                    .accessibilityLabel(
+                        "Recording, \(Theme.timeString(recorder.duration)) elapsed"
+                    )
+
+                MicLevelMeter(level: recorder.level, reduceMotion: reduceMotion)
+                    .frame(height: 64)
+                    .accessibilityHidden(true)
+
+                if recorder.readiness != .ready {
+                    Label(
+                        "Waiting for microphone audio…",
+                        systemImage: "waveform.badge.mic"
+                    )
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(Theme.accent)
+                    .accessibilityLabel("Waiting for microphone audio")
+                } else if let notice = model.recordingNotice {
+                    Label(notice, systemImage: "exclamationmark.circle.fill")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(Theme.accent)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+        case .transcribing:
+            VStack(spacing: 16) {
+                ZStack {
+                    Circle()
+                        .stroke(Theme.stroke, lineWidth: 6)
+                        .frame(width: 84, height: 84)
+                    ProgressView()
+                        .controlSize(.large)
+                        .tint(Theme.accent)
+                }
+                .accessibilityHidden(true)
+
+                Text("Turning it into text")
+                    .font(.system(.title2, design: .rounded, weight: .semibold))
+                    .foregroundStyle(Theme.ink)
+                    .multilineTextAlignment(.center)
+
+                Text("The keyboard inserts it in \(destination) when it lands.")
+                    .font(.subheadline)
+                    .foregroundStyle(Theme.inkMuted)
+                    .multilineTextAlignment(.center)
+            }
+            .accessibilityElement(children: .combine)
+        }
+    }
+
+    @ViewBuilder
+    private var actions: some View {
+        if stage == .listening {
+            VStack(spacing: 18) {
+                if model.canAutomaticallyReturnToKeyboardHost {
+                    Button {
+                        model.returnToKeyboardHost()
+                    } label: {
+                        Label(
+                            "Back to \(destination)",
+                            systemImage: "arrow.uturn.backward"
+                        )
+                    }
+                    .buttonStyle(PrimaryPillButtonStyle())
+                    .accessibilityHint("Recording keeps going while you switch.")
+                } else {
+                    swipeBackHint
+                }
+
+                Label(
+                    "Stop & Insert from the SpeakPaste keyboard when you're done.",
+                    systemImage: "keyboard"
+                )
+                .font(.footnote)
+                .foregroundStyle(Theme.inkMuted)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// The manual swipe is a supported outcome, not an error, so it gets a
+    /// drawn home bar rather than a line of small print.
+    private var swipeBackHint: some View {
+        VStack(spacing: 12) {
+            HStack(spacing: 10) {
+                Capsule()
+                    .fill(Theme.ink.opacity(0.45))
+                    .frame(width: 92, height: 5)
+                Image(systemName: "chevron.right")
+                    .font(.footnote.weight(.bold))
+                    .foregroundStyle(Theme.accent)
+            }
+            .accessibilityHidden(true)
+
+            Text("Swipe right along the bottom edge to get back to \(destination). Recording keeps going.")
+                .font(.subheadline)
+                .foregroundStyle(Theme.ink)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 16)
+        .frame(maxWidth: .infinity)
+        .background(RoundedRectangle(cornerRadius: 20).fill(Theme.surface))
+        .overlay(RoundedRectangle(cornerRadius: 20).stroke(Theme.stroke))
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -353,9 +606,10 @@ private struct FlowStep: View {
     }
 }
 
+/// Manual in-app recording only. A keyboard dictation never reaches this view;
+/// it gets `KeyboardSessionView` instead.
 private struct RecordingLiveView: View {
     @ObservedObject var recorder: AudioRecorder
-    let isKeyboardDictation: Bool
     let notice: String?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ScaledMetric(relativeTo: .largeTitle) private var timerSize: CGFloat = 60
@@ -402,11 +656,7 @@ private struct RecordingLiveView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            Text(
-                isKeyboardDictation
-                    ? "Return to your previous app, then stop and insert from the keyboard. If needed, swipe right along the bottom home bar; recording keeps going."
-                    : "Tap the stop button when you're done."
-            )
+            Text("Tap the stop button when you're done.")
                 .font(.footnote)
                 .foregroundStyle(Theme.inkMuted)
                 .multilineTextAlignment(.center)
