@@ -24,17 +24,6 @@ enum MacPasteMenuShortcut {
     }
 }
 
-enum MacRealtimeWritableCandidatePolicy {
-    static func accepts(
-        isSecure: Bool,
-        isEnabled: Bool,
-        hasReadableSnapshot: Bool,
-        hasSettableTextRange: Bool
-    ) -> Bool {
-        !isSecure && isEnabled && hasReadableSnapshot && hasSettableTextRange
-    }
-}
-
 enum MacPasteMenuActionResult: Equatable {
     /// No menu side effect was reached; another insertion route is safe.
     case unavailable
@@ -116,11 +105,6 @@ struct MacDeliveryTarget {
     /// This is captured at the delivery boundary, not at record start. It is
     /// used only to keep a multi-step side effect from following later input.
     private let interactionGeneration: UInt64?
-    /// Opt-in realtime delivery alone retains the full, local post-rollback
-    /// value/caret snapshot. It is never uploaded or persisted and makes the
-    /// final durable paste fail closed if that exact state changes.
-    private let requiredRealtimeSnapshot: MacRealtimeTextSnapshot?
-
     init(
         processIdentifier: pid_t,
         applicationName: String,
@@ -128,8 +112,7 @@ struct MacDeliveryTarget {
         contextKeyterms: [String] = [],
         precedingText: String? = nil,
         element: AXUIElement?,
-        interactionGeneration: UInt64? = nil,
-        requiredRealtimeSnapshot: MacRealtimeTextSnapshot? = nil
+        interactionGeneration: UInt64? = nil
     ) {
         self.processIdentifier = processIdentifier
         self.applicationName = applicationName
@@ -138,7 +121,6 @@ struct MacDeliveryTarget {
         self.precedingText = precedingText
         self.element = element
         self.interactionGeneration = interactionGeneration
-        self.requiredRealtimeSnapshot = requiredRealtimeSnapshot
     }
 
     /// Captures the current destination. Returns nil when SpeakPaste itself is
@@ -202,34 +184,24 @@ struct MacDeliveryTarget {
     /// the two cases must be treated differently.
     var hasElement: Bool { element != nil }
 
-    /// Realtime partials are allowed only when the exact captured AX element
-    /// exposes a readable and settable text value/range. Opaque fields retain
-    /// the ordinary batch path rather than receiving synthetic repeated pastes.
+    /// Accessibility is read-only here: it positions the tiny mic marker while
+    /// InputMethodKit owns all provisional/final text mutation.
     @MainActor
-    func makeRealtimeInlineTextSession() -> MacRealtimeInlineTextSession? {
-        guard let element else { return nil }
-        return MacRealtimeInlineTextSession.make(
-            element: element,
-            processIdentifier: processIdentifier,
-            capturedInteractionGeneration: interactionGeneration
-        )
-    }
-
-    /// Returns the same destination with one stronger, realtime-only side-
-    /// effect guard. Ordinary batch targets remain privacy-neutral.
-    func requiringRealtimeSnapshot(
-        _ snapshot: MacRealtimeTextSnapshot
-    ) -> MacDeliveryTarget {
-        MacDeliveryTarget(
-            processIdentifier: processIdentifier,
-            applicationName: applicationName,
-            bundleIdentifier: bundleIdentifier,
-            contextKeyterms: contextKeyterms,
-            precedingText: precedingText,
-            element: element,
-            interactionGeneration: interactionGeneration,
-            requiredRealtimeSnapshot: snapshot
-        )
+    var realtimeCaretFrame: CGRect? {
+        guard
+            NSWorkspace.shared.frontmostApplication?.processIdentifier
+                == processIdentifier,
+            // Electron can rebuild its AX proxy while the input method keeps
+            // the live text client. Resolve focus afresh; a stale record-start
+            // node is never used for geometry or eligibility.
+            let current = MacAccessibility.focusedWritableElement(
+                processIdentifier: processIdentifier
+            ),
+            let range = MacAccessibility.realtimeSelectedRange(in: current)
+        else {
+            return nil
+        }
+        return MacAccessibility.realtimeBounds(for: range, in: current)
     }
 
     /// Revalidation for explicit output. A replacement AX node is valid when
@@ -237,6 +209,15 @@ struct MacDeliveryTarget {
     /// no user action moved the insertion point after capture.
     @MainActor
     var matchesCurrentManualDestination: Bool {
+        canContinueMultistepInsertion
+    }
+
+    /// Realtime may spend time connecting the microphone and installing its
+    /// palette after this target was captured. Reuse the existing interaction
+    /// generation and live secure/writable checks so setup cannot silently
+    /// attach to a different field in the same application.
+    @MainActor
+    var isStillRealtimeAttachmentTarget: Bool {
         canContinueMultistepInsertion
     }
 
@@ -303,45 +284,6 @@ struct MacDeliveryTarget {
             currentInteractionGeneration: MacUserInteractionTracker.shared.snapshot
         )
     }
-    /// Ordinary batch delivery is intentionally unconstrained by record-start
-    /// identity and resolves whichever writable editor is live inside the
-    /// serialized delivery gate. Only a realtime-finalized target carries this
-    /// exact post-rollback exception.
-    @MainActor
-    func permitsAutomaticDelivery(to liveTarget: MacDeliveryTarget) -> Bool {
-        guard let requiredRealtimeSnapshot else { return true }
-        guard let element, let liveElement = liveTarget.element else {
-            return false
-        }
-        let sameProcess = processIdentifier == liveTarget.processIdentifier
-        let sameElement = CFEqual(element, liveElement)
-        let snapshotMatches = sameProcess
-            && sameElement
-            && MacAccessibility.exactElementHoldsFocus(
-                element,
-                processIdentifier: processIdentifier
-            )
-            && MacAccessibility.realtimeTextSnapshot(of: element)
-                == requiredRealtimeSnapshot
-        return MacRealtimeFinalDeliveryGuardPolicy.permitsAutomaticDelivery(
-            requiresExactSnapshot: true,
-            sameProcess: sameProcess,
-            sameElement: sameElement,
-            snapshotMatches: snapshotMatches
-        )
-    }
-}
-
-enum MacRealtimeFinalDeliveryGuardPolicy {
-    static func permitsAutomaticDelivery(
-        requiresExactSnapshot: Bool,
-        sameProcess: Bool,
-        sameElement: Bool,
-        snapshotMatches: Bool
-    ) -> Bool {
-        guard requiresExactSnapshot else { return true }
-        return sameProcess && sameElement && snapshotMatches
-    }
 }
 
 enum MacAccessibility {
@@ -394,7 +336,6 @@ enum MacAccessibility {
            let candidate = firstWritableAncestor(
                startingAt: focused,
                maximumAncestorDepth: maximumAncestorDepth,
-               requiresRealtimeRange: false,
                processIdentifier: resolvedProcessIdentifier
            ) {
             return candidate
@@ -405,63 +346,8 @@ enum MacAccessibility {
            let candidate = firstWritableAncestor(
             startingAt: applicationFocused,
             maximumAncestorDepth: maximumAncestorDepth,
-            requiresRealtimeRange: false,
             processIdentifier: resolvedProcessIdentifier
         ) {
-            return candidate
-        }
-        return nil
-    }
-
-    /// Electron apps may focus a short-lived proxy below the AXTextArea that
-    /// exposes the complete realtime snapshot/setter contract. Prefer the live
-    /// system or application focus, then reuse the element captured before
-    /// microphone warmup only while it still reports focus in the same process.
-    static func focusedRealtimeWritableElement(
-        preferred: AXUIElement? = nil,
-        processIdentifier: pid_t? = nil,
-        maximumAncestorDepth: Int = 12
-    ) -> AXUIElement? {
-        guard !IsSecureEventInputEnabled() else { return nil }
-        let resolvedProcessIdentifier = processIdentifier
-            ?? NSWorkspace.shared.frontmostApplication?.processIdentifier
-        guard
-            let resolvedProcessIdentifier,
-            NSWorkspace.shared.frontmostApplication?.processIdentifier
-                == resolvedProcessIdentifier
-        else {
-            return nil
-        }
-        if let focused = systemFocusedElement(),
-           element(focused, belongsTo: resolvedProcessIdentifier),
-           let candidate = firstWritableAncestor(
-               startingAt: focused,
-               maximumAncestorDepth: maximumAncestorDepth,
-               requiresRealtimeRange: true,
-               processIdentifier: resolvedProcessIdentifier
-           ) {
-            return candidate
-        }
-        if let applicationFocused = focusedElement(
-            inProcess: resolvedProcessIdentifier
-        ), element(applicationFocused, belongsTo: resolvedProcessIdentifier),
-           let candidate = firstWritableAncestor(
-            startingAt: applicationFocused,
-            maximumAncestorDepth: maximumAncestorDepth,
-            requiresRealtimeRange: true,
-            processIdentifier: resolvedProcessIdentifier
-        ) {
-            return candidate
-        }
-        if let preferred,
-           element(preferred, belongsTo: resolvedProcessIdentifier),
-           booleanAttribute(kAXFocusedAttribute, of: preferred) == true,
-           let candidate = firstWritableAncestor(
-               startingAt: preferred,
-               maximumAncestorDepth: maximumAncestorDepth,
-               requiresRealtimeRange: true,
-               processIdentifier: resolvedProcessIdentifier
-           ) {
             return candidate
         }
         return nil
@@ -470,7 +356,6 @@ enum MacAccessibility {
     private static func firstWritableAncestor(
         startingAt focused: AXUIElement,
         maximumAncestorDepth: Int,
-        requiresRealtimeRange: Bool,
         processIdentifier: pid_t
     ) -> AXUIElement? {
         var candidate = focused
@@ -486,10 +371,7 @@ enum MacAccessibility {
             AXUIElementSetMessagingTimeout(candidate, messagingTimeout)
             if isSecureTextElement(candidate) { return nil }
             if firstWritableCandidate == nil {
-                let acceptsText = requiresRealtimeRange
-                    ? realtimeElementAcceptsText(candidate)
-                    : elementAcceptsText(candidate)
-                if acceptsText {
+                if elementAcceptsText(candidate) {
                     firstWritableCandidate = candidate
                 }
             }
@@ -568,15 +450,6 @@ enum MacAccessibility {
         )
     }
 
-    private static func realtimeElementAcceptsText(_ element: AXUIElement) -> Bool {
-        MacRealtimeWritableCandidatePolicy.accepts(
-            isSecure: isSecureTextElement(element),
-            isEnabled: isEnabled(element),
-            hasReadableSnapshot: realtimeTextSnapshot(of: element) != nil,
-            hasSettableTextRange: realtimeTextAttributesAreSettable(on: element)
-        )
-    }
-
     /// Browser and Electron password controls may expose an AX secure subrole
     /// without enabling process-wide Secure Event Input. Manual paste/release
     /// paths have no archived destination, so they use this live gate before
@@ -632,86 +505,21 @@ enum MacAccessibility {
         return CFEqual(element, focused)
     }
 
-    static func realtimeTextAttributesAreSettable(on element: AXUIElement) -> Bool {
-        guard !IsSecureEventInputEnabled(), !isSecureTextElement(element) else {
-            return false
-        }
-        AXUIElementSetMessagingTimeout(element, messagingTimeout)
-        var selectedTextIsSettable = DarwinBoolean(false)
-        var selectedRangeIsSettable = DarwinBoolean(false)
-        guard
-            AXUIElementIsAttributeSettable(
-                element,
-                kAXSelectedTextAttribute as CFString,
-                &selectedTextIsSettable
-            ) == .success,
-            AXUIElementIsAttributeSettable(
-                element,
-                kAXSelectedTextRangeAttribute as CFString,
-                &selectedRangeIsSettable
-            ) == .success
-        else {
-            return false
-        }
-        return selectedTextIsSettable.boolValue && selectedRangeIsSettable.boolValue
-    }
-
-    static func realtimeTextSnapshot(
-        of element: AXUIElement
-    ) -> MacRealtimeTextSnapshot? {
-        guard !IsSecureEventInputEnabled(), !isSecureTextElement(element) else {
-            return nil
-        }
-        AXUIElementSetMessagingTimeout(element, messagingTimeout)
-        guard
-            let value = stringAttribute(kAXValueAttribute, of: element),
-            let selection = selectedTextRange(in: element)
-        else {
-            return nil
-        }
-        let range = MacRealtimeTextRange(
-            location: selection.location,
-            length: selection.length
-        )
-        guard Range(range.asNSRange, in: value) != nil else { return nil }
-        return MacRealtimeTextSnapshot(value: value, selection: range)
-    }
-
-    @discardableResult
-    static func setRealtimeSelection(
-        _ range: MacRealtimeTextRange,
-        on element: AXUIElement
-    ) -> Bool {
+    static func realtimeSelectedRange(
+        in element: AXUIElement
+    ) -> MacRealtimeTextRange? {
         guard
             !IsSecureEventInputEnabled(),
             !isSecureTextElement(element),
-            var value = Optional(range.asCFRange),
-            let axValue = AXValueCreate(.cfRange, &value)
+            let selection = selectedTextRange(in: element),
+            selection.length == 0
         else {
-            return false
+            return nil
         }
-        AXUIElementSetMessagingTimeout(element, messagingTimeout)
-        return AXUIElementSetAttributeValue(
-            element,
-            kAXSelectedTextRangeAttribute as CFString,
-            axValue
-        ) == .success
-    }
-
-    @discardableResult
-    static func replaceRealtimeSelection(
-        with text: String,
-        on element: AXUIElement
-    ) -> Bool {
-        guard !IsSecureEventInputEnabled(), !isSecureTextElement(element) else {
-            return false
-        }
-        AXUIElementSetMessagingTimeout(element, messagingTimeout)
-        return AXUIElementSetAttributeValue(
-            element,
-            kAXSelectedTextAttribute as CFString,
-            text as CFString
-        ) == .success
+        return MacRealtimeTextRange(
+            location: selection.location,
+            length: selection.length
+        )
     }
 
     static func realtimeBounds(

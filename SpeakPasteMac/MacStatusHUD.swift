@@ -121,7 +121,7 @@ final class MacStatusHUDController: ObservableObject {
         // changing the semantic stack inputs. Re-present the last emitted state.
         Publishers.MergeMany(
             model.$hudEnabled.map { _ in () }.eraseToAnyPublisher(),
-            model.$realtimeDictationEnabled.map { _ in () }.eraseToAnyPublisher(),
+            model.$realtimeCompositionActive.map { _ in () }.eraseToAnyPublisher(),
             model.$hudPlacement.map { _ in () }.eraseToAnyPublisher(),
             model.$selectedDeviceID.map { _ in () }.eraseToAnyPublisher(),
             model.$devices.map { _ in () }.eraseToAnyPublisher()
@@ -152,7 +152,7 @@ final class MacStatusHUDController: ObservableObject {
         // interaction; showing the batch HUD at the top is duplicate noise.
         guard MacHUDVisibilityPolicy.shouldPresent(
             hudEnabled: model.hudEnabled,
-            realtimeDictationEnabled: model.realtimeDictationEnabled
+            realtimeCompositionActive: model.realtimeCompositionActive
         ) else {
             hidePanel()
             return

@@ -21,9 +21,10 @@ Research snapshot: 2026-08-04.
 - Accessibility object continuity across a dictation is not a universal
   invariant. Electron and Chromium may rebuild, proxy, or replace their
   Accessibility tree and editable node while the user remains in an editor.
-- Realtime final delivery is the sole narrow exception: it replaces only the
-  exact AX range already owned by the live session, after History and escrow
-  are durable, and never starts a second menu-paste transaction.
+- Realtime therefore uses the text-input system's composition contract instead
+  of mutating an Accessibility range. One cumulative provisional transcript
+  remains marked until it is cleared or replaced by one final insertion after
+  History and escrow are durable; no second menu-paste transaction follows it.
 - No silent microphone fallback, silent paste fallback, or destructive recovery
   path.
 
@@ -40,7 +41,7 @@ They are product decisions, not missing parity.
 | First run | Guided setup and visible readiness | Onboarding covers the API key, explicit permission requests, microphone selection/test, shortcuts, language, and cleanup behavior. It can be replayed. |
 | Microphones | External-device choice and troubleshooting | Exact Core Audio transport classification, persistent semantic Mac/iPhone mode, ranked user-approved fallback list within that mode, gain display, connect latency, live level, and a three-second record/playback test. No cross-mode fallback. A live mode switch finalizes and releases the current source before capture resumes as the next ordered segment. |
 | Continuity reliability | Do not record through the iPhone wake-up gap | Capture waits for a steady, audible sample stream. Stop synchronously ends the AVCapture session before batch transcription or realtime final commit/fallback proceeds. Sleep, disconnects, startup cancellation, and mid-stream stalls are handled explicitly. |
-| Experimental realtime dictation | Show changing text at the active cursor without making the HUD a transcript surface | A persisted, default-off setting uses ElevenLabs `scribe_v2_realtime` over a manual-commit WebSocket only for exact readable/settable AX fields with a collapsed caret under ordinary automatic delivery. While the setting is enabled, the ordinary top status HUD stays hidden for realtime and batch-fallback runs; an eligible active field owns the live transcript and a separate click-through mic dot marks the caret. Full partial hypotheses replace one compare-and-swap-owned UTF-16 range; a changed value, caret, focus, secure state, or ambiguous setter detaches permanently. The ownership proof reads and compares the complete active field locally on each hypothesis, never uploading or writing that field text to disk; very large fields remain a physical performance check. Native WAV recording continues for batch fallback, and the default-off batch graph keeps its native liveness tap. Incoming device-native PCM is explicitly converted to 16 kHz mono PCM16 before streaming, rather than relying on capture-output settings that some Mac and Continuity devices do not honor. Twenty-five-second manual commits stay below the service auto-commit window. Stop releases capture before draining audio and committing; History and escrow become durable before the fully post-processed final replaces the same owned range in place. This avoids an unconfirmable second Paste-menu delivery and an erase/reinsert gap. Ownership loss makes the result manual-only. Escape closes without commit. Batch remains the default and every unsupported target stays batch-only. |
+| Experimental realtime dictation | Show changing text at the active cursor without making the HUD a transcript surface | A persisted, default-off setting uses ElevenLabs `scribe_v2_realtime` over a manual-commit WebSocket and a hidden InputMethodKit palette. For an eligible collapsed caret under ordinary automatic delivery, each cumulative snapshot -- stable committed prefix plus provisional tail -- is sent as one marked-text composition; the next snapshot replaces that composition instead of appending or issuing repeated paste transactions. Only a confirmed attachment hides the ordinary top HUD and shows the click-through caret mic marker. Palette unavailability, an unsupported client, failed attachment, secure input, or a special delivery rule keeps the batch path and its normal HUD. Native WAV recording continues for batch fallback, and the default-off batch graph keeps its native liveness tap. Incoming device-native PCM is explicitly converted to 16 kHz mono PCM16 before streaming, rather than relying on capture-output settings that some Mac and Continuity devices do not honor. Twenty-five-second manual commits stay below the service auto-commit window. Stop releases capture before draining audio and committing; History and escrow become durable before the fully post-processed final is inserted exactly once through the input method, with no follow-up menu paste. Client, focus, or composition loss makes the result manual-only. Escape clears marked text without committing it. Batch remains the default and every unsupported target stays batch-only. |
 | Long dictation | Longer sessions with visible limits | Twenty-minute hard limit, one-minute warning, no-audio warning, automatic safe finalization, and immediate explicit cancellation with Escape. Short finalized recordings are still sent to Scribe; there is no arbitrary minimum-duration discard. |
 | Existing audio | Transcribe a file without blocking live dictation | Audio import has a separate manual-output lane, a fail-closed 20-minute duration limit, a 1 GB local admission limit, and never auto-pastes when it finishes. It does not block capture or spoken-order delivery, although imports and live dictations share Scribe's three-request admission limit. Normal Quit waits for secure import staging to finish or refuses to quit after the bounded wait. |
 | Network failure | Retry without losing what was said | Every finalized recording is moved into a private, crash-safe pending-audio journal before upload and is removed only after its final text and consumption receipt are durable. Interrupted active WAVs are recovered on the next primary launch. Transient network/429/5xx failures retry with bounded backoff; terminal or history-write failures remain individually retryable or discardable. |
@@ -167,13 +168,19 @@ ElevenLabs:
 - [Realtime transcripts and commit strategies](https://elevenlabs.io/docs/eleven-api/guides/how-to/speech-to-text/realtime/transcripts-and-commit-strategies)
 - [Realtime event reference](https://elevenlabs.io/docs/eleven-api/guides/how-to/speech-to-text/realtime/event-reference)
 
+Apple text-input pattern:
+
+- [InputMethodKit](https://developer.apple.com/documentation/inputmethodkit)
+- [`NSTextInputClient.setMarkedText`](https://developer.apple.com/documentation/appkit/nstextinputclient/setmarkedtext(_:selectedrange:replacementrange:))
+
 ## Verification boundary
 
 The macOS target and focused logic suites can prove compilation, persistence,
 request construction, retry behavior, and pure delivery decisions. Isolated UI
 inspection can prove that controls are present and locally operable. Neither can
 prove the system-owned Continuity UI, physical microphone release/reconnect, or
-a target application's real AX behavior. This parity pass does **not** yet claim
-full real-device or end-to-end acceptance. The checklist in
+a target application's real marked-composition and final-insertion behavior.
+This parity pass does **not** yet claim full real-device or end-to-end
+acceptance. The checklist in
 [macOS remaining work](macos-remaining-work.md) is required before calling the
 complete experience physically verified or release-ready.

@@ -4,7 +4,7 @@ import Carbon
 import Foundation
 
 enum MacPasteRoute: String, Equatable {
-    /// The realtime editor replaced and read back its exact owned AX range.
+    /// The realtime input method committed its one marked composition.
     case realtime = "realtime"
     /// The target application's own Edit ▸ Paste command was invoked.
     case menuAction = "menu"
@@ -19,8 +19,7 @@ enum MacHoldReason: Equatable {
     /// No writable, non-secure editor owns focus at the delivery boundary.
     case noWritableEditor
     case destinationNotFrontmost
-    /// Realtime rolled its provisional text back, but the exact field value or
-    /// collapsed caret changed before the durable final paste could begin.
+    /// Realtime lost its claimed input client before a final commit could begin.
     case realtimeDestinationChanged
     /// A password field or Terminal's Secure Keyboard Entry owns the keyboard.
     case secureInput
@@ -32,7 +31,7 @@ enum MacHoldReason: Equatable {
         case .noWritableEditor: "no writable editor is focused"
         case .destinationNotFrontmost: "you moved away"
         case .realtimeDestinationChanged:
-            "the realtime field or caret changed before final delivery"
+            "the realtime input client changed before final delivery"
         case .secureInput: "a password field is capturing the keyboard"
         case .deliveryFailed: "the destination refused it"
         }
@@ -179,19 +178,22 @@ struct MacPasteController {
         )
     }
 
-    /// Finalizes the exact AX range already owned by a realtime session. The
-    /// shared gate prevents an older clipboard/menu delivery from interleaving
-    /// with this compare-and-swap write. Losing ownership fails closed and
-    /// leaves the final text on the clipboard for explicit placement.
+    /// Commits the one marked composition already owned by the input-method
+    /// session. The shared gate keeps older deliveries from interleaving. A
+    /// missing receipt is treated as possibly delivered and is never retried.
     func deliverRealtime(
         _ text: String,
-        editor: MacRealtimeInlineTextSession,
+        composition: MacRealtimeCompositionSession,
         target: MacDeliveryTarget,
         heldClipboardOwner: MacHeldClipboardIdentity
     ) async -> MacPasteDeliveryOutcome {
         await deliveryGate.acquire()
         defer { deliveryGate.release() }
-        guard await editor.finalize(text: text) else {
+        guard target.isStillRealtimeAttachmentTarget else {
+            // IMK can retain the original client object after focus moves to a
+            // sibling field. Never let that stale object turn its old marked
+            // text into a final insertion.
+            composition.cancelImmediately()
             return MacPasteDeliveryOutcome(
                 result: heldResult(
                     .realtimeDestinationChanged,
@@ -202,10 +204,28 @@ struct MacPasteController {
                 target: target
             )
         }
-        return MacPasteDeliveryOutcome(
-            result: .pasted(route: .realtime, verified: true),
-            target: target
-        )
+        switch await composition.finish(text: text) {
+        case .verified:
+            return MacPasteDeliveryOutcome(
+                result: .pasted(route: .realtime, verified: true),
+                target: target
+            )
+        case .unverified:
+            return MacPasteDeliveryOutcome(
+                result: .pasted(route: .realtime, verified: false),
+                target: target
+            )
+        case .failed:
+            return MacPasteDeliveryOutcome(
+                result: heldResult(
+                    .realtimeDestinationChanged,
+                    text: text,
+                    copyOnHold: true,
+                    heldClipboardOwner: heldClipboardOwner
+                ),
+                target: target
+            )
+        }
     }
 
     /// Delivers an intrinsically prepared transcript. Spacing and first-letter
@@ -381,21 +401,6 @@ struct MacPasteController {
                     payload.fallbackText,
                     copyOnHold: true,
                     copied: .clipboardFallback(.noWritableEditor),
-                    notCopied: .clipboardFailed
-                )
-            )
-        }
-
-        // The record-start target is metadata for ordinary batch delivery and
-        // never outranks this live editor. A realtime-finalized target is the
-        // sole exception: its provisional range was rolled back only after an
-        // exact full-field/caret snapshot, which must still hold now.
-        guard capturedTarget?.permitsAutomaticDelivery(to: target) ?? true else {
-            return outcome(
-                fallbackResult(
-                    payload.fallbackText,
-                    copyOnHold: true,
-                    copied: .clipboardFallback(.realtimeDestinationChanged),
                     notCopied: .clipboardFailed
                 )
             )

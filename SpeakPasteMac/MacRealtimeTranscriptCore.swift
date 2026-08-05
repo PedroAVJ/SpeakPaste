@@ -1,4 +1,35 @@
 import Foundation
+import OSLog
+
+enum MacRealtimeTrace {
+    static let logger = Logger(
+        subsystem: "com.pedro.SpeakPasteMac",
+        category: "realtime"
+    )
+
+    /// Realtime diagnostics must stay useful without ever retaining dictated
+    /// text, editor contents, keyterms, clipboard data, or credentials.
+    static func event(_ event: String) {
+        logger.info("\(event, privacy: .public)")
+    }
+
+    static func failureCode(for error: Error) -> String {
+        if let error = error as? MacRealtimeScribeError {
+            return switch error {
+            case .invalidEndpoint: "invalid_endpoint"
+            case .invalidResponse: "invalid_response"
+            case .handshakeTimedOut: "handshake_timeout"
+            case .commitTimedOut: "commit_timeout"
+            case .socketClosed: "socket_closed"
+            case .audioBackpressure: "audio_backpressure"
+            case .noConvertedAudio: "no_converted_audio"
+            case let .service(type, _): "service_\(type)"
+            }
+        }
+        if error is CancellationError { return "cancelled" }
+        return "other_\(String(describing: type(of: error)))"
+    }
+}
 
 struct MacRealtimeScribeConfiguration: Sendable {
     let apiKey: String

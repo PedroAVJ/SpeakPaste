@@ -16,6 +16,19 @@ SpeakPaste is an open-source native Swift dictation project. It contains a macOS
 - Keep generated builds, DerivedData, user Xcode state, and packaged ZIPs out of Git.
 - Prefer focused Swift type-checks and target builds. Do not modify signing teams or publish through the App Store unless explicitly requested.
 
+### Reference-backed behavior
+
+- Before reinventing complex or stateful product behavior, inspect its current
+  observable behavior and any legally reusable licensed implementations and
+  tests. Record the state transitions, invariants, cancellation and failure
+  paths, compatibility assumptions, and any gaps that remain hypotheses.
+- Adapt the proven pattern to SpeakPaste's architecture. Never transplant
+  private or unlicensed code; reuse licensed code only after checking that its
+  license, dependencies, lifecycle, privacy, and failure semantics fit, and
+  otherwise implement an independent adaptation.
+- Verify the complete sequence on every intended target surface. Builds,
+  isolated callbacks, and copied tests alone are not acceptance.
+
 ### Protected iPhone switchback
 
 - Do not replace, reorder, or refactor the iPhone switchback architecture. It is

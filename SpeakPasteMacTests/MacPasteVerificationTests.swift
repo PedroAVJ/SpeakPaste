@@ -161,6 +161,29 @@ final class MacOutputContinuationPolicyTests: XCTestCase {
         )
     }
 
+    func testRealtimeAttachmentValidationRejectsSecureOrChangedFocus() {
+        XCTAssertFalse(
+            MacOutputContinuationPolicy.canContinueMultistepInsertion(
+                processIsCurrent: true,
+                currentIsWritable: true,
+                currentIsSecure: true,
+                sameElement: true,
+                interactionGeneration: 7,
+                currentInteractionGeneration: 7
+            )
+        )
+        XCTAssertFalse(
+            MacOutputContinuationPolicy.canContinueMultistepInsertion(
+                processIsCurrent: true,
+                currentIsWritable: true,
+                currentIsSecure: false,
+                sameElement: true,
+                interactionGeneration: 7,
+                currentInteractionGeneration: 8
+            )
+        )
+    }
+
     func testFollowUpReturnRequiresSameConfirmedNodeAndNoUserInput() {
         XCTAssertFalse(
             MacOutputContinuationPolicy.canSendFollowUpReturn(

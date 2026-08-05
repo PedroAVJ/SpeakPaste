@@ -69,8 +69,12 @@ actor MacRealtimeScribeSession: MacRealtimeScribeSessionProtocol {
 
         do {
             try await waitForSessionStart()
+            MacRealtimeTrace.event("ws_started")
             startKeepalive()
         } catch {
+            MacRealtimeTrace.event(
+                "ws_start_failed reason=\(MacRealtimeTrace.failureCode(for: error))"
+            )
             close()
             throw error
         }
@@ -129,6 +133,7 @@ actor MacRealtimeScribeSession: MacRealtimeScribeSessionProtocol {
                 data: Data(),
                 commit: true
             )
+            MacRealtimeTrace.event("final_commit_sent")
             try await socket.send(.string(message))
             manualCommitRequestsSent += 1
             audioBytesSinceLastCommit = 0
@@ -150,6 +155,7 @@ actor MacRealtimeScribeSession: MacRealtimeScribeSessionProtocol {
             languageCode: requestedLanguageCode,
             languageProbability: nil
         )
+        MacRealtimeTrace.event("final_commit_acked characters=\(text.utf16.count)")
         close()
         return result
     }
@@ -225,6 +231,9 @@ actor MacRealtimeScribeSession: MacRealtimeScribeSessionProtocol {
                 switch effect {
                 case let .textChanged(snapshot), let .committed(snapshot):
                     updateRevision &+= 1
+                    MacRealtimeTrace.event(
+                        "transcript_update revision=\(updateRevision) characters=\(snapshot.displayText.utf16.count)"
+                    )
                     updateHandler?(
                         MacRealtimeTranscriptUpdate(
                             revision: updateRevision,
@@ -237,6 +246,9 @@ actor MacRealtimeScribeSession: MacRealtimeScribeSessionProtocol {
             }
         } catch {
             guard !isClosing else { return }
+            MacRealtimeTrace.event(
+                "receive_failed reason=\(MacRealtimeTrace.failureCode(for: error))"
+            )
             terminalError = terminalError ?? error
         }
     }
