@@ -1,7 +1,10 @@
 # macOS dictation controls
 
-Behavior specification for the four-key control model. This replaces the
-single right-⌘ toggle and the double-tap source switch.
+The four-key control model, as shipped. `MacDictationKeys.swift` owns the
+keys, the phases, and the bare-tap recognizer; `MacAppModel.handleDictationKey`
+is the single implementation of the matrix below; `MacKeyboardMapModel.swift`
+projects the same matrix onto the menu-bar map, so the picture on screen
+cannot drift from what the keys do.
 
 ## Keys
 
@@ -72,7 +75,24 @@ keyboard map, replacing menu items.
 - Opening the panel never grants Dock or Command-Tab presence.
 - Footer only: Settings, Quit, readiness/offline notices.
 
-## Fallback
+## Resting in the HUD
 
-If a bare `fn` tap cannot work cleanly as a global control, its verb
-moves to right ⇧. Nothing else about the model changes.
+Pause adds nothing visually: the front card goes still and dim, and the
+rails behind it may keep moving. It is **sourceless** — no laptop or phone
+glyph, because no microphone is live and the next source key decides. It
+never times out; the existing visibility caps apply to the rails, not to a
+resting dictation.
+
+Open: compression when resting holds many segments. It currently uses the
+stack's ordinary three-card budget with the numeric `+N` badge.
+
+## fn is unverified
+
+A modifier's `flagsChanged` cannot be suppressed without breaking that key
+for everything else, so a bare `fn` tap also triggers whatever System
+Settings has under "Press 🌐 to". Whether that is tolerable needs a
+physical pass.
+
+If it is not, the End verb moves to right ⇧: one constant in
+`MacDictationKey` and one bit in `MacModifierSide`. Nothing else about the
+model changes.
