@@ -27,63 +27,11 @@ enum MacPasteMenuShortcut {
 enum MacPasteMenuActionResult: Equatable {
     /// No menu side effect was reached; another insertion route is safe.
     case unavailable
-    /// Focus stopped being a writable control before the menu action.
-    case focusChanged
     /// AXPress was invoked. Its return status cannot prove whether the target
     /// consumed the paste, so no second insertion route may be attempted.
     case invoked
 
     var permitsAnotherInsertionRoute: Bool { self == .unavailable }
-}
-
-/// Counts user actions that can move focus or the insertion point without
-/// observing their contents. SpeakPaste's own marked CGEvents are excluded so
-/// a chunked insertion can distinguish its output from intervening user input.
-final class MacUserInteractionTracker: @unchecked Sendable {
-    static let shared = MacUserInteractionTracker()
-    static let syntheticEventMarker: Int64 = 0x5350_4541_4B
-
-    private let lock = NSLock()
-    private var generation: UInt64 = 0
-    private var monitor: Any?
-
-    private init() {
-        monitor = NSEvent.addGlobalMonitorForEvents(
-            matching: [
-                .leftMouseDown,
-                .rightMouseDown,
-                .otherMouseDown,
-                .keyDown,
-                .scrollWheel,
-            ]
-        ) { [weak self] event in
-            if event.cgEvent?.getIntegerValueField(.eventSourceUserData)
-                == Self.syntheticEventMarker {
-                return
-            }
-            self?.recordInteraction()
-        }
-    }
-
-    var snapshot: UInt64? {
-        lock.lock()
-        defer { lock.unlock() }
-        guard monitor != nil else { return nil }
-        return generation
-    }
-
-    static func markSynthetic(_ event: CGEvent) {
-        event.setIntegerValueField(
-            .eventSourceUserData,
-            value: syntheticEventMarker
-        )
-    }
-
-    private func recordInteraction() {
-        lock.lock()
-        generation &+= 1
-        lock.unlock()
-    }
 }
 
 /// Application/context metadata captured for recognition and History. Delivery
@@ -102,17 +50,13 @@ struct MacDeliveryTarget {
     /// capture uses it only if a second caret-local read is unavailable.
     let precedingText: String?
     private let element: AXUIElement?
-    /// This is captured at the delivery boundary, not at record start. It is
-    /// used only to keep a multi-step side effect from following later input.
-    private let interactionGeneration: UInt64?
     init(
         processIdentifier: pid_t,
         applicationName: String,
         bundleIdentifier: String? = nil,
         contextKeyterms: [String] = [],
         precedingText: String? = nil,
-        element: AXUIElement?,
-        interactionGeneration: UInt64? = nil
+        element: AXUIElement?
     ) {
         self.processIdentifier = processIdentifier
         self.applicationName = applicationName
@@ -120,28 +64,19 @@ struct MacDeliveryTarget {
         self.contextKeyterms = contextKeyterms
         self.precedingText = precedingText
         self.element = element
-        self.interactionGeneration = interactionGeneration
     }
 
     /// Captures the current destination. Returns nil when SpeakPaste itself is
     /// frontmost, because there is no other app to deliver to.
     @MainActor
     static func captureCurrent(collectContext: Bool = false) -> MacDeliveryTarget? {
-        // Secure Event Input is broader than AX secure-field subroles. Terminal
-        // apps can enable it while still exposing an ordinary text area, so do
-        // not even capture/read a destination until the global state clears.
-        guard !IsSecureEventInputEnabled() else { return nil }
         guard
             let application = NSWorkspace.shared.frontmostApplication,
             application.processIdentifier != ProcessInfo.processInfo.processIdentifier
         else {
             return nil
         }
-        let interactionBeforeCapture = MacUserInteractionTracker.shared.snapshot
-        // Ordinary capture retains the proven batch-delivery resolver. The
-        // stricter realtime contract is evaluated only after the experimental
-        // mode is armed, so opting out cannot change paste targeting or field
-        // privacy.
+        // Accessibility is optional context, never destination identity.
         let element = MacAccessibility.focusedWritableElement(
             processIdentifier: application.processIdentifier
         )
@@ -152,37 +87,15 @@ struct MacDeliveryTarget {
             )
         } ?? [] : []
         let precedingText = element.flatMap(MacAccessibility.textBeforeCursor(in:))
-        let interactionAfterCapture = MacUserInteractionTracker.shared.snapshot
-        guard
-            NSWorkspace.shared.frontmostApplication?.processIdentifier
-                == application.processIdentifier,
-            interactionBeforeCapture == interactionAfterCapture
-        else {
-            return nil
-        }
         return MacDeliveryTarget(
             processIdentifier: application.processIdentifier,
             applicationName: application.localizedName ?? "the previous app",
             bundleIdentifier: application.bundleIdentifier,
             contextKeyterms: contextKeyterms,
             precedingText: precedingText,
-            element: element,
-            interactionGeneration: interactionAfterCapture
+            element: element
         )
     }
-
-    /// Resolves the output destination at delivery time. A missing writable,
-    /// non-secure focus deliberately selects clipboard fallback instead.
-    @MainActor
-    static func captureCurrentWritable() -> MacDeliveryTarget? {
-        guard let target = captureCurrent(), target.hasElement else { return nil }
-        return target
-    }
-
-    /// Whether an element was resolvable at capture time. Toolkits with weak
-    /// accessibility support — Electron among them — often expose nothing, and
-    /// the two cases must be treated differently.
-    var hasElement: Bool { element != nil }
 
     /// Accessibility is read-only here: it positions the tiny mic marker while
     /// InputMethodKit owns all provisional/final text mutation.
@@ -204,86 +117,6 @@ struct MacDeliveryTarget {
         return MacAccessibility.realtimeBounds(for: range, in: current)
     }
 
-    /// Revalidation for explicit output. A replacement AX node is valid when
-    /// the same live application still owns a writable, non-secure focus and
-    /// no user action moved the insertion point after capture.
-    @MainActor
-    var matchesCurrentManualDestination: Bool {
-        canContinueMultistepInsertion
-    }
-
-    /// Realtime may spend time connecting the microphone and installing its
-    /// palette after this target was captured. Reuse the existing interaction
-    /// generation and live secure/writable checks so setup cannot silently
-    /// attach to a different field in the same application.
-    @MainActor
-    var isStillRealtimeAttachmentTarget: Bool {
-        canContinueMultistepInsertion
-    }
-
-    /// Strictly links an optional follow-up side effect to the editor selected
-    /// for this one delivery. It is intentionally short-lived and must not be
-    /// used as a record-start continuity requirement.
-    func isSameUninterruptedOutputBoundary(as other: MacDeliveryTarget) -> Bool {
-        guard
-            processIdentifier == other.processIdentifier,
-            let interactionGeneration,
-            let otherInteractionGeneration = other.interactionGeneration,
-            interactionGeneration == otherInteractionGeneration,
-            let element,
-            let otherElement = other.element
-        else {
-            return false
-        }
-        return CFEqual(element, otherElement)
-    }
-
-    /// A transcript may start in any live writable node, including a rebuilt AX
-    /// proxy. Once chunked output has begun, however, user input must not move
-    /// the remaining chunks elsewhere. If event monitoring is unavailable,
-    /// exact short-lived node identity is the fail-closed fallback.
-    @MainActor
-    var canContinueMultistepInsertion: Bool {
-        guard
-            NSWorkspace.shared.frontmostApplication?.processIdentifier == processIdentifier,
-            !MacAccessibility.focusedElementIsSecureText(),
-            let current = MacAccessibility.focusedWritableElement()
-        else {
-            return false
-        }
-        return MacOutputContinuationPolicy.canContinueMultistepInsertion(
-            processIsCurrent: true,
-            currentIsWritable: true,
-            currentIsSecure: false,
-            sameElement: element.map { CFEqual($0, current) } ?? false,
-            interactionGeneration: interactionGeneration,
-            currentInteractionGeneration: MacUserInteractionTracker.shared.snapshot
-        )
-    }
-
-    /// Return is a separate side effect after paste confirmation. Suppress it
-    /// unless the just-confirmed node still owns focus and no user action has
-    /// occurred during the delay. This strict, short-lived check does not make
-    /// AX identity a requirement for selecting the transcript destination.
-    @MainActor
-    var canReceiveFollowUpReturn: Bool {
-        guard
-            NSWorkspace.shared.frontmostApplication?.processIdentifier == processIdentifier,
-            !MacAccessibility.focusedElementIsSecureText(),
-            let element,
-            let current = MacAccessibility.focusedWritableElement()
-        else {
-            return false
-        }
-        return MacOutputContinuationPolicy.canSendFollowUpReturn(
-            processIsCurrent: true,
-            currentIsWritable: true,
-            currentIsSecure: false,
-            sameElement: CFEqual(element, current),
-            interactionGeneration: interactionGeneration,
-            currentInteractionGeneration: MacUserInteractionTracker.shared.snapshot
-        )
-    }
 }
 
 enum MacAccessibility {
@@ -721,8 +554,7 @@ enum MacAccessibility {
     /// than the title "Paste", so a localized menu still resolves.
     @MainActor
     static func pressPasteMenuItem(
-        inProcess processIdentifier: pid_t,
-        validating targetIsStillValid: () -> Bool
+        inProcess processIdentifier: pid_t
     ) -> MacPasteMenuActionResult {
         let application = AXUIElementCreateApplication(processIdentifier)
         AXUIElementSetMessagingTimeout(application, messagingTimeout)
@@ -759,11 +591,6 @@ enum MacAccessibility {
                     ) else {
                         continue
                     }
-                    // Menu-tree traversal can take up to the AX messaging
-                    // timeout. Revalidate at the exact side-effect boundary so
-                    // a focus switch during that traversal cannot paste into a
-                    // different field or a newly focused password control.
-                    guard targetIsStillValid() else { return .focusChanged }
                     _ = AXUIElementPerformAction(item, kAXPressAction as CFString)
                     return .invoked
                 }
