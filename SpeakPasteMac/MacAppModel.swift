@@ -49,7 +49,7 @@ private struct MacTerminationRecording {
 }
 
 /// One opt-in live session. Its input-method client owns one marked
-/// composition at the captured caret, while the WAV remains the durable fallback.
+/// composition at the current input client, while the WAV remains the durable fallback.
 private struct MacActiveRealtimeDictation {
     let id: UUID
     let session: any MacRealtimeScribeSessionProtocol
@@ -2510,9 +2510,8 @@ final class MacAppModel: ObservableObject {
             return
         }
 
-        // Reserve delivery isolation before the WebSocket handshake. No older
-        // paste may cross into the captured field while realtime is awaiting
-        // the network, and only this generation may release the reservation.
+        // Reserve delivery isolation before the WebSocket handshake so an
+        // older delivery cannot interleave with this live composition.
         let sessionID = UUID()
         realtimeDeliveryBarrierID = sessionID
         let attachmentTarget = MacDeliveryTarget.captureCurrent() ?? target
