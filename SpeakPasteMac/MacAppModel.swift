@@ -54,8 +54,8 @@ private struct MacActiveRealtimeDictation {
     let id: UUID
     let session: any MacRealtimeScribeSessionProtocol
     let pump: MacRealtimeAudioPump
-    let composition: MacRealtimeCompositionSession
-    let target: MacDeliveryTarget
+    var composition: MacRealtimeCompositionSession
+    var target: MacDeliveryTarget
 }
 
 private enum MacRealtimeStopResolution {
@@ -2515,16 +2515,11 @@ final class MacAppModel: ObservableObject {
         // the network, and only this generation may release the reservation.
         let sessionID = UUID()
         realtimeDeliveryBarrierID = sessionID
-        guard let targetBundleID = target.bundleIdentifier else {
+        let attachmentTarget = MacDeliveryTarget.captureCurrent() ?? target
+        guard let targetBundleID = attachmentTarget.bundleIdentifier else {
             releaseRealtimeDeliveryBarrier(for: sessionID)
             MacRealtimeTrace.event("arm_skipped reason=missing_bundle_id")
             realtimeModeNotice = "Realtime stayed on batch because macOS could not identify this app's input client."
-            return
-        }
-        guard target.isStillRealtimeAttachmentTarget else {
-            releaseRealtimeDeliveryBarrier(for: sessionID)
-            MacRealtimeTrace.event("arm_skipped reason=target_changed_before_attach")
-            realtimeModeNotice = "Realtime stayed on batch because the text field changed during setup."
             return
         }
 
@@ -2540,18 +2535,10 @@ final class MacAppModel: ObservableObject {
             realtimeModeNotice = "Realtime stayed on batch because its native text composition could not attach: \(diagnosticMessage(for: error))"
             return
         }
-        guard target.isStillRealtimeAttachmentTarget else {
-            _ = await composition.cancel()
-            releaseRealtimeDeliveryBarrier(for: sessionID)
-            MacRealtimeTrace.event("arm_skipped reason=target_changed_during_attach")
-            realtimeModeNotice = "Realtime stayed on batch because the text field changed during setup."
-            return
-        }
         composition.onDetach = { [weak self] reason in
             guard let self else { return }
             self.realtimeCompositionActive = false
             self.realtimeCaretFrame = nil
-            self.realtimeModeNotice = "Realtime stopped editing because the input client changed. The final result will be held for manual placement."
             MacRealtimeTrace.event("composition_detached reason=\(reason)")
         }
 
@@ -2587,11 +2574,7 @@ final class MacAppModel: ObservableObject {
             releaseRealtimeDeliveryBarrier(for: sessionID)
             return
         }
-        guard
-            !composition.isDetached,
-            !composition.isClosed,
-            target.isStillRealtimeAttachmentTarget
-        else {
+        guard !composition.isDetached, !composition.isClosed else {
             await session.cancel()
             _ = await composition.cancel()
             releaseRealtimeDeliveryBarrier(for: sessionID)
@@ -2604,7 +2587,7 @@ final class MacAppModel: ObservableObject {
             session: session,
             pump: MacRealtimeAudioPump(session: session),
             composition: composition,
-            target: target
+            target: attachmentTarget
         )
         realtimeLastAppliedRevision = 0
         pendingRealtimeUpdate = nil
@@ -2671,19 +2654,6 @@ final class MacAppModel: ObservableObject {
         else {
             return false
         }
-        guard active.target.isStillRealtimeAttachmentTarget else {
-            // Some InputMethodKit clients reuse one controller across fields
-            // without issuing a lifecycle callback. The app-wide interaction
-            // generation is the authoritative focus/caret boundary in that
-            // case; clear the old mark before accepting another hypothesis.
-            active.composition.cancelImmediately()
-            realtimeCompositionActive = false
-            realtimeCaretFrame = nil
-            realtimeModeNotice = "Realtime stopped editing because the text field changed. The final result will be held for manual placement."
-            MacRealtimeTrace.event("composition_detached reason=target_changed")
-            return false
-        }
-        realtimeLastAppliedRevision = update.revision
         let previewChunk = MacTranscriptPostProcessor.prepare(
             update.snapshot.displayText,
             replacements: [],
@@ -2691,21 +2661,54 @@ final class MacAppModel: ObservableObject {
         )
         let preview = MacTranscriptPostProcessor.fit(
             previewChunk,
-            after: active.target.precedingText
+            after: MacAccessibility.focusedTextBeforeCursor()
+                ?? active.target.precedingText
         )
-        let didUpdate = await active.composition.update(
+        var didUpdate = await active.composition.update(
             revision: update.revision,
             text: preview
         )
         guard activeRealtimeDictation?.id == sessionID else { return false }
+        if !didUpdate,
+           let replacementTarget = MacDeliveryTarget.captureCurrent(),
+           let targetBundleID = replacementTarget.bundleIdentifier {
+            do {
+                let replacement = try await MacRealtimeInputMethodClient.shared.attach(
+                    sessionID: sessionID,
+                    targetBundleID: targetBundleID
+                )
+                replacement.onDetach = { [weak self] reason in
+                    guard let self else { return }
+                    self.realtimeCompositionActive = false
+                    self.realtimeCaretFrame = nil
+                    MacRealtimeTrace.event("composition_detached reason=\(reason)")
+                }
+                guard activeRealtimeDictation?.id == sessionID else {
+                    _ = await replacement.cancel()
+                    return false
+                }
+                activeRealtimeDictation?.composition = replacement
+                activeRealtimeDictation?.target = replacementTarget
+                didUpdate = await replacement.update(
+                    revision: update.revision,
+                    text: preview
+                )
+                if didUpdate {
+                    MacRealtimeTrace.event("composition_reattached revision=\(update.revision)")
+                }
+            } catch {
+                MacRealtimeTrace.event("composition_reattach_failed")
+            }
+        }
         guard didUpdate else {
             realtimeCompositionActive = false
             realtimeCaretFrame = nil
-            realtimeModeNotice = "Realtime stopped editing because the input client changed. The final result will be held for manual placement."
             MacRealtimeTrace.event("composition_detached revision=\(update.revision)")
             return false
         }
-        realtimeCaretFrame = active.target.realtimeCaretFrame
+        realtimeLastAppliedRevision = update.revision
+        realtimeCompositionActive = true
+        realtimeCaretFrame = activeRealtimeDictation?.target.realtimeCaretFrame
         return true
     }
 
@@ -2758,13 +2761,17 @@ final class MacAppModel: ObservableObject {
                 realtimeCaretFrame = nil
                 throw MacRealtimeScribeError.commitTimedOut
             }
+            guard let settledActive = activeRealtimeDictation,
+                  settledActive.id == active.id else {
+                throw MacRealtimeScribeError.commitTimedOut
+            }
             activeRealtimeDictation = nil
             releaseRealtimeDeliveryBarrier(for: active.id)
             realtimeCaretFrame = nil
             return .completed(
                 result: result,
-                target: active.target,
-                composition: active.composition
+                target: settledActive.target,
+                composition: settledActive.composition
             )
         } catch {
             MacRealtimeTrace.event(

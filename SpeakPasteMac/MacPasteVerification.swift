@@ -74,20 +74,19 @@ enum MacPasteVerification {
 }
 
 enum MacDeliveryTargetDecision<Token: Equatable>: Equatable {
-    case focusedWritable(Token)
+    case focusedApplication(Token)
     case clipboardFallback
 }
 
 /// The record-start target is recognition/history metadata, not delivery
-/// identity. Only the writable focus observed at the output boundary wins.
+/// identity. Only the application focused at the output boundary wins.
 enum MacDeliveryTargeting {
     static func decide<Token: Equatable>(
         captured _: Token?,
-        current: Token?,
-        currentIsWritable: Bool
+        current: Token?
     ) -> MacDeliveryTargetDecision<Token> {
-        guard currentIsWritable, let current else { return .clipboardFallback }
-        return .focusedWritable(current)
+        guard let current else { return .clipboardFallback }
+        return .focusedApplication(current)
     }
 }
 
@@ -99,51 +98,6 @@ enum MacDeliveryTextPolicy {
         existingRecoveryTranscripts _: [String] = []
     ) -> String {
         newestTranscript
-    }
-}
-
-/// Safety boundary for side effects that follow the initial delivery target
-/// selection. AX replacement is allowed during chunked insertion when no user
-/// action occurred; a separate Return is stricter and requires the same live
-/// node that was captured after paste confirmation.
-enum MacOutputContinuationPolicy {
-    static func canContinueMultistepInsertion(
-        processIsCurrent: Bool,
-        currentIsWritable: Bool,
-        currentIsSecure: Bool,
-        sameElement: Bool,
-        interactionGeneration: UInt64?,
-        currentInteractionGeneration: UInt64?
-    ) -> Bool {
-        guard processIsCurrent, currentIsWritable, !currentIsSecure else {
-            return false
-        }
-        if let interactionGeneration, let currentInteractionGeneration {
-            return interactionGeneration == currentInteractionGeneration
-        }
-        return sameElement
-    }
-
-    static func canSendFollowUpReturn(
-        processIsCurrent: Bool,
-        currentIsWritable: Bool,
-        currentIsSecure: Bool,
-        sameElement: Bool,
-        interactionGeneration: UInt64?,
-        currentInteractionGeneration: UInt64?
-    ) -> Bool {
-        guard
-            processIsCurrent,
-            currentIsWritable,
-            !currentIsSecure,
-            sameElement,
-            let interactionGeneration,
-            let currentInteractionGeneration,
-            interactionGeneration == currentInteractionGeneration
-        else {
-            return false
-        }
-        return true
     }
 }
 

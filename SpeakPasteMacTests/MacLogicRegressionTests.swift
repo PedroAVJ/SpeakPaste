@@ -60,10 +60,9 @@ final class MacDeliveryTargetingTests: XCTestCase {
         XCTAssertEqual(
             MacDeliveryTargeting.decide(
                 captured: "electron-node-before-dictation",
-                current: "electron-node-at-delivery",
-                currentIsWritable: true
+                current: "electron-node-at-delivery"
             ),
-            .focusedWritable("electron-node-at-delivery")
+            .focusedApplication("electron-node-at-delivery")
         )
     }
 
@@ -71,27 +70,27 @@ final class MacDeliveryTargetingTests: XCTestCase {
         XCTAssertEqual(
             MacDeliveryTargeting.decide(
                 captured: "source-app-editor",
-                current: "current-app-editor",
-                currentIsWritable: true
+                current: "current-app-editor"
             ),
-            .focusedWritable("current-app-editor")
+            .focusedApplication("current-app-editor")
         )
     }
 
-    func testMissingOrReadOnlyCurrentFocusSelectsClipboardFallback() {
+    func testCurrentApplicationDoesNotRequireAXWritableElement() {
         XCTAssertEqual(
             MacDeliveryTargeting.decide(
                 captured: "old-editor",
-                current: Optional<String>.none,
-                currentIsWritable: false
+                current: "electron-app-without-stable-ax-node"
             ),
-            .clipboardFallback
+            .focusedApplication("electron-app-without-stable-ax-node")
         )
+    }
+
+    func testMissingCurrentApplicationSelectsClipboardFallback() {
         XCTAssertEqual(
             MacDeliveryTargeting.decide(
                 captured: "old-editor",
-                current: "read-only-control",
-                currentIsWritable: false
+                current: Optional<String>.none
             ),
             .clipboardFallback
         )
@@ -127,7 +126,6 @@ final class MacDeliveryTargetingTests: XCTestCase {
 
     func testInvokedMenuActionNeverFallsThroughToAnotherInsertionRoute() {
         XCTAssertTrue(MacPasteMenuActionResult.unavailable.permitsAnotherInsertionRoute)
-        XCTAssertFalse(MacPasteMenuActionResult.focusChanged.permitsAnotherInsertionRoute)
         XCTAssertFalse(MacPasteMenuActionResult.invoked.permitsAnotherInsertionRoute)
     }
 }
