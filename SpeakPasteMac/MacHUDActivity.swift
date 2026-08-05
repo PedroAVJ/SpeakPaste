@@ -1,15 +1,6 @@
 import Combine
 import Foundation
 
-enum MacHUDVisibilityPolicy {
-    static func shouldPresent(
-        hudEnabled: Bool,
-        realtimeCompositionActive: Bool
-    ) -> Bool {
-        hudEnabled && !realtimeCompositionActive
-    }
-}
-
 /// SF Symbols used for held-output state. Both preferred symbols predate the
 /// macOS 14 deployment floor. The runtime fallback keeps a misspelled or
 /// unexpectedly unavailable symbol from turning the HUD into an empty glyph.

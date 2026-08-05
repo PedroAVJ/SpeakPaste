@@ -97,26 +97,6 @@ struct MacDeliveryTarget {
         )
     }
 
-    /// Accessibility is read-only here: it positions the tiny mic marker while
-    /// InputMethodKit owns all provisional/final text mutation.
-    @MainActor
-    var realtimeCaretFrame: CGRect? {
-        guard
-            NSWorkspace.shared.frontmostApplication?.processIdentifier
-                == processIdentifier,
-            // Electron can rebuild its AX proxy while the input method keeps
-            // the live text client. Resolve focus afresh; a stale record-start
-            // node is never used for geometry or eligibility.
-            let current = MacAccessibility.focusedWritableElement(
-                processIdentifier: processIdentifier
-            ),
-            let range = MacAccessibility.realtimeSelectedRange(in: current)
-        else {
-            return nil
-        }
-        return MacAccessibility.realtimeBounds(for: range, in: current)
-    }
-
 }
 
 enum MacAccessibility {
@@ -336,55 +316,6 @@ enum MacAccessibility {
             return false
         }
         return CFEqual(element, focused)
-    }
-
-    static func realtimeSelectedRange(
-        in element: AXUIElement
-    ) -> MacRealtimeTextRange? {
-        guard
-            !IsSecureEventInputEnabled(),
-            !isSecureTextElement(element),
-            let selection = selectedTextRange(in: element),
-            selection.length == 0
-        else {
-            return nil
-        }
-        return MacRealtimeTextRange(
-            location: selection.location,
-            length: selection.length
-        )
-    }
-
-    static func realtimeBounds(
-        for range: MacRealtimeTextRange,
-        in element: AXUIElement
-    ) -> CGRect? {
-        guard
-            !IsSecureEventInputEnabled(),
-            !isSecureTextElement(element),
-            var cfRange = Optional(range.asCFRange),
-            let rangeValue = AXValueCreate(.cfRange, &cfRange)
-        else {
-            return nil
-        }
-        AXUIElementSetMessagingTimeout(element, messagingTimeout)
-        var result: CFTypeRef?
-        guard
-            AXUIElementCopyParameterizedAttributeValue(
-                element,
-                kAXBoundsForRangeParameterizedAttribute as CFString,
-                rangeValue,
-                &result
-            ) == .success,
-            let result,
-            CFGetTypeID(result) == AXValueGetTypeID()
-        else {
-            return frame(of: element)
-        }
-        let axValue = result as! AXValue
-        guard AXValueGetType(axValue) == .cgRect else { return frame(of: element) }
-        var rect = CGRect.zero
-        return AXValueGetValue(axValue, .cgRect, &rect) ? rect : frame(of: element)
     }
 
     static func textBeforeCursor(in element: AXUIElement) -> String? {

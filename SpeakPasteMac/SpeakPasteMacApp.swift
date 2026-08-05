@@ -51,7 +51,6 @@ private final class MacDashboardWindowController: NSObject, NSWindowDelegate {
 private final class MacAppRuntime: ObservableObject {
     let model: MacAppModel?
     let statusHUD: MacStatusHUDController?
-    let realtimeCaretIndicator: MacRealtimeCaretIndicatorController?
     let presence: MacApplicationPresenceCoordinator
     let dashboardWindowController: MacDashboardWindowController?
     let existingApplication: NSRunningApplication?
@@ -86,7 +85,6 @@ private final class MacAppRuntime: ObservableObject {
                 self.lease = nil
                 self.model = nil
                 self.statusHUD = nil
-                self.realtimeCaretIndicator = nil
                 self.dashboardWindowController = nil
                 self.existingApplication = legacyInstance
                 self.launchFailureMessage = nil
@@ -101,7 +99,6 @@ private final class MacAppRuntime: ObservableObject {
             self.lease = lease
             self.model = model
             self.statusHUD = MacStatusHUDController(model: model)
-            self.realtimeCaretIndicator = MacRealtimeCaretIndicatorController(model: model)
             self.dashboardWindowController = dashboardWindowController
             self.existingApplication = nil
             self.launchFailureMessage = nil
@@ -118,7 +115,6 @@ private final class MacAppRuntime: ObservableObject {
             self.lease = nil
             self.model = nil
             self.statusHUD = nil
-            self.realtimeCaretIndicator = nil
             self.dashboardWindowController = nil
             self.existingApplication = legacyInstance ?? Self.existingSpeakPasteApplication()
             self.launchFailureMessage = nil
@@ -127,7 +123,6 @@ private final class MacAppRuntime: ObservableObject {
             self.lease = nil
             self.model = nil
             self.statusHUD = nil
-            self.realtimeCaretIndicator = nil
             self.dashboardWindowController = nil
             self.existingApplication = legacyInstance
             self.launchFailureMessage = "SpeakPaste could not create its per-user safety lock, so it did not open or touch local dictation data. Check the permissions on your temporary folder, then try again."
@@ -140,7 +135,6 @@ private final class MacAppRuntime: ObservableObject {
     func start() {
         guard let model else { return }
         statusHUD?.start()
-        realtimeCaretIndicator?.start()
         model.startSessionTracking()
     }
 

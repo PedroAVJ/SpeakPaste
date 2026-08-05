@@ -4,8 +4,6 @@ import Carbon
 import Foundation
 
 enum MacPasteRoute: String, Equatable {
-    /// The realtime input method committed its one marked composition.
-    case realtime = "realtime"
     /// The target application's own Edit ▸ Paste command was invoked.
     case menuAction = "menu"
     /// A synthesized ⌘V was posted.
@@ -167,43 +165,6 @@ struct MacPasteController {
             copyOnHold: copyOnHold,
             heldClipboardOwner: heldClipboardOwner
         )
-    }
-
-    /// Commits the one marked composition already owned by the input-method
-    /// session. The shared gate keeps older deliveries from interleaving. A
-    /// missing receipt is treated as possibly delivered and is never retried.
-    func deliverRealtime(
-        _ text: String,
-        composition: MacRealtimeCompositionSession,
-        target: MacDeliveryTarget,
-        heldClipboardOwner: MacHeldClipboardIdentity
-    ) async -> MacPasteDeliveryOutcome {
-        await deliveryGate.acquire()
-        defer { deliveryGate.release() }
-        switch await composition.finish(text: text) {
-        case .verified:
-            return MacPasteDeliveryOutcome(
-                result: .pasted(route: .realtime, verified: true),
-                target: target
-            )
-        case .unverified:
-            return MacPasteDeliveryOutcome(
-                result: .pasted(route: .realtime, verified: false),
-                target: target
-            )
-        case .failed:
-            // The marked client disappeared before commit. Deliver the final
-            // text through the same native paste primitive at the focus that
-            // exists now instead of holding it for the old client.
-            return await deliverAfterAcquiringGate(
-                .literal(text),
-                capturedTarget: target,
-                autoPaste: true,
-                policyForTarget: { _ in nil },
-                copyOnHold: true,
-                heldClipboardOwner: heldClipboardOwner
-            )
-        }
     }
 
     /// Delivers an intrinsically prepared transcript. Spacing and first-letter

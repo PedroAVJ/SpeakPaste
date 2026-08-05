@@ -347,39 +347,6 @@ only phrase: low and falling. All normal builds that own SpeakPaste's
 shared local stores use one product-wide process lease,
 independent of bundle identifier; a secondary launch exits without initializing
 app data. While the microphone is recording, SpeakPaste prevents idle display
-and system sleep, and VoiceOver announces the consequential capture phases.
-
-macOS offers Auto plus all 99 documented Scribe language hints in its settings,
-onboarding, and menu-bar picker. It exposes no provider, model, or
-speed-versus-quality selector: quality-first ElevenLabs Scribe v2 batch
-transcription remains the default product path.
-
-General settings also contain a default-off **Experimental realtime text at the
-cursor** switch for testing ElevenLabs `scribe_v2_realtime`. For an eligible
-collapsed caret under ordinary automatic delivery, SpeakPaste attaches a hidden
-InputMethodKit palette to the active text-input client. Each cumulative snapshot
--- the stable committed prefix plus the changing provisional tail -- is one
-marked-text composition. A later snapshot replaces that same composition rather
-than appending or repeatedly pasting text. The recoverable WAV is still recorded
-in parallel.
-
-Only a successfully attached realtime composition suppresses the ordinary top
-status HUD and uses the tiny caret mic marker. If the palette is unavailable,
-the target cannot host a marked composition, or attachment fails, SpeakPaste
-keeps the existing batch path and its normal HUD instead of pretending realtime
-is active. Stop releases the microphone first, drains and manually commits the
-stream, and makes History and delivery escrow durable before the fully
-post-processed final text is inserted exactly once through the active input
-method. It does not follow that with a menu paste. Escape clears the provisional
-composition without committing it. Realtime does not compare Accessibility node
-identity or user-interaction generations: if the native input client detaches,
-the next revision reacquires the currently focused client, and an unavailable
-final composition uses the same current-focus native paste primitive as batch.
-Other unsupported delivery rules remain batch-only.
-The implementation follows the native marked-text pattern, but compilation and
-isolated callbacks do not establish physical acceptance in Notes, TextEdit,
-Codex, Claude Code, other Electron editors, or over the Continuity chain.
-
 The current macOS capability set and the features deliberately excluded from
 the product are recorded in [the product-parity ledger](docs/macos-feature-parity.md).
 Compilation, focused logic tests, and isolated UI inspection do not prove the

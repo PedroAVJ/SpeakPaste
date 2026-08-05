@@ -121,7 +121,6 @@ final class MacStatusHUDController: ObservableObject {
         // changing the semantic stack inputs. Re-present the last emitted state.
         Publishers.MergeMany(
             model.$hudEnabled.map { _ in () }.eraseToAnyPublisher(),
-            model.$realtimeCompositionActive.map { _ in () }.eraseToAnyPublisher(),
             model.$hudPlacement.map { _ in () }.eraseToAnyPublisher(),
             model.$selectedDeviceID.map { _ in () }.eraseToAnyPublisher(),
             model.$devices.map { _ in () }.eraseToAnyPublisher()
@@ -147,13 +146,7 @@ final class MacStatusHUDController: ObservableObject {
         expiryTask?.cancel()
         expiryTask = nil
 
-        // Realtime text is its own progress surface. When the experiment is
-        // selected, the destination text plus its caret mic are the complete
-        // interaction; showing the batch HUD at the top is duplicate noise.
-        guard MacHUDVisibilityPolicy.shouldPresent(
-            hudEnabled: model.hudEnabled,
-            realtimeCompositionActive: model.realtimeCompositionActive
-        ) else {
+        guard model.hudEnabled else {
             hidePanel()
             return
         }

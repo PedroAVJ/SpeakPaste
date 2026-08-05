@@ -10,21 +10,13 @@ Research snapshot: 2026-08-04.
 
 - One transcription engine: ElevenLabs Scribe v2. There is no model or provider
   selector.
-- Quality-first batch transcription is the default. A default-off realtime
-  Scribe mode exists only as an explicit macOS experiment.
-- Batch network work begins only after complete Continuity release. The
-  realtime experiment necessarily streams audio while capture is live, but
-  release still precedes its final commit, fallback, and durable delivery.
+- Batch network work begins only after complete Continuity release.
 - At the delivery boundary, a transcript may enter only the currently focused
   writable, non-secure editor. If none exists, the exact newest transcript
   becomes the clipboard fallback regardless of older recovery entries.
 - Accessibility object continuity across a dictation is not a universal
   invariant. Electron and Chromium may rebuild, proxy, or replace their
   Accessibility tree and editable node while the user remains in an editor.
-- Realtime therefore uses the text-input system's composition contract instead
-  of mutating an Accessibility range. One cumulative provisional transcript
-  remains marked until it is cleared or replaced by one final insertion after
-  History and escrow are durable; no second menu-paste transaction follows it.
 - No silent microphone fallback, silent paste fallback, or destructive recovery
   path.
 
@@ -40,8 +32,7 @@ They are product decisions, not missing parity.
 | Interaction sounds | Confirm state without demanding a glance | Preloaded earcons share one timbre family: three single pings rise through capture, release, and verified delivery; error is the only phrase, low and falling. The capture cues follow the recorder's proven state, and the whole family obeys the Sounds setting. |
 | First run | Guided setup and visible readiness | Onboarding covers the API key, explicit permission requests, microphone selection/test, shortcuts, language, and cleanup behavior. It can be replayed. |
 | Microphones | External-device choice and troubleshooting | Exact Core Audio transport classification, persistent semantic Mac/iPhone mode, ranked user-approved fallback list within that mode, gain display, connect latency, live level, and a three-second record/playback test. No cross-mode fallback. A live mode switch finalizes and releases the current source before capture resumes as the next ordered segment. |
-| Continuity reliability | Do not record through the iPhone wake-up gap | Capture waits for a steady, audible sample stream. Stop synchronously ends the AVCapture session before batch transcription or realtime final commit/fallback proceeds. Sleep, disconnects, startup cancellation, and mid-stream stalls are handled explicitly. |
-| Experimental realtime dictation | Show changing text at the active cursor without making the HUD a transcript surface | A persisted, default-off setting uses ElevenLabs `scribe_v2_realtime` over a manual-commit WebSocket and a hidden InputMethodKit palette. For an eligible collapsed caret under ordinary automatic delivery, each cumulative snapshot -- stable committed prefix plus provisional tail -- is sent as one marked-text composition; the next snapshot replaces that composition instead of appending or issuing repeated paste transactions. Only a confirmed attachment hides the ordinary top HUD and shows the click-through caret mic marker. Palette unavailability, an unsupported client, failed attachment, or a special delivery rule keeps the batch path and its normal HUD. Native WAV recording continues for batch fallback, and the default-off batch graph keeps its native liveness tap. Incoming device-native PCM is explicitly converted to 16 kHz mono PCM16 before streaming, rather than relying on capture-output settings that some Mac and Continuity devices do not honor. Twenty-five-second manual commits stay below the service auto-commit window. Stop releases capture before draining audio and committing; History and escrow become durable before the fully post-processed final is inserted exactly once. Realtime never uses Accessibility node identity or interaction generations as a continuity gate: a detached native input client is reacquired at current focus, and an unavailable final composition uses the batch native-paste primitive at current focus. Escape clears marked text without committing it. Batch remains the default and every unsupported target stays batch-only. |
+| Continuity reliability | Do not record through the iPhone wake-up gap | Capture waits for a steady, audible sample stream. Stop synchronously ends the AVCapture session before batch transcription begins. Sleep, disconnects, startup cancellation, and mid-stream stalls are handled explicitly. |
 | Long dictation | Longer sessions with visible limits | Twenty-minute hard limit, one-minute warning, no-audio warning, automatic safe finalization, and immediate explicit cancellation with Escape. Short finalized recordings are still sent to Scribe; there is no arbitrary minimum-duration discard. |
 | Existing audio | Transcribe a file without blocking live dictation | Audio import has a separate manual-output lane, a fail-closed 20-minute duration limit, a 1 GB local admission limit, and never auto-pastes when it finishes. It does not block capture or spoken-order delivery, although imports and live dictations share Scribe's three-request admission limit. Normal Quit waits for secure import staging to finish or refuses to quit after the bounded wait. |
 | Network failure | Retry without losing what was said | Every finalized recording is moved into a private, crash-safe pending-audio journal before upload and is removed only after its final text and consumption receipt are durable. Interrupted active WAVs are recovered on the next primary launch. Transient network/429/5xx failures retry with bounded backoff; terminal or history-write failures remain individually retryable or discardable. |
@@ -51,7 +42,7 @@ They are product decisions, not missing parity.
 | Return to destination | Recover when the user switched away | When no writable editor is focused, the exact newest transcript becomes the clipboard fallback even when older recovery entries exist; every unresolved entry also remains durable in the dashboard. Delayed same-session and recovered text is released explicitly into the current focused writable editor rather than waiting for an archived AX node to return. User clipboard changes are reconciled from the private claim rather than inferred from queue size. A side effect that may have landed remains marked possibly delivered and is never retried automatically; reviewed uncertain text additionally requires a one-shot dashboard authorization for exactly the reviewed queue. |
 | Last transcript | Quickly reuse or correct recent text | Editable transcript, copy, clear, learn-edits, and global copy/paste-last shortcuts. While first-output recovery is unresolved, the transcript is visibly read-only and nonselectable so standard editor shortcuts cannot bypass the handoff. Copy/Paste Last refuse any transcript whose first output lacks a durably resolved handoff; a History-backed handoff can be repaired on demand without making the source audio retryable. |
 | Per-app behavior | Different apps need different insertion rules | Durable rules keyed by the delivery-time destination's bundle identifier select automatic, Paste-menu, type-out, or clipboard-only delivery; they can opt into context and explicitly confirmed auto-send. Auto-send is never used for delayed held text. |
-| Vocabulary | Teach names and domain language | Up to 1,000 validated batch keyterms are sent to Scribe. The current batch contract requires fewer than 50 characters and no more than five words per term and forbids `<`, `>`, `{`, `}`, `[`, `]`, backslashes, and control characters. Realtime enforces its smaller first-50, at-most-20-characters contract. Bulk paste/import and deterministic duplicate handling are included. The UI discloses ElevenLabs' current 20% keyterm surcharge and the 20-second minimum billing unit above 100 batch terms. Edits publish only after a private atomic write; damaged or newer documents remain byte-for-byte untouched. |
+| Vocabulary | Teach names and domain language | Up to 1,000 validated batch keyterms are sent to Scribe. The current batch contract requires fewer than 50 characters and no more than five words per term and forbids `<`, `>`, `{`, `}`, `[`, `]`, backslashes, and control characters. Bulk paste/import and deterministic duplicate handling are included. The UI discloses ElevenLabs' current 20% keyterm surcharge and the 20-second minimum billing unit above 100 batch terms. Edits publish only after a private atomic write; damaged or newer documents remain byte-for-byte untouched. |
 | Replacements and snippets | Expand or correct recurring phrases | Ordered, enableable heard-as → written-as rules support exact spellings and longer text expansions. Transcript edits teach corrections as one atomic transaction, with the same fail-closed persistence guarantees as vocabulary. |
 | Local cleanup | Predictable formatting without another model | Scribe's clean-speech option plus local spoken punctuation/new-line commands, deterministic replacements, and cursor-aware spacing/capitalization. Intrinsic cleanup is prepared when Scribe returns, but each chunk's seam is fitted only inside the serialized paste transaction against the current delivery editor's live pre-caret text. Explicit delayed runs fold one chunk at a time at the current focus, preventing stale record-start snapshots, `word.Next` collisions, duplicate spaces, and broken sentence casing. |
 | Context | Use nearby text to improve recognition, transparently | Recognition context is off by default. When enabled globally or for one app, only a small caret-local window, selection, app name, and window title are reduced to candidate keyterms. The UI shows how many terms were captured. Dynamic app/caret terms are validated and receive the finite 1,000 slots before global vocabulary, so a full dictionary cannot silently suppress the more specific context. Separately, local spacing/capitalization may read at most 256 pre-caret characters in process memory; those characters are never uploaded or stored. Secure fields are never read by either path. |
@@ -164,15 +155,6 @@ ElevenLabs:
 - [Speech-to-text overview](https://elevenlabs.io/docs/capabilities/speech-to-text)
 - [Create transcript API](https://elevenlabs.io/docs/api-reference/speech-to-text/convert)
 - [Batch keyterm prompting](https://elevenlabs.io/docs/eleven-api/guides/how-to/speech-to-text/batch/keyterm-prompting)
-- [Realtime Speech-to-Text WebSocket API](https://elevenlabs.io/docs/api-reference/speech-to-text/v-1-speech-to-text-realtime)
-- [Realtime transcripts and commit strategies](https://elevenlabs.io/docs/eleven-api/guides/how-to/speech-to-text/realtime/transcripts-and-commit-strategies)
-- [Realtime event reference](https://elevenlabs.io/docs/eleven-api/guides/how-to/speech-to-text/realtime/event-reference)
-
-Apple text-input pattern:
-
-- [InputMethodKit](https://developer.apple.com/documentation/inputmethodkit)
-- [`NSTextInputClient.setMarkedText`](https://developer.apple.com/documentation/appkit/nstextinputclient/setmarkedtext(_:selectedrange:replacementrange:))
-
 ## Verification boundary
 
 The macOS target and focused logic suites can prove compilation, persistence,

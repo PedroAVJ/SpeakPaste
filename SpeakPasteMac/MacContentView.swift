@@ -65,9 +65,6 @@ private struct MacDashboardView: View {
                     if let notice = model.recoveryNotice {
                         recoveryActionNoticeBanner(notice)
                     }
-                    if let notice = model.realtimeModeNotice {
-                        realtimeNoticeBanner(notice)
-                    }
                     if !model.heldTranscripts.isEmpty {
                         heldBanner
                     }
@@ -167,10 +164,7 @@ private struct MacDashboardView: View {
         switch model.phase {
         case .connecting: return "Connecting…"
         case .recording: return "Speak now"
-        case .finalizing:
-            return model.realtimeCommitInProgress
-                ? "Finalizing realtime text…"
-                : "Releasing microphone"
+        case .finalizing: return "Releasing microphone"
         case .succeeded: return "Done"
         case .failed: return "Failed"
         case .ready:
@@ -227,24 +221,6 @@ private struct MacDashboardView: View {
             .background(RoundedRectangle(cornerRadius: 8).fill(tint.opacity(0.08)))
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(tint.opacity(0.3)))
             .accessibilityElement(children: .contain)
-    }
-
-    private func realtimeNoticeBanner(_ notice: String) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "waveform.badge.mic")
-                .foregroundStyle(.blue)
-                .accessibilityHidden(true)
-            Text(notice)
-                .font(.callout)
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 8)
-            Button("Dismiss") { model.dismissRealtimeModeNotice() }
-                .controlSize(.small)
-        }
-        .padding(10)
-        .background(RoundedRectangle(cornerRadius: 8).fill(.blue.opacity(0.08)))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.blue.opacity(0.3)))
-        .accessibilityElement(children: .contain)
     }
 
     // MARK: Held transcripts
@@ -536,10 +512,7 @@ private struct MacDashboardView: View {
         return switch model.phase {
         case .connecting: "Connecting to microphone"
         case .recording: "Stop and transcribe"
-        case .finalizing:
-            model.realtimeCommitInProgress
-                ? "Finalizing realtime text"
-                : "Releasing microphone"
+        case .finalizing: "Releasing microphone"
         case .succeeded: "Done"
         case .ready, .failed: "Start recording"
         }
@@ -549,10 +522,7 @@ private struct MacDashboardView: View {
         switch model.phase {
         case .connecting: "Please wait. The first connection can take several seconds."
         case .recording: "Stops recording and sends the audio to ElevenLabs for transcription."
-        case .finalizing:
-            model.realtimeCommitInProgress
-                ? "The microphone is released. SpeakPaste is committing the realtime transcript."
-                : "The recording has stopped and SpeakPaste is releasing the microphone."
+        case .finalizing: "The recording has stopped and SpeakPaste is releasing the microphone."
         case .succeeded: "The transcript is ready."
         case .ready, .failed: "Starts recording from the selected microphone."
         }
