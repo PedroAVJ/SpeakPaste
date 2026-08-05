@@ -333,8 +333,10 @@ private enum MacHUDMetrics {
         reduceMotion: Bool
     ) -> CGFloat {
         switch content {
-        case .inputSwitch:
+        case .sourceNudge:
             return reduceMotion ? 150 : 104
+        case .resting:
+            return reduceMotion ? 150 : 88
         case .held:
             return reduceMotion ? 150 : 56
         case .capture(.connecting), .capture(.inactive):
@@ -446,7 +448,7 @@ private struct MacStatusHUDView: View {
     private func transition(for card: MacHUDStack.Card) -> AnyTransition {
         if reduceMotion { return .opacity }
         switch card.content {
-        case .inputSwitch:
+        case .sourceNudge, .resting:
             return .asymmetric(
                 insertion: .scale(scale: 0.86).combined(with: .opacity),
                 removal: .opacity
@@ -473,8 +475,10 @@ private struct MacStatusHUDView: View {
             : .spring(response: 0.28, dampingFraction: 0.92)
     }
 
+    /// Only ever the microphone that is actually live. A resting dictation has
+    /// no source, so it must not inherit the last one's name.
     private var sourceName: String? {
-        model.inputMode?.title ?? model.selectedDevice?.name
+        model.activeSource?.title
     }
 }
 
@@ -510,8 +514,14 @@ private struct MacHUDStackCardView: View {
     @ViewBuilder
     private var content: some View {
         switch card.content {
-        case .inputSwitch(let targetMode):
-            MacHUDInputSwitch(targetMode: targetMode, reduceMotion: reduceMotion)
+        case let .sourceNudge(attempted, live):
+            MacHUDSourceNudge(
+                attempted: attempted,
+                live: live,
+                reduceMotion: reduceMotion
+            )
+        case .resting:
+            MacHUDRestingMark()
         case .capture(.connecting), .capture(.inactive):
             MacHUDWakeSignal(reduceMotion: reduceMotion)
         case .capture(.listening):
@@ -539,32 +549,45 @@ private struct MacHUDStackCardView: View {
     }
 }
 
-/// Double-Command source switch: the old device yields to the newly selected
-/// one. The compact, wordless handoff is immediate feedback for the gesture;
-/// the ordinary capture waveform then takes over if recording continues.
-private struct MacHUDInputSwitch: View {
-    let targetMode: MacInputMode
+/// The wrong source key, pressed while the other microphone is hot. The live
+/// device holds its place and the attempted one is struck through: nothing is
+/// switching, because switching is pause-then-resume. A single restrained
+/// shake carries the refusal without ever becoming an alert.
+private struct MacHUDSourceNudge: View {
+    let attempted: MacInputMode
+    let live: MacInputMode?
     let reduceMotion: Bool
 
-    @State private var isAdvancing = false
+    @State private var shake: CGFloat = 0
 
     var body: some View {
         HStack(spacing: 9) {
-            deviceGlyph(for: targetMode.opposite, isTarget: false)
-            Image(systemName: "chevron.right")
-                .font(.system(size: 9, weight: .bold))
+            if let live {
+                deviceGlyph(for: live, isLive: true)
+            }
+            Image(systemName: "pause.circle")
+                .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(Color(nsColor: .secondaryLabelColor))
-                .offset(x: reduceMotion ? 0 : (isAdvancing ? 2 : -2))
-                .opacity(reduceMotion ? 0.7 : (isAdvancing ? 1 : 0.35))
-            deviceGlyph(for: targetMode, isTarget: true)
+            deviceGlyph(for: attempted, isLive: false)
+                .overlay {
+                    Capsule()
+                        .fill(Color(nsColor: .secondaryLabelColor))
+                        .frame(width: 18, height: 1.5)
+                        .rotationEffect(.degrees(-32))
+                }
         }
+        .offset(x: shake)
         .onAppear {
             guard !reduceMotion else { return }
             withAnimation(
-                .easeInOut(duration: 0.42)
-                    .repeatForever(autoreverses: false)
+                .spring(response: 0.14, dampingFraction: 0.28)
             ) {
-                isAdvancing = true
+                shake = 3
+            }
+            withAnimation(
+                .spring(response: 0.32, dampingFraction: 0.55).delay(0.14)
+            ) {
+                shake = 0
             }
         }
         .accessibilityHidden(true)
@@ -572,17 +595,35 @@ private struct MacHUDInputSwitch: View {
 
     private func deviceGlyph(
         for mode: MacInputMode,
-        isTarget: Bool
+        isLive: Bool
     ) -> some View {
         Image(systemName: mode == .mac ? "laptopcomputer" : "iphone")
-            .font(.system(size: 14, weight: isTarget ? .semibold : .regular))
+            .font(.system(size: 14, weight: isLive ? .semibold : .regular))
             .foregroundStyle(
-                isTarget
-                    ? Color(nsColor: .systemCyan)
+                isLive
+                    ? Color(nsColor: .systemRed)
                     : Color(nsColor: .secondaryLabelColor)
             )
-            .opacity(isTarget ? 1 : 0.48)
-            .scaleEffect(isTarget ? 1.05 : 0.92)
+            .opacity(isLive ? 1 : 0.48)
+    }
+}
+
+/// Resting. The card is deliberately the quietest surface in the product: two
+/// still bars, dimmed, with no laptop or phone glyph — no microphone is live,
+/// so there is no current source to name, and the next source key decides.
+/// Nothing animates and nothing counts down; the stack is simply refusing to
+/// leave until the dictation is ended or discarded.
+private struct MacHUDRestingMark: View {
+    var body: some View {
+        HStack(spacing: 5) {
+            ForEach(0..<2, id: \.self) { _ in
+                Capsule()
+                    .fill(Color(nsColor: .secondaryLabelColor))
+                    .frame(width: 3.5, height: 14)
+            }
+        }
+        .opacity(0.5)
+        .accessibilityHidden(true)
     }
 }
 
@@ -899,17 +940,6 @@ private struct MacHUDOverflowBadge: View {
                 Capsule().strokeBorder(Color.primary.opacity(0.12), lineWidth: 1)
             }
             .accessibilityHidden(true)
-    }
-}
-
-private extension MacCapturePhase {
-    var hudCaptureActivity: MacHUDCaptureActivity {
-        switch self {
-        case .connecting: .connecting
-        case .recording: .listening
-        case .finalizing: .releasing
-        case .ready, .succeeded, .failed: .inactive
-        }
     }
 }
 

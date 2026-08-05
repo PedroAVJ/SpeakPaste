@@ -32,9 +32,20 @@ enum MacHUDCaptureActivity: Equatable, Sendable {
 /// from the first connection pulse through transcription, held output, or
 /// verified delivery.
 struct MacHUDPipeline: Equatable, Sendable {
-    struct InputSwitch: Equatable, Sendable {
+    /// The wordless answer to pressing the other source key while a microphone
+    /// is already hot. Nothing switches: the nudge exists to say that switching
+    /// is pause-then-resume, not a mid-recording handover.
+    struct SourceNudge: Equatable, Sendable {
         let id: UUID
-        let targetMode: MacInputMode
+        let attempted: MacInputMode
+        let live: MacInputMode?
+        let startedAt: Date
+    }
+
+    /// A dictation that has released the microphone with work banked. It has
+    /// no start-relative lifetime: resting is a place the stack stays.
+    struct Resting: Equatable, Sendable {
+        let id: UUID
         let startedAt: Date
     }
 
@@ -64,7 +75,8 @@ struct MacHUDPipeline: Equatable, Sendable {
         var recordingDuration: TimeInterval
     }
 
-    private(set) var inputSwitch: InputSwitch?
+    private(set) var sourceNudge: SourceNudge?
+    private(set) var resting: Resting?
     private(set) var capture: Capture?
     private(set) var dictations: [Dictation] = []
 
@@ -80,15 +92,29 @@ struct MacHUDPipeline: Equatable, Sendable {
         }.map(\.element)
     }
 
-    mutating func showInputSwitch(
-        to targetMode: MacInputMode,
+    mutating func showWrongSourceNudge(
+        attempted: MacInputMode,
+        live: MacInputMode?,
         at date: Date = Date()
     ) {
-        inputSwitch = InputSwitch(
+        sourceNudge = SourceNudge(
             id: UUID(),
-            targetMode: targetMode,
+            attempted: attempted,
+            live: live,
             startedAt: date
         )
+    }
+
+    /// Idempotent, and deliberately so: re-entering rest must not restart any
+    /// animation or replace the card's identity, because pause is the stack
+    /// refusing to leave rather than a new event.
+    mutating func beginResting(at date: Date = Date()) {
+        guard resting == nil else { return }
+        resting = Resting(id: UUID(), startedAt: date)
+    }
+
+    mutating func endResting() {
+        resting = nil
     }
 
     mutating func beginCapture(
@@ -219,8 +245,11 @@ struct MacHUDPipeline: Equatable, Sendable {
 /// of the full pipeline, never the authority for delivery state.
 struct MacHUDStack: Equatable, Sendable {
     enum CardContent: Equatable, Sendable {
-        case inputSwitch(targetMode: MacInputMode)
+        case sourceNudge(attempted: MacInputMode, live: MacInputMode?)
         case capture(MacHUDCaptureActivity)
+        /// The dictation is resting: still, dim, and — because no microphone is
+        /// live — carrying no source glyph at all.
+        case resting
         case transcription(
             stage: MacHUDPipeline.DictationStage,
             enqueuedAt: Date,
@@ -243,7 +272,7 @@ struct MacHUDStack: Equatable, Sendable {
     }
 
     static let visibleCardBudget = 3
-    static let inputSwitchVisibilityCap: TimeInterval = 1.4
+    static let sourceNudgeVisibilityCap: TimeInterval = 1.4
     static let connectingVisibilityCap: TimeInterval = 20
     static let releasingVisibilityCap: TimeInterval = 15
     static let transcriptionVisibilityCap: TimeInterval = 90
@@ -251,7 +280,8 @@ struct MacHUDStack: Equatable, Sendable {
     static let empty = MacHUDStack(
         cards: [],
         totalTranscriptionCount: 0,
-        hasTransientHold: false
+        hasTransientHold: false,
+        isResting: false
     )
 
     /// Front-to-back. The rearmost visible work is always the oldest, which is
@@ -259,6 +289,7 @@ struct MacHUDStack: Equatable, Sendable {
     let cards: [Card]
     let totalTranscriptionCount: Int
     let hasTransientHold: Bool
+    let isResting: Bool
 
     var isEmpty: Bool { cards.isEmpty }
     var liveDictationCount: Int { totalTranscriptionCount }
@@ -333,6 +364,19 @@ struct MacHUDStack: Equatable, Sendable {
         }
 
         var frontToBack = Array(oldestFirst.reversed())
+        // Resting and capture are mutually exclusive by construction: a resting
+        // dictation has already handed the microphone back.
+        if let resting = pipeline.resting {
+            frontToBack.insert(
+                Entry(
+                    id: resting.id,
+                    content: .resting,
+                    ordinal: nil,
+                    createdAt: resting.startedAt
+                ),
+                at: 0
+            )
+        }
         if let capture = visibleCapture(in: pipeline, at: date) {
             frontToBack.insert(
                 Entry(
@@ -344,13 +388,16 @@ struct MacHUDStack: Equatable, Sendable {
                 at: 0
             )
         }
-        if let inputSwitch = visibleInputSwitch(in: pipeline, at: date) {
+        if let nudge = visibleSourceNudge(in: pipeline, at: date) {
             frontToBack.insert(
                 Entry(
-                    id: inputSwitch.id,
-                    content: .inputSwitch(targetMode: inputSwitch.targetMode),
+                    id: nudge.id,
+                    content: .sourceNudge(
+                        attempted: nudge.attempted,
+                        live: nudge.live
+                    ),
                     ordinal: nil,
-                    createdAt: inputSwitch.startedAt
+                    createdAt: nudge.startedAt
                 ),
                 at: 0
             )
@@ -380,7 +427,8 @@ struct MacHUDStack: Equatable, Sendable {
                 )
             },
             totalTranscriptionCount: transcribing.count,
-            hasTransientHold: !held.isEmpty
+            hasTransientHold: !held.isEmpty,
+            isResting: pipeline.resting != nil
         )
     }
 
@@ -417,12 +465,14 @@ struct MacHUDStack: Equatable, Sendable {
                 if deadline > date { deadlines.append(deadline) }
             }
         }
-        if let inputSwitch = pipeline.inputSwitch {
-            let deadline = inputSwitch.startedAt.addingTimeInterval(
-                inputSwitchVisibilityCap
+        if let nudge = pipeline.sourceNudge {
+            let deadline = nudge.startedAt.addingTimeInterval(
+                sourceNudgeVisibilityCap
             )
             if deadline > date { deadlines.append(deadline) }
         }
+        // A resting dictation contributes no deadline on purpose. It leaves the
+        // screen when the user ends or discards it, never when a timer says so.
         return deadlines.min()
     }
 
@@ -431,8 +481,11 @@ struct MacHUDStack: Equatable, Sendable {
         heldClipboardBacked: Bool = false
     ) -> String {
         var parts = ["SpeakPaste"]
-        if case .inputSwitch(let targetMode) = cards.first?.content {
-            parts.append("Switching input to \(targetMode.title)")
+        if case .sourceNudge(let attempted, _) = cards.first?.content {
+            parts.append("Pause before switching to the \(attempted.title) microphone")
+        }
+        if isResting {
+            parts.append("Dictation resting — nothing has been delivered")
         }
         if case .capture(let activity) = cards.first?.content {
             switch activity {
@@ -489,13 +542,13 @@ struct MacHUDStack: Equatable, Sendable {
         }
     }
 
-    private static func visibleInputSwitch(
+    private static func visibleSourceNudge(
         in pipeline: MacHUDPipeline,
         at date: Date
-    ) -> MacHUDPipeline.InputSwitch? {
-        guard let inputSwitch = pipeline.inputSwitch else { return nil }
-        return date.timeIntervalSince(inputSwitch.startedAt) < inputSwitchVisibilityCap
-            ? inputSwitch
+    ) -> MacHUDPipeline.SourceNudge? {
+        guard let nudge = pipeline.sourceNudge else { return nil }
+        return date.timeIntervalSince(nudge.startedAt) < sourceNudgeVisibilityCap
+            ? nudge
             : nil
     }
 }

@@ -249,9 +249,12 @@ struct SpeakPasteMacApp: App {
             }
         }
 
+        // A window, not a menu: the panel is a live picture of the user's own
+        // keyboard, and a menu cannot draw one. It is still a menu-bar surface,
+        // so opening it never grants Dock or Command-Tab presence.
         MenuBarExtra {
             if let model = runtime.model {
-                MacMenuBarView()
+                MacKeyboardMapPanel()
                     .environmentObject(model)
                     .environmentObject(runtime.presence)
             }
@@ -263,6 +266,7 @@ struct SpeakPasteMacApp: App {
                 EmptyView()
             }
         }
+        .menuBarExtraStyle(.window)
     }
 
     private func menuBarSymbol(for model: MacAppModel) -> String {
@@ -270,6 +274,7 @@ struct SpeakPasteMacApp: App {
         case .connecting: "antenna.radiowaves.left.and.right"
         case .recording: "record.circle.fill"
         case .finalizing: "stop.circle"
+        case .paused: "pause.circle.fill"
         case .succeeded: "checkmark.circle.fill"
         case .failed: "exclamationmark.triangle.fill"
         case .ready:
@@ -282,8 +287,9 @@ struct SpeakPasteMacApp: App {
     private func menuBarAccessibilityLabel(for model: MacAppModel) -> String {
         switch model.phase {
         case .connecting: "SpeakPaste, connecting to microphone"
-        case .recording: "SpeakPaste, recording. Speak now. Press the Right Command key to stop and transcribe"
+        case .recording: "SpeakPaste, recording. Speak now. Press the same source key again to pause, or the Function key to end and deliver"
         case .finalizing: "SpeakPaste, recording stopped. Releasing microphone"
+        case .paused: "SpeakPaste, dictation resting. Nothing has been delivered. Press the Function key to deliver it"
         case .succeeded: "SpeakPaste, done"
         case .failed: "SpeakPaste, error"
         case .ready:
@@ -292,7 +298,7 @@ struct SpeakPasteMacApp: App {
             } else if !model.networkIsAvailable {
                 "SpeakPaste, offline. Recordings remain saved and retry when the connection returns"
             } else {
-                "SpeakPaste, ready. Press the Right Command key to start"
+                "SpeakPaste, ready. Press the Right Command key to dictate through this Mac, or the Right Option key to dictate through your iPhone"
             }
         }
     }
@@ -301,179 +307,6 @@ struct SpeakPasteMacApp: App {
         if !model.hasAPIKey { return "Add an ElevenLabs API key" }
         if model.selectedDevice == nil { return "Choose a microphone" }
         if model.permissions.granted[.microphone] != true { return "Grant microphone access" }
-        return nil
-    }
-}
-
-struct MacMenuBarView: View {
-    @EnvironmentObject private var model: MacAppModel
-    @EnvironmentObject private var presence: MacApplicationPresenceCoordinator
-    @Environment(\.openSettings) private var openSettings
-
-    var body: some View {
-        captureItems
-        queueItems
-
-        Divider()
-
-        lastTranscriptItems
-
-        Divider()
-
-        appItems
-
-        Divider()
-
-        microphoneStatus
-
-        Divider()
-
-        Button("Quit SpeakPaste") { NSApp.terminate(nil) }
-            .keyboardShortcut("q")
-    }
-
-    @ViewBuilder
-    private var captureItems: some View {
-        if !model.networkIsAvailable {
-            Text("OFFLINE — recordings stay saved and retry on reconnect")
-        }
-        switch model.phase {
-        case .connecting:
-            Button("WAIT — connecting; do not speak yet") {}
-                .disabled(true)
-            Button("Cancel  \(model.cancelHotKeyLabel)") { model.requestRecordingCancellation() }
-                .accessibilityLabel("Cancel connecting, Escape key")
-        case .recording:
-            Button("SPEAK NOW — Stop & Transcribe  \(model.hotKeyLabel)") {
-                model.toggleRecording()
-            }
-            .accessibilityLabel("Stop and transcribe, Right Command key")
-            Button("Cancel Recording  \(model.cancelHotKeyLabel)") {
-                model.requestRecordingCancellation()
-            }
-            .accessibilityLabel("Cancel recording immediately, Escape key")
-        case .finalizing:
-            Button("RELEASING MICROPHONE…") {}
-                .disabled(true)
-        case let .succeeded(detail):
-            Button("DONE — \(detail)") {}
-                .disabled(true)
-        case let .failed(message):
-            Text("ERROR — \(message)")
-            Button("Start New Recording  \(model.hotKeyLabel)") { model.toggleRecording() }
-                .disabled(!canStartRecording)
-                .accessibilityLabel("Start a new recording, Right Command key")
-        case .ready:
-            if model.inFlightCount > 0 {
-                Text("TRANSCRIBING \(model.inFlightCount) — microphone is free")
-            }
-            Button("Start Recording  \(model.hotKeyLabel)") { model.toggleRecording() }
-                .disabled(!canStartRecording)
-                .accessibilityLabel("Start recording, Right Command key")
-        }
-    }
-
-    @ViewBuilder
-    private var queueItems: some View {
-        if !model.heldTranscripts.isEmpty {
-            Button(heldMenuTitle) {
-                if model.hasUncertainHeldTranscripts {
-                    presence.openDashboard()
-                } else {
-                    model.releaseHeldTranscripts()
-                }
-            }
-            .accessibilityLabel(
-                model.hasUncertainHeldTranscripts
-                    ? "Review possibly delivered transcripts in SpeakPaste"
-                    : "Paste all waiting transcripts here, Option Command V"
-            )
-        }
-        if !model.retryableFailures.isEmpty {
-            Button("Retry \(model.retryableFailures.count) Failed — audio is saved") {
-                model.retryAllFailures()
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var lastTranscriptItems: some View {
-        Button("Paste Last Transcript  \(model.pasteLastHotKeyLabel)") { model.pasteLastTranscript() }
-            .disabled(model.transcript.isEmpty)
-            .accessibilityLabel("Paste last transcript, Control Command V")
-        Button("Copy Last Transcript  \(model.copyLastHotKeyLabel)") { model.copyTranscript() }
-            .disabled(model.transcript.isEmpty)
-            .accessibilityLabel("Copy last transcript, Control Command C")
-    }
-
-    @ViewBuilder
-    private var appItems: some View {
-        // The whole Scribe catalog is one submenu away, with the original
-        // pinned choices on top, so switching languages never requires the
-        // Settings window mid-dictation.
-        Menu("Language: \(model.language.title)") {
-            Picker("Language", selection: $model.language) {
-                ForEach(TranscriptionLanguage.macPinnedChoices) { language in
-                    Text(language.title).tag(language)
-                }
-                Divider()
-                ForEach(TranscriptionLanguage.macAdditionalChoices) { language in
-                    Text(language.title).tag(language)
-                }
-            }
-            .pickerStyle(.inline)
-            .labelsHidden()
-        }
-        .accessibilityLabel("Transcription language, currently \(model.language.title)")
-        Button("Open SpeakPaste") {
-            presence.openDashboard()
-        }
-        Button("Settings…") {
-            presence.openSettings { openSettings() }
-        }
-        Button("Replay Onboarding") {
-            model.showOnboardingAgain()
-            presence.openDashboard()
-        }
-    }
-
-    @ViewBuilder
-    private var microphoneStatus: some View {
-        if let readinessMessage {
-            Label(readinessMessage, systemImage: "exclamationmark.triangle.fill")
-        } else if model.isMicrophoneConnected, let device = model.selectedDevice {
-            Text("\(device.name) · \(device.sourceLabel) active — released on stop")
-        } else if let device = model.selectedDevice {
-            Text("Microphone: \(device.name) · \(device.sourceLabel)")
-        } else {
-            Text("No microphone available")
-        }
-    }
-
-    /// "Held" text auto-pastes when its destination regains focus; "recovered"
-    /// text (from a previous session) never does. The label must not promise an
-    /// automatic paste for transcripts that will only move on this click.
-    private var heldMenuTitle: String {
-        let count = model.heldTranscripts.count
-        if model.hasUncertainHeldTranscripts {
-            return "Review \(count) Possibly Delivered  \(model.releaseHotKeyLabel)"
-        }
-        if model.heldTranscripts.allSatisfy(\.isRecovered) {
-            return "Paste \(count) Recovered Here  \(model.releaseHotKeyLabel)"
-        }
-        return "Paste \(count) Held Here  \(model.releaseHotKeyLabel)"
-    }
-
-    private var canStartRecording: Bool {
-        model.canStartRecording
-    }
-
-    private var readinessMessage: String? {
-        if !model.hasAPIKey { return "Setup needed: add an ElevenLabs API key" }
-        if model.selectedDevice == nil { return "Setup needed: choose a microphone" }
-        if model.permissions.granted[.microphone] != true {
-            return "Setup needed: grant microphone access"
-        }
         return nil
     }
 }

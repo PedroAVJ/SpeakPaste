@@ -62,7 +62,9 @@
 		D1000000000000000000000B /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000005 /* KeychainStore.swift */; };
 		D1000000000000000000000C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000B /* Assets.xcassets */; };
 		D1000000000000000000000D /* MacStatusHUD.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000009 /* MacStatusHUD.swift */; };
-		D10000000000000000000051 /* MacCommandGesture.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000051 /* MacCommandGesture.swift */; };
+		D1000000000000000000005F /* MacKeyboardMapModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2000000000000000000005F /* MacKeyboardMapModel.swift */; };
+		D1000000000000000000005E /* MacKeyboardMap.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2000000000000000000005E /* MacKeyboardMap.swift */; };
+		D10000000000000000000051 /* MacDictationKeys.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000051 /* MacDictationKeys.swift */; };
 		D10000000000000000000052 /* MacInputMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000052 /* MacInputMode.swift */; };
 		D10000000000000000000053 /* MacHUDActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000053 /* MacHUDActivity.swift */; };
 		D10000000000000000000054 /* capture-live.caf in Resources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000054 /* capture-live.caf */; };
@@ -174,7 +176,9 @@
 		D20000000000000000000007 /* MacPasteController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacPasteController.swift; sourceTree = "<group>"; };
 		D20000000000000000000008 /* MacReliabilityStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacReliabilityStore.swift; sourceTree = "<group>"; };
 		D20000000000000000000009 /* MacStatusHUD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacStatusHUD.swift; sourceTree = "<group>"; };
-		D20000000000000000000051 /* MacCommandGesture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacCommandGesture.swift; sourceTree = "<group>"; };
+		D2000000000000000000005F /* MacKeyboardMapModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacKeyboardMapModel.swift; sourceTree = "<group>"; };
+		D2000000000000000000005E /* MacKeyboardMap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacKeyboardMap.swift; sourceTree = "<group>"; };
+		D20000000000000000000051 /* MacDictationKeys.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacDictationKeys.swift; sourceTree = "<group>"; };
 		D20000000000000000000052 /* MacInputMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacInputMode.swift; sourceTree = "<group>"; };
 		D20000000000000000000053 /* MacHUDActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacHUDActivity.swift; sourceTree = "<group>"; };
 		D20000000000000000000054 /* capture-live.caf */ = {isa = PBXFileReference; lastKnownFileType = audio.caf; path = "capture-live.caf"; sourceTree = "<group>"; };
@@ -273,7 +277,9 @@
 				D20000000000000000000004 /* MacAudioDevice.swift */,
 				D20000000000000000000005 /* MacAudioRecorder.swift */,
 				D20000000000000000000006 /* MacGlobalHotKey.swift */,
-				D20000000000000000000051 /* MacCommandGesture.swift */,
+				D20000000000000000000051 /* MacDictationKeys.swift */,
+				D2000000000000000000005E /* MacKeyboardMap.swift */,
+				D2000000000000000000005F /* MacKeyboardMapModel.swift */,
 				D20000000000000000000052 /* MacInputMode.swift */,
 				D20000000000000000000053 /* MacHUDActivity.swift */,
 				D20000000000000000000058 /* MacTranscriptionWorkload.swift */,
@@ -436,7 +442,7 @@
 		};
 		A60000000000000000000003 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A1000000000000000000000C, A1000000000000000000000D, A10000000000000000000092, C1000000000000000000000B, ); runOnlyForDeploymentPostprocessing = 0; };
 		C60000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (C10000000000000000000003, C10000000000000000000004, C10000000000000000000005, F10000000000000000000001, C10000000000000000000006, C10000000000000000000007, ); runOnlyForDeploymentPostprocessing = 0; };
-		D60000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (D10000000000000000000001, D10000000000000000000002, D10000000000000000000003, D10000000000000000000004, D10000000000000000000005, D10000000000000000000006, D10000000000000000000051, D10000000000000000000052, D10000000000000000000053, D10000000000000000000058, D1000000000000000000005D, D10000000000000000000007, D1000000000000000000000E, D1000000000000000000000F, D10000000000000000000040, D10000000000000000000041, D10000000000000000000042, D10000000000000000000043, D10000000000000000000044, D10000000000000000000045, D10000000000000000000046, D10000000000000000000047, D10000000000000000000048, D10000000000000000000049, D10000000000000000000050, F10000000000000000000101, H10000000000000000000301, D10000000000000000000008, D10000000000000000000009, D1000000000000000000000A, D1000000000000000000000B, D1000000000000000000000D, ); runOnlyForDeploymentPostprocessing = 0; };
+		D60000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (D10000000000000000000001, D10000000000000000000002, D10000000000000000000003, D10000000000000000000004, D10000000000000000000005, D10000000000000000000006, D10000000000000000000051, D1000000000000000000005E, D1000000000000000000005F, D10000000000000000000052, D10000000000000000000053, D10000000000000000000058, D1000000000000000000005D, D10000000000000000000007, D1000000000000000000000E, D1000000000000000000000F, D10000000000000000000040, D10000000000000000000041, D10000000000000000000042, D10000000000000000000043, D10000000000000000000044, D10000000000000000000045, D10000000000000000000046, D10000000000000000000047, D10000000000000000000048, D10000000000000000000049, D10000000000000000000050, F10000000000000000000101, H10000000000000000000301, D10000000000000000000008, D10000000000000000000009, D1000000000000000000000A, D1000000000000000000000B, D1000000000000000000000D, ); runOnlyForDeploymentPostprocessing = 0; };
 		E60000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (E10000000000000000000003, E10000000000000000000004, ); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 

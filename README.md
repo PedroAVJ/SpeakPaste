@@ -32,14 +32,32 @@ The Xcode project contains four product targets:
    menu-bar utility, without a Dock icon or Command-Tab entry.
 4. Click the menu bar icon, choose **Open SpeakPaste**, and save your ElevenLabs
    API key when prompted.
-5. Keep your iPhone nearby and locked and SpeakPaste selects its Continuity
-   microphone automatically. Your current **Mac** or **iPhone** input mode is
-   remembered across launches. If that source is unavailable, SpeakPaste says
-   so instead of silently substituting the other one.
-6. Click the record control or tap the **right Command (⌘)** key once. A single
-   tap starts or stops dictation after the system double-tap window. The left ⌘
-   is deliberately untouched, so ⌘C, ⌘V, and ⌘Tab keep their normal behavior.
-7. The click-through Liquid Glass indicator is a depth stack with one stable
+5. Keep your iPhone nearby and locked and its Continuity microphone becomes
+   available. There is no stored Mac/iPhone mode: the key you press decides the
+   microphone, fresh at every start. If the source you asked for is unavailable,
+   SpeakPaste says so instead of silently substituting the other one.
+6. Four keys drive a dictation, all of them bare taps with no timing windows:
+
+   | Key | Verb |
+   | --- | --- |
+   | right ⌘ | Mac microphone: start / pause / resume |
+   | right ⌥ | iPhone microphone: start / pause / resume |
+   | fn | End: close the dictation and deliver everything banked |
+   | Esc | Discard |
+
+   The left ⌘ and ⌥ are deliberately untouched, and every chord — including
+   ⌘C, ⌘V, and ⌘Tab — keeps its normal behavior. Only a bare press-and-release
+   with no other key or modifier is read as dictation.
+7. A source key can never deliver text and never destroy it; `fn` always
+   delivers; `Esc` always discards. Pausing releases the microphone (handing
+   your iPhone straight back) and banks the segment, which starts transcribing
+   immediately — so the End after a pause is usually instant. Nothing reaches
+   your cursor until you press `fn`, and then everything banked is delivered in
+   the order you spoke it.
+8. To change microphone mid-thought, pause with the key that is live and resume
+   with the other one. While a microphone is hot the other source key only
+   nudges: there is no mid-recording handover.
+9. The click-through Liquid Glass indicator is a depth stack with one stable
    card per chunk. Live capture stays in front and spring-morphs from wake pulse
    to real waveform to release glint; each transcribing chunk recedes behind it
    with its own directional progress rail. The oldest card is rearmost and pops
@@ -47,15 +65,13 @@ The Xcode project contains four product targets:
    only an estimate and stops short of claiming completion. A stalled rail hides
    after 90 seconds; success, errors, model details, and offline notices stay in
    the app instead of becoming floating notifications.
-8. Double-tap right Command to switch between **Mac** and **iPhone** input. A
-   brief device-to-device HUD confirms the new source immediately. The
-   choice is sticky. During a recording, SpeakPaste first finalizes and releases
-   the current source, queues that segment, and then starts a new ordered segment
-   on the other source.
-9. Tap right Command once to stop and transcribe, or press **Escape** once to
-   cancel immediately and discard the active segment. Preloaded sounds
-   use three single pings that rise through capture, release, and verified
-   delivery, while errors are the family's only phrase: low and falling.
+10. A resting dictation shows a **still, dim, sourceless** front card — no
+   laptop or phone glyph, because no microphone is live and the next source key
+   decides. It never times out. The existing visibility caps apply to the rails
+   behind it, not to the dictation itself.
+11. Preloaded sounds use three single pings that rise through capture, release,
+   and verified delivery, while errors are the family's only phrase: low and
+   falling.
 
 You do not have to wait at the keyboard. When a transcript reaches the delivery
 boundary, SpeakPaste uses the currently focused writable, non-secure editor —
@@ -76,11 +92,17 @@ owns the durable recovery state. Because an unconfirmed side effect may already
 have landed, SpeakPaste marks it as possibly delivered and never retries it
 automatically. Delayed same-session and recovered entries can be placed
 explicitly with **⌥⌘V** at the current writable cursor; possibly delivered
-entries require the separate reviewed one-shot authorization. The optional
-**Hold delivery while recording** setting pauses only the delivery dequeue while
-the mic is live and flushes work between chunks.
+entries require the separate reviewed one-shot authorization. Pressing `Esc`
+from a resting dictation discards it in the same sense: the banked text never
+reaches the cursor, but it stays recoverable in the waiting-text list until you
+paste or delete it.
 
-The menu bar item remains available while SpeakPaste runs. Opening the dashboard
+The menu bar item opens a small anchored panel: a live map of your own keyboard
+— ANSI, ISO, or JIS, whichever you are typing on — with every key blank except
+the four bound ones, which re-glyph as the state changes. It is a mirror, not a
+control surface; nothing on the board is clickable. Its footer carries only the
+readiness or offline notice, Open SpeakPaste, Settings, and Quit, and opening it
+never grants Dock or Command-Tab presence. Opening the dashboard
 or Settings temporarily gives SpeakPaste normal foreground-app presence in the
 Dock and Command-Tab; closing the last of those windows returns it to its quiet
 menu-bar-only state. The transient dictation indicator never changes app

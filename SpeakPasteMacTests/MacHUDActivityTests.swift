@@ -72,11 +72,15 @@ final class MacHUDStackTests: XCTestCase {
         XCTAssertNil(MacHUDStack.nextExpiry(in: MacHUDPipeline(), after: base))
     }
 
-    func testInputSwitchAppearsImmediatelyInFrontAndExpires() {
+    func testWrongSourceNudgeAppearsImmediatelyInFrontAndExpires() {
         let captureID = UUID()
         var pipeline = MacHUDPipeline()
         pipeline.beginCapture(id: captureID, ordinal: 1, at: base)
-        pipeline.showInputSwitch(to: .iPhone, at: base.addingTimeInterval(1))
+        pipeline.showWrongSourceNudge(
+            attempted: .iPhone,
+            live: .mac,
+            at: base.addingTimeInterval(1)
+        )
 
         let visible = MacHUDStack.resolve(
             pipeline: pipeline,
@@ -84,43 +88,100 @@ final class MacHUDStackTests: XCTestCase {
         )
 
         XCTAssertEqual(visible.cards.count, 2)
-        XCTAssertEqual(visible.cards[0].content, .inputSwitch(targetMode: .iPhone))
+        XCTAssertEqual(
+            visible.cards[0].content,
+            .sourceNudge(attempted: .iPhone, live: .mac)
+        )
         XCTAssertEqual(visible.cards[1].id, captureID)
         XCTAssertEqual(
             visible.accessibilityLabel(sourceName: "Mac"),
-            "SpeakPaste, Switching input to iPhone"
+            "SpeakPaste, Pause before switching to the iPhone microphone"
         )
         XCTAssertEqual(
             MacHUDStack.nextExpiry(in: pipeline, after: base.addingTimeInterval(1)),
-            base.addingTimeInterval(1 + MacHUDStack.inputSwitchVisibilityCap)
+            base.addingTimeInterval(1 + MacHUDStack.sourceNudgeVisibilityCap)
         )
 
         let expired = MacHUDStack.resolve(
             pipeline: pipeline,
             at: base.addingTimeInterval(
-                1 + MacHUDStack.inputSwitchVisibilityCap + 0.001
+                1 + MacHUDStack.sourceNudgeVisibilityCap + 0.001
             )
         )
         XCTAssertEqual(expired.cards.map(\.id), [captureID])
     }
 
-    func testRepeatedInputSwitchReplacesThePreviousDirectionAndRestartsExpiry() {
+    func testRepeatedNudgeReplacesThePreviousOneAndRestartsExpiry() {
         var pipeline = MacHUDPipeline()
-        pipeline.showInputSwitch(to: .iPhone, at: base)
+        pipeline.showWrongSourceNudge(attempted: .iPhone, live: .mac, at: base)
         let firstID = MacHUDStack.resolve(pipeline: pipeline, at: base).cards[0].id
 
-        pipeline.showInputSwitch(to: .mac, at: base.addingTimeInterval(0.4))
-        let switchedBack = MacHUDStack.resolve(
+        pipeline.showWrongSourceNudge(
+            attempted: .mac,
+            live: .iPhone,
+            at: base.addingTimeInterval(0.4)
+        )
+        let repeated = MacHUDStack.resolve(
             pipeline: pipeline,
             at: base.addingTimeInterval(0.5)
         )
 
-        XCTAssertNotEqual(switchedBack.cards[0].id, firstID)
-        XCTAssertEqual(switchedBack.cards[0].content, .inputSwitch(targetMode: .mac))
+        XCTAssertNotEqual(repeated.cards[0].id, firstID)
+        XCTAssertEqual(
+            repeated.cards[0].content,
+            .sourceNudge(attempted: .mac, live: .iPhone)
+        )
         XCTAssertEqual(
             MacHUDStack.nextExpiry(in: pipeline, after: base.addingTimeInterval(0.5)),
-            base.addingTimeInterval(0.4 + MacHUDStack.inputSwitchVisibilityCap)
+            base.addingTimeInterval(0.4 + MacHUDStack.sourceNudgeVisibilityCap)
         )
+    }
+
+    /// The property that makes resting safe to leave on screen: it has no
+    /// deadline of its own, and it survives every rail expiring behind it.
+    func testRestingNeverTimesOutAndOutlivesItsRails() {
+        let dictationID = UUID()
+        var pipeline = MacHUDPipeline()
+        pipeline.beginTranscription(
+            id: dictationID,
+            ordinal: 1,
+            recordingDuration: 3,
+            createdAt: base,
+            at: base
+        )
+        pipeline.beginResting(at: base)
+
+        let resting = MacHUDStack.resolve(pipeline: pipeline, at: base)
+        XCTAssertTrue(resting.isResting)
+        XCTAssertEqual(resting.cards[0].content, .resting)
+        XCTAssertEqual(resting.cards.map(\.id).last, dictationID)
+
+        // Long after every transcription rail has timed out.
+        let later = base.addingTimeInterval(
+            MacHUDStack.transcriptionVisibilityCap + 600
+        )
+        let stillResting = MacHUDStack.resolve(pipeline: pipeline, at: later)
+        XCTAssertEqual(stillResting.cards.map(\.content), [.resting])
+        XCTAssertNil(MacHUDStack.nextExpiry(in: pipeline, after: later))
+        XCTAssertTrue(
+            stillResting
+                .accessibilityLabel(sourceName: nil)
+                .contains("Dictation resting")
+        )
+    }
+
+    func testEnteringRestingTwiceKeepsTheSameCard() {
+        var pipeline = MacHUDPipeline()
+        pipeline.beginResting(at: base)
+        let firstID = pipeline.resting?.id
+        pipeline.beginResting(at: base.addingTimeInterval(30))
+
+        XCTAssertEqual(pipeline.resting?.id, firstID)
+        XCTAssertEqual(pipeline.resting?.startedAt, base)
+
+        pipeline.endResting()
+        XCTAssertNil(pipeline.resting)
+        XCTAssertFalse(MacHUDStack.resolve(pipeline: pipeline, at: base).isResting)
     }
 
     func testOneCardKeepsItsIdentityFromCaptureThroughTranscriptionAndHeld() {

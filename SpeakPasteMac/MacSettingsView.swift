@@ -62,11 +62,7 @@ private struct MacGeneralSettings: View {
 
             Section("Delivery") {
                 Toggle("Paste into the app you were using", isOn: $model.autoPaste)
-                Toggle(
-                    "Hold delivery while recording",
-                    isOn: $model.holdDeliveryWhileRecording
-                )
-                Text("Keeps finished chunks in spoken order while the microphone is live, then delivers them in the pauses between chunks.")
+                Text("Nothing reaches the cursor while a dictation is open. Everything you banked is delivered in spoken order when you close it with \(model.endHotKeyLabel).")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Toggle("Context awareness", isOn: $model.contextAwareness)
@@ -155,7 +151,7 @@ private struct MacAudioHUDSettings: View {
                     Text("Right").tag(MacHUDPlacement.right)
                 }
                 .disabled(!model.hudEnabled)
-                Text("A wordless, click-through Liquid Glass capsule spring-morphs between a connecting pulse, your live voice waveform, release, and estimated transcription progress, then disappears. Double-tapping right Command gets a brief device-to-device handoff toward the newly selected input. A new hold gets one count-free tray acknowledgment for two seconds; recovery entries never replay here. A stalled transcription cannot keep it onscreen for more than 90 seconds. It has no buttons and never takes focus; the main window and menu bar remain authoritative for errors, offline status, and waiting text. Top keeps it clear of the text fields most apps put at the bottom of the window.")
+                Text("A wordless, click-through Liquid Glass capsule spring-morphs between a connecting pulse, your live voice waveform, release, and estimated transcription progress, then disappears. A resting dictation holds a still, dim, sourceless card that never times out. Pressing the wrong source key while a microphone is hot gets a brief nudge instead of a handoff. A new hold gets one count-free tray acknowledgment for two seconds; recovery entries never replay here. A stalled transcription cannot keep it onscreen for more than 90 seconds. It has no buttons and never takes focus; the main window and menu bar remain authoritative for errors, offline status, and waiting text. Top keeps it clear of the text fields most apps put at the bottom of the window.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -174,13 +170,17 @@ private struct MacAudioHUDSettings: View {
             }
 
             Section("Shortcuts") {
-                shortcutRow(model.hotKeyLabel, spokenKey: "Right Command key", purpose: "Start or stop a dictation")
-                shortcutRow(model.switchInputHotKeyLabel, spokenKey: "Right Command key twice", purpose: "Switch between Mac and iPhone input — even mid-dictation")
-                shortcutRow(model.cancelHotKeyLabel, spokenKey: "Escape key", purpose: "Cancel immediately — the recording is discarded, nothing is transcribed")
+                ForEach(MacDictationShortcut.all) { shortcut in
+                    shortcutRow(
+                        shortcut.key,
+                        spokenKey: shortcut.spokenKey,
+                        purpose: shortcut.purpose
+                    )
+                }
                 shortcutRow(model.releaseHotKeyLabel, spokenKey: "Option Command V", purpose: "Paste held or recovered text at the cursor")
                 shortcutRow(model.pasteLastHotKeyLabel, spokenKey: "Control Command V", purpose: "Paste the last transcript again")
                 shortcutRow(model.copyLastHotKeyLabel, spokenKey: "Control Command C", purpose: "Copy the last transcript")
-                Text("The bare right ⌘ tap is reserved for dictation. Ordinary shortcuts that use the left ⌘ key remain available.")
+                Text("Only bare taps of the right-hand ⌘ and ⌥ keys and of fn are read as dictation. Held as modifiers — and every shortcut on the left-hand keys — they keep working exactly as before.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -1599,7 +1599,7 @@ private struct MacPermissionSettings: View {
                 }
 
                 if !model.isShortcutGlobal {
-                    Text("The \(model.hotKeyLabel) shortcut currently works only while SpeakPaste is the frontmost app. Grant Accessibility to use it from anywhere.")
+                    Text("The dictation keys currently work only while SpeakPaste is the frontmost app. Grant Accessibility to use them from anywhere.")
                         .font(.caption)
                         .foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)

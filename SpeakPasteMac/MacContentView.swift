@@ -148,6 +148,7 @@ private struct MacDashboardView: View {
         case .connecting: .yellow
         case .recording: .red
         case .finalizing: .orange
+        case .paused: .blue
         case .succeeded: .green
         case .failed: .orange
         case .ready:
@@ -165,6 +166,7 @@ private struct MacDashboardView: View {
         case .connecting: return "Connecting…"
         case .recording: return "Speak now"
         case .finalizing: return "Releasing microphone"
+        case .paused: return "Resting — nothing delivered yet"
         case .succeeded: return "Done"
         case .failed: return "Failed"
         case .ready:
@@ -415,12 +417,37 @@ private struct MacDashboardView: View {
                 .foregroundStyle(.secondary)
             }
 
-            if model.phase == .recording || model.phase == .connecting {
-                Button("Cancel  \(model.cancelHotKeyLabel)", role: .destructive) {
-                    model.requestRecordingCancellation()
-                }
+            if model.phase.dictationIsOpen {
+                HStack(spacing: 8) {
+                    Button("End & Deliver  \(model.endHotKeyLabel)") {
+                        model.endDictation()
+                    }
                     .controlSize(.small)
-                    .accessibilityHint("Immediately discards this recording without transcribing it.")
+                    .disabled(model.phase == .connecting && !model.hasBankedSegments)
+                    .accessibilityHint("Closes the dictation and pastes everything banked, in the order you spoke it.")
+
+                    Button("Discard  \(model.cancelHotKeyLabel)", role: .destructive) {
+                        model.requestRecordingCancellation()
+                    }
+                    .controlSize(.small)
+                    .disabled(model.phase == .finalizing)
+                    .accessibilityHint(
+                        model.phase == .paused
+                            ? "Discards this dictation. Its text stays recoverable in the waiting-text list."
+                            : "Immediately discards this recording without transcribing it."
+                    )
+                }
+            }
+
+            // The big control above is the Mac microphone. Its counterpart is
+            // a peer, not a mode: whichever key you press decides the source.
+            if canChooseSource {
+                Button("\(iPhoneSourceVerb) on iPhone  \(model.iPhoneSourceHotKeyLabel)") {
+                    model.handleDictationKey(.iPhoneSource)
+                }
+                .controlSize(.small)
+                .disabled(!capturePrerequisitesMet)
+                .accessibilityHint("Records the next segment on the iPhone Continuity microphone.")
             }
 
             Text(captureHint)
@@ -434,7 +461,7 @@ private struct MacDashboardView: View {
 
     private var recordButton: some View {
         Button {
-            model.toggleRecording()
+            model.handleDictationKey(.macSource)
         } label: {
             captureControlLabel
                 .frame(height: 72)
@@ -451,22 +478,44 @@ private struct MacDashboardView: View {
         .accessibilityHint(recordButtonHint)
     }
 
+    private var canChooseSource: Bool {
+        switch model.phase {
+        case .ready, .paused, .succeeded, .failed: true
+        case .connecting, .recording, .finalizing: false
+        }
+    }
+
+    private var iPhoneSourceVerb: String {
+        model.phase == .paused ? "Resume" : "Start"
+    }
+
     @ViewBuilder
     private var captureControlLabel: some View {
         switch model.phase {
         case .recording:
-            // The completion action is labeled, not just a stop glyph, so it is
-            // unambiguous that finishing sends the audio to transcription.
+            // A source key can only pause. Say so plainly: nothing is sent and
+            // nothing is delivered by this control.
             HStack(spacing: 8) {
-                Image(systemName: "stop.fill")
+                Image(systemName: "pause.fill")
                     .font(.system(size: 13, weight: .semibold))
-                Text("Stop & Transcribe  \(model.hotKeyLabel)")
+                Text("Pause  \(model.macSourceHotKeyLabel)")
                     .font(.body.weight(.semibold))
             }
             .foregroundStyle(.white)
             .padding(.horizontal, 24)
             .padding(.vertical, 11)
             .background(Capsule().fill(Color.red))
+        case .paused:
+            HStack(spacing: 8) {
+                Image(systemName: "mic.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("Resume on Mac  \(model.macSourceHotKeyLabel)")
+                    .font(.body.weight(.semibold))
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 11)
+            .background(Capsule().fill(Color.accentColor))
         case .connecting, .finalizing:
             ZStack {
                 Circle()
@@ -503,7 +552,7 @@ private struct MacDashboardView: View {
     }
 
     private var recordButtonLabel: String {
-        if model.phase == .recording { return "Stop and transcribe" }
+        if model.phase == .recording { return "Pause the Mac microphone" }
         if !model.hasAPIKey { return "API key required before recording" }
         if model.selectedDevice == nil { return "Microphone selection required before recording" }
         if model.permissions.granted[.microphone] != true {
@@ -511,20 +560,22 @@ private struct MacDashboardView: View {
         }
         return switch model.phase {
         case .connecting: "Connecting to microphone"
-        case .recording: "Stop and transcribe"
+        case .recording: "Pause the Mac microphone"
         case .finalizing: "Releasing microphone"
+        case .paused: "Resume on the Mac microphone"
         case .succeeded: "Done"
-        case .ready, .failed: "Start recording"
+        case .ready, .failed: "Start a dictation on the Mac microphone"
         }
     }
 
     private var recordButtonHint: String {
         switch model.phase {
         case .connecting: "Please wait. The first connection can take several seconds."
-        case .recording: "Stops recording and sends the audio to ElevenLabs for transcription."
+        case .recording: "Releases the microphone and banks this segment. Nothing is delivered until you end the dictation."
         case .finalizing: "The recording has stopped and SpeakPaste is releasing the microphone."
+        case .paused: "Records another segment on the Mac microphone. Everything you have banked stays banked."
         case .succeeded: "The transcript is ready."
-        case .ready, .failed: "Starts recording from the selected microphone."
+        case .ready, .failed: "Starts a dictation on this Mac's microphone."
         }
     }
 
@@ -557,16 +608,17 @@ private struct MacDashboardView: View {
             model.selectedDevice?.isContinuityDevice == true
                 ? "WAIT — do not speak yet. Connecting to your iPhone can take several seconds."
                 : "WAIT — do not speak yet. Connecting to the microphone."
-        case .recording: "SPEAK NOW — tap \(model.hotKeyLabel) to stop and transcribe; \(model.cancelHotKeyLabel) cancels immediately."
+        case .recording: "SPEAK NOW — \(model.macSourceHotKeyLabel) or \(model.iPhoneSourceHotKeyLabel) pauses; \(model.endHotKeyLabel) ends and delivers; \(model.cancelHotKeyLabel) discards."
         case .finalizing:
             model.selectedDevice?.isContinuityDevice == true
                 ? "RECORDING STOPPED — releasing the iPhone microphone…"
                 : "RECORDING STOPPED — releasing the microphone…"
+        case .paused: "RESTING — the microphone is free and nothing has been delivered. \(model.macSourceHotKeyLabel) or \(model.iPhoneSourceHotKeyLabel) records more, \(model.endHotKeyLabel) delivers everything, \(model.cancelHotKeyLabel) discards it."
         case let .succeeded(detail): "DONE — \(detail)"
         case .ready, .failed:
             model.inFlightCount > 0
                 ? "MIC IS FREE — \(model.inFlightCount) transcribing. Start the next one whenever you want."
-                : "Use \(model.hotKeyLabel) in the destination app for automatic paste. Recording here leaves the result ready to copy."
+                : "Start in the destination app with \(model.macSourceHotKeyLabel) or \(model.iPhoneSourceHotKeyLabel), then close with \(model.endHotKeyLabel) to paste. Recording here leaves the result ready to copy."
         }
     }
 
@@ -1440,7 +1492,7 @@ private struct MacOnboardingView: View {
             Text("Dictate in any app. Delivery follows your current writable cursor.")
                 .font(.title3.weight(.semibold))
                 .fixedSize(horizontal: false, vertical: true)
-            Text("Tap \(model.hotKeyLabel) once in any app to start or stop. Tap it twice to switch the sticky input mode between this Mac and your iPhone — even while speaking. SpeakPaste transcribes with ElevenLabs Scribe and delivers to the writable, non-secure editor focused when the text is ready. If none is focused, the newest transcript becomes the clipboard fallback.")
+            Text("In any app, tap \(model.macSourceHotKeyLabel) to dictate through this Mac or \(model.iPhoneSourceHotKeyLabel) to dictate through your iPhone. Tapping the same key again pauses; the other key resumes on the other microphone. Nothing reaches your cursor until you tap \(model.endHotKeyLabel), which delivers every banked segment in the order you spoke it. \(model.cancelHotKeyLabel) discards. SpeakPaste transcribes with ElevenLabs Scribe and delivers to the writable, non-secure editor focused when the text is ready. If none is focused, the newest transcript becomes the clipboard fallback.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1698,9 +1750,13 @@ private struct MacOnboardingView: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             VStack(alignment: .leading, spacing: 8) {
-                shortcutRow(model.hotKeyLabel, spokenKey: "Right Command key", purpose: "Start or stop a dictation")
-                shortcutRow(model.switchInputHotKeyLabel, spokenKey: "Right Command key twice", purpose: "Switch between Mac and iPhone input — even mid-dictation")
-                shortcutRow(model.cancelHotKeyLabel, spokenKey: "Escape key", purpose: "Cancel immediately — the recording is discarded, nothing is transcribed")
+                ForEach(MacDictationShortcut.all) { shortcut in
+                    shortcutRow(
+                        shortcut.key,
+                        spokenKey: shortcut.spokenKey,
+                        purpose: shortcut.purpose
+                    )
+                }
                 shortcutRow(model.releaseHotKeyLabel, spokenKey: "Option Command V", purpose: "Paste held or recovered text at your cursor")
                 shortcutRow(model.pasteLastHotKeyLabel, spokenKey: "Control Command V", purpose: "Paste the last transcript again")
                 shortcutRow(model.copyLastHotKeyLabel, spokenKey: "Control Command C", purpose: "Copy the last transcript")
@@ -1782,7 +1838,7 @@ private struct MacOnboardingView: View {
             .padding(12)
             .background(RoundedRectangle(cornerRadius: 8).fill(.quaternary.opacity(0.4)))
 
-            Text("Try it now: click into any text field, tap \(model.hotKeyLabel), speak a sentence, and tap \(model.hotKeyLabel) again. Double-tap at any point to switch between Mac and iPhone input.")
+            Text("Try it now: click into any text field, tap \(model.macSourceHotKeyLabel), speak a sentence, then tap \(model.endHotKeyLabel). To add a second thought before it lands, tap \(model.macSourceHotKeyLabel) again to rest, speak once more, and only then tap \(model.endHotKeyLabel).")
                 .font(.callout)
                 .fixedSize(horizontal: false, vertical: true)
 

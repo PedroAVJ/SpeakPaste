@@ -119,10 +119,10 @@ TCC grants, or Application Support.
       transcript remains recoverable and clipboard-backed, is marked possibly
       delivered, and is never retried automatically. A later explicit Paste
       Anyway must require a fresh one-shot authorization for the reviewed queue.
-- [ ] Turn **Hold delivery while recording** on, dictate overlapping chunks, and
-      confirm completed work never dequeues while capture is active but flushes
-      in the pauses between chunks. Turn it off during capture and confirm the
-      ready queue resumes without changing transcription or spoken order.
+- [ ] Dictate three segments, pausing between them, and confirm nothing reaches
+      the cursor at any pause. Press fn and confirm all three arrive at once, in
+      spoken order. Confirm the End after a long pause is effectively instant,
+      because pausing already started transcription.
 - [ ] With VoiceOver, confirm capture/transcription/held/delivery announcements
       identify chunk ordinals. With Reduce Motion, confirm stack depth changes
       and delivery removal crossfade rather than travel or scale.
@@ -197,24 +197,46 @@ for the release evidence.
 
 - [ ] Grant permissions through onboarding, select the Continuity microphone,
       and complete the three-second microphone test.
-- [ ] Focus a Notes field, tap bare right Command, wait for **Listening**,
-      dictate, and tap it again. Keep that writable field focused through the
-      delivery boundary and confirm text reaches the current cursor while the
-      iPhone's system-owned capture surface dismisses before transcription.
+- [ ] Confirm a bare **fn** tap is usable as a global control at all. Depending
+      on the System Settings "Press 🌐 to" choice, the same tap may also change
+      input source, open the emoji picker, or start system dictation; the
+      modifier is passed through, so SpeakPaste cannot suppress that. If fn is
+      unusable, move the End verb to right ⇧ — one constant in
+      `MacDictationKey` and its `MacModifierSide` bit — and change nothing else.
+- [ ] Focus a Notes field, tap bare right ⌘, wait for **Listening**, dictate,
+      then tap **fn**. Keep that writable field focused through the delivery
+      boundary and confirm text reaches the current cursor while the iPhone's
+      system-owned capture surface dismisses before transcription.
 - [ ] Repeat immediately to prove clean Continuity release and reconnect, not
       merely one successful transcription.
-- [ ] Start in Mac mode, double-tap bare right Command while idle, and confirm
-      the device-to-device HUD points to iPhone and iPhone mode is selected.
-      Relaunch and confirm the mode persists. Double-tap
-      back and verify Mac mode also persists.
-- [ ] While speaking through the Mac, double-tap bare right Command. Confirm the
-      Mac segment is finalized and its input released before iPhone Connecting
-      then Listening begins; continue speaking and confirm both transcripts are
-      delivered in spoken order. Repeat in the opposite direction.
-- [ ] While connecting and while recording, press Escape once. Each must cancel
-      immediately, discard the active segment, release the microphone, and leave
-      no capture indicator behind. A normal single-Command stop must still
-      transcribe.
+- [ ] Tap right ⌥ from idle and confirm the iPhone microphone is used without
+      any stored mode being consulted. Quit, relaunch, tap right ⌘, and confirm
+      the Mac microphone is used — no source may survive a launch.
+- [ ] While recording on the Mac, tap right ⌘ once. Confirm the microphone is
+      released, the segment banks, the HUD front card goes still, dim, and
+      **sourceless**, and nothing is delivered. Leave it resting for several
+      minutes and confirm the card never times out even after the transcription
+      rails behind it expire.
+- [ ] From that resting state tap right ⌥. Confirm iPhone Connecting then
+      Listening begins as the next ordered segment. Tap fn and confirm both
+      segments are delivered in spoken order. Repeat in the opposite direction.
+- [ ] While speaking through the Mac, tap right ⌥. Confirm nothing switches,
+      nothing is delivered, and the HUD shows only the wrong-source nudge.
+      Repeat in the opposite direction.
+- [ ] While connecting and while recording, press Escape once. Each must discard
+      the live segment, release the microphone, and leave no capture indicator
+      behind — landing on the safe floor: resting when earlier segments are
+      banked, idle when none are.
+- [ ] Press Escape from a resting dictation. Confirm nothing is pasted, the
+      dictation closes, and its transcribed text appears in the dashboard's
+      waiting-text list rather than being destroyed.
+- [ ] While connecting with nothing banked, press fn and confirm it is inert.
+      Repeat with an earlier segment banked and confirm fn aborts the connection
+      and delivers what was banked.
+- [ ] Open the menu-bar panel and confirm it draws your physical keyboard shape
+      (ANSI, ISO, or JIS), that exactly four keys carry glyphs, that they
+      re-glyph as the state changes, and that opening it never adds a Dock icon
+      or Command-Tab entry.
 - [ ] Start in one writable field and switch to another field or application
       before the response returns. Confirm the current delivery-time editor
       receives the text. Repeat in Electron or Chromium while its AX tree or

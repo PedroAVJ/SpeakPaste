@@ -155,22 +155,6 @@ enum MacHUDPlacement: String, CaseIterable, Identifiable {
 
 /// The capture interaction state. Transcription deliberately lives outside
 /// this machine after the microphone has been released.
-enum MacCapturePhase: Equatable {
-    case ready
-    case connecting
-    case recording
-    case finalizing
-    case succeeded(String)
-    case failed(String)
-
-    var isBusy: Bool {
-        switch self {
-        case .connecting, .recording, .finalizing: true
-        case .ready, .succeeded, .failed: false
-        }
-    }
-}
-
 @MainActor
 final class MacAppModel: ObservableObject {
     @Published private(set) var phase: MacCapturePhase = .ready {
@@ -188,10 +172,16 @@ final class MacAppModel: ObservableObject {
     }
     @Published private(set) var phaseStartedAt = Date()
     @Published private(set) var devices: [MacAudioInputDevice] = []
-    /// Semantic source selected by the Command double-tap. Unlike a hardware
-    /// UID, this survives the iPhone disappearing between launches and forbids
-    /// a silent cross-mode fallback.
+    /// Semantic source behind the current device selection. Unlike a hardware
+    /// UID it forbids a silent cross-mode fallback. It is never persisted: the
+    /// source key pressed at each start decides which microphone is used, so
+    /// nothing about the previous dictation can leak into the next one.
     @Published private(set) var inputMode: MacInputMode? = nil
+    /// The microphone a dictation is actually connecting to or holding right
+    /// now. Nil whenever no microphone is live — including while a dictation
+    /// rests, which is why the HUD shows no laptop or phone glyph there: no
+    /// current source exists, and the next source key decides.
+    @Published private(set) var activeSource: MacInputMode? = nil
     /// Set only by `selectDevice(_:)` or by `refreshDevices()` choosing a
     /// Continuity microphone. Never by an unrequested fallback.
     @Published private(set) var selectedDeviceID = ""
@@ -210,22 +200,6 @@ final class MacAppModel: ObservableObject {
     }
     @Published var autoPaste = true {
         didSet { UserDefaults.standard.set(autoPaste, forKey: Self.autoPasteKey) }
-    }
-    /// When enabled, completed chunks stay queued while the microphone is hot.
-    /// The queue still drains between chunks, preserving the user's ability to
-    /// speak a multipart thought without text appearing under their next take.
-    @Published var holdDeliveryWhileRecording = false {
-        didSet {
-            UserDefaults.standard.set(
-                holdDeliveryWhileRecording,
-                forKey: Self.holdDeliveryWhileRecordingKey
-            )
-            if oldValue, !holdDeliveryWhileRecording {
-                Task { [weak self] in
-                    await self?.drainCompletedDictations()
-                }
-            }
-        }
     }
     /// Off until the user opts in: context terms are sent to ElevenLabs as
     /// recognition hints, so this cannot be an undisclosed first-run default.
@@ -301,6 +275,10 @@ final class MacAppModel: ObservableObject {
     private var armedUncertainPasteIDs = Set<UUID>()
     /// Dictations that have been spoken and are still being transcribed. The
     /// microphone is already free; these only await text.
+    /// Whether the open dictation is holding any spoken segment — transcribing
+    /// or already transcribed, but in every case undelivered. It gates the two
+    /// keys that would otherwise be inert, so the key map reads it directly.
+    @Published private(set) var hasBankedSegments = false
     @Published private(set) var inFlightCount = 0
     @Published private(set) var transcriptionWorkload = MacTranscriptionWorkload()
     /// Presentation lifecycle for capture, transcription, and one short-lived
@@ -379,10 +357,21 @@ final class MacAppModel: ObservableObject {
     /// must never turn the app back to Recording (or overwrite a newer start).
     private var captureRequestID: UUID?
     private var captureStartTask: Task<Void, Never>?
-    /// A double tap during capture finishes the current segment first. The
-    /// pending mode is applied only after AVFoundation has released that input,
-    /// so recording metadata and the active hardware can never disagree.
-    private var pendingInputModeAfterFinalization: MacInputMode?
+    /// Where the in-flight finalization should land. It is read only after
+    /// AVFoundation has released the input, so the resting or closed state and
+    /// the actual hardware can never disagree.
+    private var finalizationOutcome: MacFinalizationOutcome = .rest
+    /// Spoken tickets the user discarded with Escape. Their audio and text stay
+    /// recoverable, but they may never reach the cursor, so the ordered drain
+    /// banks them in the waiting-text queue instead of delivering them.
+    private var discardedSpeakSequences = Set<Int>()
+    /// Spoken tickets belonging to the dictation that is open right now. It is
+    /// deliberately not "everything undelivered": an earlier dictation can
+    /// still be transcribing after its End, and that work must not make a fresh
+    /// dictation look as though it were already holding something.
+    private var openDictationSequences = Set<Int>() {
+        didSet { hasBankedSegments = !openDictationSequences.isEmpty }
+    }
     private var lastHistoryRecordID: UUID?
     /// Tracks whether the editable "last transcript" is still backed by a
     /// pending delivery entry. If that entry is possibly delivered, the global
@@ -670,9 +659,9 @@ final class MacAppModel: ObservableObject {
         // Settings were rebuilt at their defaults on every launch, so a chosen
         // language or a disabled auto-paste never survived a restart.
         let defaults = UserDefaults.standard
-        if let stored = defaults.string(forKey: Self.inputModeKey) {
-            inputMode = MacInputMode(rawValue: stored)
-        }
+        // The capture source is decided by the key pressed at each start, so a
+        // mode chosen in a previous session is deliberately not restored.
+        defaults.removeObject(forKey: Self.inputModeKey)
         preferredDeviceIDs = defaults.stringArray(forKey: Self.preferredDeviceIDsKey) ?? []
         if preferredDeviceIDs.isEmpty,
            let legacyChoice = defaults.string(forKey: Self.chosenDeviceKey),
@@ -690,11 +679,9 @@ final class MacAppModel: ObservableObject {
         if defaults.object(forKey: Self.autoPasteKey) != nil {
             autoPaste = defaults.bool(forKey: Self.autoPasteKey)
         }
-        if defaults.object(forKey: Self.holdDeliveryWhileRecordingKey) != nil {
-            holdDeliveryWhileRecording = defaults.bool(
-                forKey: Self.holdDeliveryWhileRecordingKey
-            )
-        }
+        // Holding delivery is no longer a preference: nothing reaches the
+        // cursor while a dictation is open, whatever an old build stored here.
+        defaults.removeObject(forKey: Self.holdDeliveryWhileRecordingKey)
         if defaults.object(forKey: Self.contextAwarenessKey) != nil {
             contextAwareness = defaults.bool(forKey: Self.contextAwarenessKey)
         }
@@ -766,13 +753,10 @@ final class MacAppModel: ObservableObject {
             }
         }
         globalHotKey.install(
-            toggle: { [weak self] in self?.toggleRecording() },
-            switchInput: { [weak self] in self?.switchInputMode() },
-            isRecordingActive: { [weak self] in
-                guard let self else { return false }
-                return self.phase == .recording || self.phase == .connecting
+            key: { [weak self] key in self?.handleDictationKey(key) },
+            isDictationOpen: { [weak self] in
+                self?.phase.dictationIsOpen == true
             },
-            cancel: { [weak self] in self?.requestRecordingCancellation() },
             release: { [weak self] in self?.releaseHeldTranscripts() },
             pasteLast: { [weak self] in self?.pasteLastTranscript() },
             copyLast: { [weak self] in self?.copyTranscript() }
@@ -807,9 +791,10 @@ final class MacAppModel: ObservableObject {
 
     var isShortcutGlobal: Bool { globalHotKey.isGlobal }
 
-    var hotKeyLabel: String { MacGlobalHotKey.toggleLabel }
-    var switchInputHotKeyLabel: String { MacGlobalHotKey.switchInputLabel }
-    var cancelHotKeyLabel: String { MacGlobalHotKey.cancelLabel }
+    var macSourceHotKeyLabel: String { MacDictationKey.macSource.shortcutLabel }
+    var iPhoneSourceHotKeyLabel: String { MacDictationKey.iPhoneSource.shortcutLabel }
+    var endHotKeyLabel: String { MacDictationKey.end.shortcutLabel }
+    var cancelHotKeyLabel: String { MacDictationKey.cancel.shortcutLabel }
     var releaseHotKeyLabel: String { MacGlobalHotKey.releaseLabel }
     var pasteLastHotKeyLabel: String { MacGlobalHotKey.pasteLastLabel }
     var copyLastHotKeyLabel: String { MacGlobalHotKey.copyLastLabel }
@@ -944,11 +929,6 @@ final class MacAppModel: ObservableObject {
         defaults.set(preferredDeviceIDs, forKey: Self.preferredDeviceIDsKey)
         defaults.set(device.id, forKey: Self.chosenDeviceKey)
         inputMode = semanticMode
-        if let semanticMode {
-            defaults.set(semanticMode.rawValue, forKey: Self.inputModeKey)
-        } else {
-            defaults.removeObject(forKey: Self.inputModeKey)
-        }
     }
 
     private func unavailableMessage(for mode: MacInputMode) -> String {
@@ -993,67 +973,157 @@ final class MacAppModel: ObservableObject {
         }
     }
 
-    func toggleRecording() {
+    // MARK: The four dictation keys
+
+    /// Single entry point for the global control surface. Every transition in
+    /// the product's state matrix is decided here, so the event tap stays a
+    /// dumb recognizer and the matrix has exactly one implementation.
+    func handleDictationKey(_ key: MacDictationKey) {
         guard !microphoneTestState.isRunning else { return }
+        switch key {
+        case .macSource, .iPhoneSource:
+            guard let mode = key.inputMode else { return }
+            sourceKeyPressed(mode)
+        case .end:
+            endDictation()
+        case .cancel:
+            requestRecordingCancellation()
+        }
+    }
+
+    /// A source key starts, pauses, or resumes — never more. It cannot deliver
+    /// text, and it cannot destroy any.
+    private func sourceKeyPressed(_ mode: MacInputMode) {
         switch phase {
-        case .recording:
-            stopMeter()
-            phase = .finalizing
-            Task { await stopAndTranscribe() }
         case .ready, .succeeded, .failed:
-            beginRecordingRequest()
-        case .connecting, .finalizing:
+            startDictation(on: mode)
+        case .connecting:
+            // No audio exists yet, so this is wrong-key correction rather than
+            // switching. Retarget the attempt that has not produced anything.
+            guard activeSource != mode else { return }
+            retargetConnection(to: mode)
+        case .recording:
+            if activeSource == mode {
+                pauseDictation()
+            } else {
+                // No mid-recording switching: the other source key only says so.
+                nudgeWrongSourceKey(mode)
+            }
+        case .paused:
+            startDictation(on: mode)
+        case .finalizing:
+            // A short hardware release is already in flight. Its outcome was
+            // decided by the key that started it and must not be reinterpreted.
             break
         }
     }
 
-    /// Switches the semantic capture source without letting the first half of
-    /// the Command double-tap also stop dictation. During a live recording the
-    /// existing WAV is finalized and queued first, then capture resumes on the
-    /// other source as the next ordered segment.
-    func switchInputMode() {
-        guard !microphoneTestState.isRunning else { return }
-        let baseMode = pendingInputModeAfterFinalization
-            ?? inputMode
-            ?? selectedDevice.flatMap { semanticMode(for: $0) }
-            ?? .mac
-        let targetMode = baseMode.opposite
-        guard let targetDevice = availableDevice(for: targetMode) else {
-            deviceSelectionNotice = unavailableMessage(for: targetMode)
+    /// Starts the first segment of a dictation, or resumes a resting one. The
+    /// key decides the microphone every single time; nothing is remembered.
+    private func startDictation(on mode: MacInputMode) {
+        guard let device = availableDevice(for: mode) else {
+            deviceSelectionNotice = unavailableMessage(for: mode)
+            // A missing iPhone never silently falls back to the Mac. Resting
+            // work keeps resting; an idle app stays idle.
+            applySafeFloor()
             return
         }
+        selectDevice(device, semanticMode: mode)
+        activeSource = mode
+        finalizationOutcome = .rest
+        beginRecordingRequest()
+    }
 
-        var pipeline = hudPipeline
-        pipeline.showInputSwitch(to: targetMode)
-        hudPipeline = pipeline
+    private func retargetConnection(to mode: MacInputMode) {
+        guard let device = availableDevice(for: mode) else {
+            deviceSelectionNotice = unavailableMessage(for: mode)
+            return
+        }
+        captureRequestID = nil
+        captureStartTask?.cancel()
+        captureStartTask = nil
+        recorder.disconnect()
+        isMicrophoneConnected = false
+        connectedDeviceID = nil
+        connectionLatency = nil
+        deliveryTarget = nil
+        selectDevice(device, semanticMode: mode)
+        activeSource = mode
+        finalizationOutcome = .rest
+        beginRecordingRequest()
+    }
 
+    /// Releases the microphone and banks the segment. Transcription starts
+    /// eagerly so that the End after a pause is usually instant, but no text
+    /// leaves until the dictation is closed.
+    private func pauseDictation() {
+        guard phase == .recording else { return }
+        finalizationOutcome = .rest
+        stopMeter()
+        phase = .finalizing
+        Task { await stopAndTranscribe() }
+    }
+
+    /// `fn`: close the dictation and deliver everything banked, in spoken order.
+    func endDictation() {
+        guard !microphoneTestState.isRunning else { return }
         switch phase {
         case .recording:
-            pendingInputModeAfterFinalization = targetMode
+            finalizationOutcome = .close
             stopMeter()
             phase = .finalizing
             Task { await stopAndTranscribe() }
+        case .paused:
+            closeDictation()
         case .connecting:
-            pendingInputModeAfterFinalization = nil
-            captureRequestID = nil
-            captureStartTask?.cancel()
-            captureStartTask = nil
-            recorder.disconnect()
-            isMicrophoneConnected = false
-            connectedDeviceID = nil
-            connectionLatency = nil
-            deliveryTarget = nil
-            selectDevice(targetDevice, semanticMode: targetMode)
-            beginRecordingRequest()
+            // Nothing has been captured on this attempt. End is inert unless
+            // earlier segments are waiting for it.
+            guard hasBankedSegments else { return }
+            abandonConnection()
+            closeDictation()
         case .finalizing:
-            // The stop path reads this only after AVFoundation has released the
-            // active device. Another double-tap before then reverses the pending
-            // target without mutating current recording metadata.
-            pendingInputModeAfterFinalization = targetMode
+            // Upgrade the in-flight release from resting to closing. The stop
+            // path reads this only after the device has actually been freed.
+            finalizationOutcome = .close
         case .ready, .succeeded, .failed:
-            pendingInputModeAfterFinalization = nil
-            selectDevice(targetDevice, semanticMode: targetMode)
+            break
         }
+    }
+
+    /// Closes an open dictation with nothing left to release. The ordered drain
+    /// starts as soon as the phase leaves the open set.
+    private func closeDictation() {
+        activeSource = nil
+        finalizationOutcome = .rest
+        openDictationSequences.removeAll()
+        phase = .ready
+    }
+
+    /// The safe floor: any failed or aborted transition lands in Paused when
+    /// audio is banked and Idle when it is not. It never resumes capture, and
+    /// never falls back to the other microphone.
+    private func applySafeFloor() {
+        activeSource = nil
+        finalizationOutcome = .rest
+        if hasBankedSegments {
+            if phase != .paused { phase = .paused }
+        } else if phase.isBusy {
+            // Only an open dictation is closed here. A visible success or
+            // failure is left alone: the floor is about not losing work, not
+            // about clearing the screen.
+            phase = .ready
+        }
+    }
+
+    private func nudgeWrongSourceKey(_ mode: MacInputMode) {
+        var pipeline = hudPipeline
+        pipeline.showWrongSourceNudge(attempted: mode, live: activeSource)
+        hudPipeline = pipeline
+        let liveKey = MacDictationKey.sourceKey(for: activeSource ?? mode.opposite)
+        deviceSelectionNotice = "The \(activeSource?.title ?? "current") microphone is live, so \(mode.title) cannot take over mid-recording. Pause with \(liveKey.shortcutLabel), then resume with \(MacDictationKey.sourceKey(for: mode).shortcutLabel)."
+        postAccessibilityAnnouncement(
+            "Pause before switching to the \(mode.title) microphone."
+        )
     }
 
     private func beginRecordingRequest() {
@@ -1087,6 +1157,7 @@ final class MacAppModel: ObservableObject {
         for phase: MacCapturePhase,
         at date: Date = Date()
     ) {
+        updateHUDResting(for: phase, at: date)
         guard let captureID = hudPipeline.capture?.id else { return }
         var pipeline = hudPipeline
         switch phase {
@@ -1098,12 +1169,29 @@ final class MacAppModel: ObservableObject {
             pipeline.updateCapture(id: captureID, activity: .releasing, at: date)
         case .failed:
             pipeline.finish(id: captureID)
-        case .ready, .succeeded:
+        case .paused, .ready, .succeeded:
             // Ready is the zero-gap handoff between recorder teardown and the
             // durable transcription job. `startTranscription` morphs this same
             // card; cancellation explicitly finishes it after hardware release.
             break
         }
+        hudPipeline = pipeline
+    }
+
+    /// The resting card mirrors the Paused phase exactly, and outlives every
+    /// visibility cap in the stack, so a dictation that is waiting for its End
+    /// can never quietly disappear from the screen while still holding text.
+    private func updateHUDResting(
+        for phase: MacCapturePhase,
+        at date: Date = Date()
+    ) {
+        var pipeline = hudPipeline
+        if phase == .paused {
+            pipeline.beginResting(at: date)
+        } else {
+            pipeline.endResting()
+        }
+        guard pipeline != hudPipeline else { return }
         hudPipeline = pipeline
     }
 
@@ -2418,7 +2506,7 @@ final class MacAppModel: ObservableObject {
             isMicrophoneConnected = false
             connectedDeviceID = nil
             connectionLatency = nil
-            let resumesCapture = settleInputModeAfterFinalization()
+            resolveSelection()
             if let salvaged = error as? MacAudioRecorderSalvagedFailure {
                 // This error is surfaced only after recorder teardown has
                 // completed, so the mirrored closing cue is truthful here.
@@ -2432,21 +2520,17 @@ final class MacAppModel: ObservableObject {
                 // transcribe the finalized portion instead of discarding all
                 // speech because the tail of the file failed.
                 phase = .ready
-                let handoffIsDurable = startTranscription(
+                startTranscription(
                     audioURL: salvaged.audioURL,
                     target: target,
                     deviceName: deviceName,
                     recordingDuration: recordingDuration,
                     interruption: interruption ?? diagnosticMessage(for: salvaged.underlying),
+                    banksIntoOpenDictation: true,
                     hudCardID: hudCapture?.id,
                     hudOrdinal: hudCapture?.ordinal
                 )
-                if resumesCapture, handoffIsDurable {
-                    if holdDeliveryWhileRecording {
-                        await drainCompletedDictations()
-                    }
-                    beginRecordingRequest()
-                }
+                settleFinalization()
                 return
             }
             deliveryTarget = nil
@@ -2465,7 +2549,7 @@ final class MacAppModel: ObservableObject {
         isMicrophoneConnected = false
         connectedDeviceID = nil
         connectionLatency = nil
-        let resumesCapture = settleInputModeAfterFinalization()
+        resolveSelection()
 
         // The microphone is released and the audio is on disk, so background
         // transcription can begin without retaining the Continuity session.
@@ -2474,43 +2558,43 @@ final class MacAppModel: ObservableObject {
         phase = .ready
         let capturedTarget = deliveryTarget
         deliveryTarget = nil
-        let handoffIsDurable = startTranscription(
+        startTranscription(
             audioURL: segment.url,
             target: capturedTarget,
             deviceName: deviceName,
             recordingDuration: recordingDuration,
             interruption: interruption,
+            banksIntoOpenDictation: true,
             hudCardID: hudCapture?.id,
             hudOrdinal: hudCapture?.ordinal
         )
-        // Do not let a later segment overtake speech that failed to enter the
-        // private recovery journal. The selected mode remains sticky, but the
-        // user sees and resolves the first segment's failure before recording
-        // continues.
-        if resumesCapture, handoffIsDurable {
-            if holdDeliveryWhileRecording {
-                await drainCompletedDictations()
-            }
-            beginRecordingRequest()
-        }
+        settleFinalization()
     }
 
-    /// Applies a deferred source switch only after the recorder's `stop()` has
-    /// synchronously released its AVCaptureSession. Returns whether capture
-    /// should resume as the next ordered segment.
-    private func settleInputModeAfterFinalization() -> Bool {
-        guard let targetMode = pendingInputModeAfterFinalization else {
-            resolveSelection()
-            return false
+    /// Applies the decision the user already made, but only now that the
+    /// recorder has synchronously released its AVCaptureSession — the resting
+    /// state and the actual hardware can therefore never disagree.
+    ///
+    /// `phase` is briefly `.ready` above so the segment can be journaled and
+    /// admitted to the transcription workload. Resting immediately re-closes
+    /// the delivery gate; because that gate is checked inside the drain rather
+    /// than latched, no banked text can slip out through the gap.
+    private func settleFinalization() {
+        let outcome = finalizationOutcome
+        finalizationOutcome = .rest
+        activeSource = nil
+        switch outcome {
+        case .rest:
+            if hasBankedSegments {
+                phase = .paused
+            }
+        case .close:
+            // `.ready` already opened the ordered drain, which delivers every
+            // banked segment in turn; the dictation now owns none of them.
+            openDictationSequences.removeAll()
+        case .discard:
+            break
         }
-        pendingInputModeAfterFinalization = nil
-        guard let targetDevice = availableDevice(for: targetMode) else {
-            resolveSelection()
-            deviceSelectionNotice = unavailableMessage(for: targetMode)
-            return false
-        }
-        selectDevice(targetDevice, semanticMode: targetMode)
-        return true
     }
 
     @discardableResult
@@ -2523,6 +2607,10 @@ final class MacAppModel: ObservableObject {
         existingRecordID: UUID? = nil,
         isImport: Bool = false,
         requiresManualOutput: Bool = false,
+        /// True only for a segment just spoken into the dictation that is open
+        /// right now. Imports and retries reach the cursor on their own terms
+        /// and must never be counted as work an open dictation is holding.
+        banksIntoOpenDictation: Bool = false,
         hudCardID: UUID? = nil,
         hudOrdinal: Int? = nil
     ) -> Bool {
@@ -2592,6 +2680,9 @@ final class MacAppModel: ObservableObject {
         } else {
             sequence = nextSpeakSequence
             nextSpeakSequence += 1
+            if banksIntoOpenDictation, let sequence {
+                openDictationSequences.insert(sequence)
+            }
         }
         let resolvedHUDOrdinal = hudOrdinal ?? sequence.map { $0 + 1 }
         var pipeline = hudPipeline
@@ -3076,11 +3167,22 @@ final class MacAppModel: ObservableObject {
         }
     }
 
-    /// Escape is the direct exit gesture: one press abandons connecting or the
-    /// active recording without transcription and begins hardware teardown.
+    /// Escape always discards, and never more than the state it was pressed in
+    /// allows: the live segment while a microphone is held, and — only from a
+    /// resting dictation — the segments already banked.
     func requestRecordingCancellation() {
-        guard phase == .recording || phase == .connecting else { return }
-        cancelRecording()
+        guard !microphoneTestState.isRunning else { return }
+        switch phase {
+        case .connecting, .recording:
+            cancelRecording()
+        case .paused:
+            discardBankedSegments()
+            closeDictation()
+        case .finalizing, .ready, .succeeded, .failed:
+            // A release already in flight owns the recorder; there is nothing
+            // left to abandon that the stop path is not already handling.
+            break
+        }
     }
 
     /// Abandons a recording in progress without transcribing it. The visual
@@ -3090,7 +3192,7 @@ final class MacAppModel: ObservableObject {
         guard phase == .recording || phase == .connecting else { return }
         let shouldPlayReleaseCue = phase == .recording
         let cancelledHUDCardID = hudPipeline.capture?.id
-        pendingInputModeAfterFinalization = nil
+        finalizationOutcome = .discard
         captureRequestID = nil
         captureStartTask?.cancel()
         captureStartTask = nil
@@ -3106,10 +3208,7 @@ final class MacAppModel: ObservableObject {
             if shouldPlayReleaseCue {
                 self.sounds.playRecordingStopped()
             }
-            // A Command double-tap may arrive during this short release. Keep
-            // that sticky source choice, but cancellation must never resume a
-            // new recording automatically.
-            _ = self.settleInputModeAfterFinalization()
+            self.resolveSelection()
             self.endRecordingActivity()
             self.isMicrophoneConnected = false
             self.connectedDeviceID = nil
@@ -3119,22 +3218,78 @@ final class MacAppModel: ObservableObject {
                 pipeline.finish(id: cancelledHUDCardID)
                 self.hudPipeline = pipeline
             }
-            self.phase = .ready
+            // Cancellation never resumes capture and never destroys banked
+            // work; it lands on the safe floor.
+            self.applySafeFloor()
         }
     }
 
+    /// Stops a connection attempt that has not produced audio yet, so `fn` can
+    /// close a dictation whose latest segment never started.
+    private func abandonConnection() {
+        guard phase == .connecting else { return }
+        captureRequestID = nil
+        captureStartTask?.cancel()
+        captureStartTask = nil
+        deliveryTarget = nil
+        recorder.disconnect()
+        isMicrophoneConnected = false
+        connectedDeviceID = nil
+        connectionLatency = nil
+        endRecordingActivity()
+        finishHUDCard(hudPipeline.capture?.id)
+    }
+
+    /// Escape from a resting dictation. The banked segments may never reach the
+    /// cursor, but their text and audio stay recoverable: they move into the
+    /// waiting-text queue, which is never replayed automatically.
+    private func discardBankedSegments() {
+        guard hasBankedSegments else { return }
+        discardedSpeakSequences.formUnion(openDictationSequences)
+        openDictationSequences.removeAll()
+        recoveryNotice = "Discarded this dictation. Its transcribed text stays recoverable below until you paste or delete it."
+    }
+
     /// Delivers finished dictations strictly in spoken order, so a short second
-    /// thought cannot overtake the sentence it belongs after.
+    /// thought cannot overtake the sentence it belongs after. Nothing drains
+    /// while a dictation is open: only `fn` closes one, and only a closed
+    /// dictation reaches the cursor.
     private func drainCompletedDictations() async {
         guard !isDrainingCompletedDictations else { return }
         isDrainingCompletedDictations = true
         defer { isDrainingCompletedDictations = false }
         while let finished = completedDictations[nextDeliverySequence] {
-            if holdDeliveryWhileRecording, phase.isBusy { break }
-            completedDictations[nextDeliverySequence] = nil
+            if phase.dictationIsOpen { break }
+            let sequence = nextDeliverySequence
+            completedDictations[sequence] = nil
             nextDeliverySequence += 1
-            await deliver(finished)
+            openDictationSequences.remove(sequence)
+            if discardedSpeakSequences.remove(sequence) != nil {
+                bankDiscardedDictation(finished)
+            } else {
+                await deliver(finished)
+            }
         }
+    }
+
+    /// A discarded segment that had already been transcribed. It keeps its
+    /// durable escrow and its History row; it simply loses its delivery turn.
+    private func bankDiscardedDictation(_ finished: MacFinishedDictation) {
+        guard
+            let escrowID = finished.deliveryEscrowID,
+            let pending = pendingTranscriptStore.transcript(withID: escrowID)
+        else {
+            finishHUDCard(finished.hudCardID)
+            return
+        }
+        presentPendingTranscript(
+            pending,
+            target: nil,
+            preparedChunk: finished.preparedChunk,
+            hudCardID: finished.hudCardID,
+            hudOrdinal: finished.hudOrdinal,
+            recordingDuration: finished.recordingDuration
+        )
     }
 
     /// Imports are intentionally a manual-output lane. A long file must not
@@ -4435,9 +4590,13 @@ final class MacAppModel: ObservableObject {
                 deviceName: deviceName,
                 recordingDuration: recordingDuration,
                 interruption: interruption,
+                banksIntoOpenDictation: true,
                 hudCardID: hudCapture?.id,
                 hudOrdinal: hudCapture?.ordinal
             )
+            // The words already spoken are banked, so the dictation rests
+            // rather than delivering a half thought the user never closed.
+            self.settleFinalization()
         }
     }
 
@@ -4530,6 +4689,8 @@ final class MacAppModel: ObservableObject {
             announcement = "\(dictation) is listening."
         case .finalizing:
             announcement = "\(dictation) is releasing the microphone."
+        case .paused:
+            announcement = "Dictation resting. Nothing has been delivered. Press \(MacDictationKey.end.spokenLabel) to deliver it, or \(MacDictationKey.cancel.spokenLabel) to discard it."
         case .succeeded:
             // Terminal HUD events carry the stable chunk ordinal. A generic
             // second announcement here would make every successful paste chatty.
