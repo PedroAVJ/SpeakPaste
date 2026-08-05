@@ -7,6 +7,15 @@ struct MacRealtimeScribeConfiguration: Sendable {
     let keyterms: [String]
 }
 
+enum MacRealtimeConnectionPolicy {
+    /// Long enough for an intentional pause; the actor's explicit ten-second
+    /// handshake deadline owns connection setup instead of URLRequest.
+    static let requestTimeout: TimeInterval = 120
+    /// A pong keeps Foundation's inbound-data inactivity timer alive without
+    /// forcing transcription commits more frequently than Scribe recommends.
+    static let pingInterval: Duration = .seconds(10)
+}
+
 /// Keeps manual-commit sessions below the service's automatic commit window.
 /// The realtime stream is mono 16-bit PCM at 16 kHz, so 25 seconds is exactly
 /// 800,000 bytes. A chunk that reaches or crosses that boundary carries the
@@ -268,7 +277,7 @@ enum MacRealtimeScribeRequestBuilder {
         var request = URLRequest(url: url)
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.httpShouldHandleCookies = false
-        request.timeoutInterval = 15
+        request.timeoutInterval = MacRealtimeConnectionPolicy.requestTimeout
         request.setValue(configuration.apiKey, forHTTPHeaderField: "xi-api-key")
         return request
     }

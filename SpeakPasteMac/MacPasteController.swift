@@ -88,14 +88,20 @@ enum MacPasteResult: Equatable {
     /// not proven. These outcomes need visible attention and must not inflate
     /// the reliability dashboard's success rate.
     var requiresDeliveryAttention: Bool {
-        switch self {
+        let state: MacDeliveryAttentionState = switch self {
         case let .pasted(_, verified):
-            !verified
-        case .copiedNeedsAccessibility, .copiedNeedsKeyboardOutput, .clipboardFailed:
-            true
-        case .copied, .clipboardFallback, .held:
-            false
+            verified ? .verifiedPaste : .unverifiedPaste
+        case .copiedNeedsAccessibility, .copiedNeedsKeyboardOutput,
+             .clipboardFailed:
+            .unavailable
+        case .held:
+            .held
+        case .copied:
+            .copied
+        case .clipboardFallback:
+            .clipboardFallback
         }
+        return MacDeliveryAttentionPolicy.requiresAttention(state)
     }
 }
 
@@ -185,7 +191,7 @@ struct MacPasteController {
     ) async -> MacPasteDeliveryOutcome {
         await deliveryGate.acquire()
         defer { deliveryGate.release() }
-        guard editor.finalize(text: text) else {
+        guard await editor.finalize(text: text) else {
             return MacPasteDeliveryOutcome(
                 result: heldResult(
                     .realtimeDestinationChanged,

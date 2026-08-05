@@ -1,5 +1,25 @@
 import Foundation
 
+enum MacDeliveryAttentionState {
+    case verifiedPaste
+    case unverifiedPaste
+    case copied
+    case clipboardFallback
+    case unavailable
+    case held
+}
+
+enum MacDeliveryAttentionPolicy {
+    static func requiresAttention(_ state: MacDeliveryAttentionState) -> Bool {
+        switch state {
+        case .verifiedPaste, .copied, .clipboardFallback:
+            false
+        case .unverifiedPaste, .unavailable, .held:
+            true
+        }
+    }
+}
+
 /// Pure verification for accessibility-readable paste destinations.
 ///
 /// Seeing the dictated text somewhere in the final value is not proof that the

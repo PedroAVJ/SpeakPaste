@@ -106,6 +106,11 @@ final class MacRealtimeTranscriptCoreTests: XCTestCase {
         XCTAssertEqual(query["keyterms"]?.count, 50)
         XCTAssertEqual(query["keyterms"]?.first?.value, "term0")
         XCTAssertEqual(request.value(forHTTPHeaderField: "xi-api-key"), secret)
+        XCTAssertEqual(
+            request.timeoutInterval,
+            MacRealtimeConnectionPolicy.requestTimeout
+        )
+        XCTAssertEqual(MacRealtimeConnectionPolicy.pingInterval, .seconds(10))
         XCTAssertFalse(url.absoluteString.contains(secret))
     }
 

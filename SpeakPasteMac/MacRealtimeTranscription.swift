@@ -26,6 +26,7 @@ actor MacRealtimeScribeSession: MacRealtimeScribeSessionProtocol {
     private var urlSession: URLSession?
     private var socket: URLSessionWebSocketTask?
     private var receiveTask: Task<Void, Never>?
+    private var keepaliveTask: Task<Void, Never>?
     private var assembler = MacRealtimeTranscriptAssembler()
     private var terminalError: Error?
     private var updateHandler: (@Sendable (MacRealtimeTranscriptUpdate) -> Void)?
@@ -68,6 +69,7 @@ actor MacRealtimeScribeSession: MacRealtimeScribeSessionProtocol {
 
         do {
             try await waitForSessionStart()
+            startKeepalive()
         } catch {
             close()
             throw error
@@ -235,7 +237,46 @@ actor MacRealtimeScribeSession: MacRealtimeScribeSessionProtocol {
             }
         } catch {
             guard !isClosing else { return }
-            terminalError = error
+            terminalError = terminalError ?? error
+        }
+    }
+
+    private func startKeepalive() {
+        keepaliveTask?.cancel()
+        keepaliveTask = Task { [weak self] in
+            await self?.keepaliveLoop()
+        }
+    }
+
+    /// Outgoing audio does not reset Foundation's inbound-data request timer.
+    /// Awaiting a pong keeps a quiet manual-commit session alive without
+    /// shortening the quality-preserving 25-second transcription cadence.
+    private func keepaliveLoop() async {
+        while !Task.isCancelled, !isClosing {
+            do {
+                try await Task.sleep(for: MacRealtimeConnectionPolicy.pingInterval)
+                try Task.checkCancellation()
+                guard let socket, !isClosing else { return }
+                try await sendPing(on: socket)
+            } catch {
+                guard !Task.isCancelled, !isClosing else { return }
+                terminalError = terminalError ?? error
+                socket?.cancel(with: .goingAway, reason: nil)
+                return
+            }
+        }
+    }
+
+    private func sendPing(on socket: URLSessionWebSocketTask) async throws {
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Void, Error>) in
+            socket.sendPing { error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume()
+                }
+            }
         }
     }
 
@@ -247,6 +288,8 @@ actor MacRealtimeScribeSession: MacRealtimeScribeSessionProtocol {
         guard !isClosing else { return }
         isClosing = true
         updateHandler = nil
+        keepaliveTask?.cancel()
+        keepaliveTask = nil
         receiveTask?.cancel()
         receiveTask = nil
         socket?.cancel(with: .normalClosure, reason: nil)

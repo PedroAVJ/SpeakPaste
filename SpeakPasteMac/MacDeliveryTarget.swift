@@ -24,6 +24,17 @@ enum MacPasteMenuShortcut {
     }
 }
 
+enum MacRealtimeWritableCandidatePolicy {
+    static func accepts(
+        isSecure: Bool,
+        isEnabled: Bool,
+        hasReadableSnapshot: Bool,
+        hasSettableTextRange: Bool
+    ) -> Bool {
+        !isSecure && isEnabled && hasReadableSnapshot && hasSettableTextRange
+    }
+}
+
 enum MacPasteMenuActionResult: Equatable {
     /// No menu side effect was reached; another insertion route is safe.
     case unavailable
@@ -145,7 +156,13 @@ struct MacDeliveryTarget {
             return nil
         }
         let interactionBeforeCapture = MacUserInteractionTracker.shared.snapshot
-        let element = MacAccessibility.focusedWritableElement()
+        // Ordinary capture retains the proven batch-delivery resolver. The
+        // stricter realtime contract is evaluated only after the experimental
+        // mode is armed, so opting out cannot change paste targeting or field
+        // privacy.
+        let element = MacAccessibility.focusedWritableElement(
+            processIdentifier: application.processIdentifier
+        )
         let contextKeyterms = collectContext ? element.map {
             MacAccessibility.contextKeyterms(
                 from: $0,
@@ -193,7 +210,8 @@ struct MacDeliveryTarget {
         guard let element else { return nil }
         return MacRealtimeInlineTextSession.make(
             element: element,
-            processIdentifier: processIdentifier
+            processIdentifier: processIdentifier,
+            capturedInteractionGeneration: interactionGeneration
         )
     }
 
@@ -357,8 +375,104 @@ enum MacAccessibility {
         focusedWritableElement() != nil
     }
 
-    static func focusedWritableElement(maximumAncestorDepth: Int = 6) -> AXUIElement? {
-        guard let focused = systemFocusedElement() else { return nil }
+    static func focusedWritableElement(
+        maximumAncestorDepth: Int = 6,
+        processIdentifier: pid_t? = nil
+    ) -> AXUIElement? {
+        guard !IsSecureEventInputEnabled() else { return nil }
+        let resolvedProcessIdentifier = processIdentifier
+            ?? NSWorkspace.shared.frontmostApplication?.processIdentifier
+        guard
+            let resolvedProcessIdentifier,
+            NSWorkspace.shared.frontmostApplication?.processIdentifier
+                == resolvedProcessIdentifier
+        else {
+            return nil
+        }
+        if let focused = systemFocusedElement(),
+           element(focused, belongsTo: resolvedProcessIdentifier),
+           let candidate = firstWritableAncestor(
+               startingAt: focused,
+               maximumAncestorDepth: maximumAncestorDepth,
+               requiresRealtimeRange: false,
+               processIdentifier: resolvedProcessIdentifier
+           ) {
+            return candidate
+        }
+        if let applicationFocused = focusedElement(
+            inProcess: resolvedProcessIdentifier
+        ), element(applicationFocused, belongsTo: resolvedProcessIdentifier),
+           let candidate = firstWritableAncestor(
+            startingAt: applicationFocused,
+            maximumAncestorDepth: maximumAncestorDepth,
+            requiresRealtimeRange: false,
+            processIdentifier: resolvedProcessIdentifier
+        ) {
+            return candidate
+        }
+        return nil
+    }
+
+    /// Electron apps may focus a short-lived proxy below the AXTextArea that
+    /// exposes the complete realtime snapshot/setter contract. Prefer the live
+    /// system or application focus, then reuse the element captured before
+    /// microphone warmup only while it still reports focus in the same process.
+    static func focusedRealtimeWritableElement(
+        preferred: AXUIElement? = nil,
+        processIdentifier: pid_t? = nil,
+        maximumAncestorDepth: Int = 12
+    ) -> AXUIElement? {
+        guard !IsSecureEventInputEnabled() else { return nil }
+        let resolvedProcessIdentifier = processIdentifier
+            ?? NSWorkspace.shared.frontmostApplication?.processIdentifier
+        guard
+            let resolvedProcessIdentifier,
+            NSWorkspace.shared.frontmostApplication?.processIdentifier
+                == resolvedProcessIdentifier
+        else {
+            return nil
+        }
+        if let focused = systemFocusedElement(),
+           element(focused, belongsTo: resolvedProcessIdentifier),
+           let candidate = firstWritableAncestor(
+               startingAt: focused,
+               maximumAncestorDepth: maximumAncestorDepth,
+               requiresRealtimeRange: true,
+               processIdentifier: resolvedProcessIdentifier
+           ) {
+            return candidate
+        }
+        if let applicationFocused = focusedElement(
+            inProcess: resolvedProcessIdentifier
+        ), element(applicationFocused, belongsTo: resolvedProcessIdentifier),
+           let candidate = firstWritableAncestor(
+            startingAt: applicationFocused,
+            maximumAncestorDepth: maximumAncestorDepth,
+            requiresRealtimeRange: true,
+            processIdentifier: resolvedProcessIdentifier
+        ) {
+            return candidate
+        }
+        if let preferred,
+           element(preferred, belongsTo: resolvedProcessIdentifier),
+           booleanAttribute(kAXFocusedAttribute, of: preferred) == true,
+           let candidate = firstWritableAncestor(
+               startingAt: preferred,
+               maximumAncestorDepth: maximumAncestorDepth,
+               requiresRealtimeRange: true,
+               processIdentifier: resolvedProcessIdentifier
+           ) {
+            return candidate
+        }
+        return nil
+    }
+
+    private static func firstWritableAncestor(
+        startingAt focused: AXUIElement,
+        maximumAncestorDepth: Int,
+        requiresRealtimeRange: Bool,
+        processIdentifier: pid_t
+    ) -> AXUIElement? {
         var candidate = focused
         var visited: [AXUIElement] = []
         var firstWritableCandidate: AXUIElement?
@@ -366,10 +480,18 @@ enum MacAccessibility {
         for _ in 0...maximumAncestorDepth {
             if visited.contains(where: { CFEqual($0, candidate) }) { return nil }
             visited.append(candidate)
+            guard element(candidate, belongsTo: processIdentifier) else {
+                return nil
+            }
             AXUIElementSetMessagingTimeout(candidate, messagingTimeout)
             if isSecureTextElement(candidate) { return nil }
-            if firstWritableCandidate == nil, elementAcceptsText(candidate) {
-                firstWritableCandidate = candidate
+            if firstWritableCandidate == nil {
+                let acceptsText = requiresRealtimeRange
+                    ? realtimeElementAcceptsText(candidate)
+                    : elementAcceptsText(candidate)
+                if acceptsText {
+                    firstWritableCandidate = candidate
+                }
             }
             guard let parent = elementAttribute(kAXParentAttribute, of: candidate) else {
                 return firstWritableCandidate
@@ -377,6 +499,47 @@ enum MacAccessibility {
             candidate = parent
         }
         return firstWritableCandidate
+    }
+
+    private static func focusedElement(inProcess processIdentifier: pid_t) -> AXUIElement? {
+        let application = AXUIElementCreateApplication(processIdentifier)
+        AXUIElementSetMessagingTimeout(application, messagingTimeout)
+        return elementAttribute(kAXFocusedUIElementAttribute, of: application)
+    }
+
+    private static func element(
+        _ element: AXUIElement,
+        belongsTo processIdentifier: pid_t
+    ) -> Bool {
+        var actualProcessIdentifier: pid_t = 0
+        return AXUIElementGetPid(element, &actualProcessIdentifier) == .success
+            && actualProcessIdentifier == processIdentifier
+    }
+
+    /// Proves a proxy-to-editor relationship without searching the application
+    /// tree. Every traversed node must remain in the captured process, and the
+    /// same bounded parent chain is already used by focused editor resolution.
+    static func isAncestor(
+        _ possibleAncestor: AXUIElement,
+        of descendant: AXUIElement,
+        processIdentifier: pid_t,
+        maximumDepth: Int = 12
+    ) -> Bool {
+        var candidate = descendant
+        var visited: [AXUIElement] = []
+        for _ in 0...maximumDepth {
+            if visited.contains(where: { CFEqual($0, candidate) }) { return false }
+            visited.append(candidate)
+            guard element(candidate, belongsTo: processIdentifier) else {
+                return false
+            }
+            if CFEqual(candidate, possibleAncestor) { return true }
+            guard let parent = elementAttribute(kAXParentAttribute, of: candidate) else {
+                return false
+            }
+            candidate = parent
+        }
+        return false
     }
 
     /// Pure role boundary kept separate so the deployment regression suite can
@@ -402,6 +565,15 @@ enum MacAccessibility {
             stringAttribute(kAXRoleAttribute, of: element),
             explicitlyEditable: editable == true,
             valueIsSettable: valueIsSettable(element)
+        )
+    }
+
+    private static func realtimeElementAcceptsText(_ element: AXUIElement) -> Bool {
+        MacRealtimeWritableCandidatePolicy.accepts(
+            isSecure: isSecureTextElement(element),
+            isEnabled: isEnabled(element),
+            hasReadableSnapshot: realtimeTextSnapshot(of: element) != nil,
+            hasSettableTextRange: realtimeTextAttributesAreSettable(on: element)
         )
     }
 

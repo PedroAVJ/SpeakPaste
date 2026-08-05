@@ -1094,7 +1094,7 @@ final class MacAppModel: ObservableObject {
                     guard let self else { return }
                     await realtime.session.cancel()
                     await self.recorder.disconnectAndWait()
-                    _ = realtime.editor.rollback()
+                    _ = await realtime.editor.rollback()
                     self.releaseRealtimeDeliveryBarrier(for: realtime.id)
                     self.isMicrophoneConnected = false
                     self.connectedDeviceID = nil
@@ -1950,7 +1950,7 @@ final class MacAppModel: ObservableObject {
             Task { await realtime.session.cancel() }
         }
         recorder.disconnectSynchronously()
-        _ = realtime?.editor.rollback()
+        _ = realtime?.editor.rollbackImmediately()
         releaseRealtimeDeliveryBarrier(scheduleDrain: false)
         endRecordingActivity()
         networkMonitor.cancel()
@@ -2045,7 +2045,7 @@ final class MacAppModel: ObservableObject {
             let realtime = detachActiveRealtimeForCancellation()
             if let realtime { await realtime.session.cancel() }
             await recorder.disconnectAndWait()
-            _ = realtime?.editor.rollback()
+            if let realtime { _ = await realtime.editor.rollback() }
             if let realtime {
                 releaseRealtimeDeliveryBarrier(for: realtime.id)
             } else {
@@ -2063,7 +2063,7 @@ final class MacAppModel: ObservableObject {
         let realtime = detachActiveRealtimeForCancellation()
         if let realtime {
             await realtime.session.cancel()
-            if !realtime.editor.rollback() {
+            if !(await realtime.editor.rollback()) {
                 realtimeModeNotice = "Quit preserved the recording but left provisional text untouched because the destination changed before safe rollback."
             }
             releaseRealtimeDeliveryBarrier(for: realtime.id, scheduleDrain: false)
@@ -2381,7 +2381,7 @@ final class MacAppModel: ObservableObject {
                 )
             ) { [weak self] update in
                 Task { @MainActor [weak self] in
-                    self?.receiveRealtimeUpdate(update, sessionID: sessionID)
+                    await self?.receiveRealtimeUpdate(update, sessionID: sessionID)
                 }
             }
         } catch {
@@ -2411,7 +2411,7 @@ final class MacAppModel: ObservableObject {
     private func receiveRealtimeUpdate(
         _ update: MacRealtimeTranscriptUpdate,
         sessionID: UUID
-    ) {
+    ) async {
         guard
             let active = activeRealtimeDictation,
             active.id == sessionID,
@@ -2429,7 +2429,9 @@ final class MacAppModel: ObservableObject {
             previewChunk,
             after: active.target.precedingText
         )
-        guard active.editor.update(text: preview) else {
+        let didUpdate = await active.editor.update(text: preview)
+        guard activeRealtimeDictation?.id == sessionID else { return }
+        guard didUpdate else {
             realtimeCaretFrame = nil
             realtimeModeNotice = "Realtime stopped editing because the field, caret, or focus changed. The final result will be held for manual placement."
             return
@@ -2576,7 +2578,7 @@ final class MacAppModel: ObservableObject {
             if let active {
                 await active.session.cancel()
                 await recorder.disconnectAndWait()
-                _ = active.editor.rollback()
+                _ = await active.editor.rollback()
                 releaseRealtimeDeliveryBarrier(for: active.id)
             }
             guard captureRequestID == requestID else { return }
@@ -2649,7 +2651,7 @@ final class MacAppModel: ObservableObject {
             // No recoverable audio means no final result can replace the live
             // hypothesis. Explicitly restore the original field when it is
             // still safe; otherwise leave the user's field untouched.
-            if let realtime { _ = realtime.editor.rollback() }
+            if let realtime { _ = await realtime.editor.rollback() }
             deliveryTarget = nil
             recordFailure(
                 diagnosticMessage(for: error),
@@ -3353,7 +3355,7 @@ final class MacAppModel: ObservableObject {
             guard let self else { return }
             if let realtime { await realtime.session.cancel() }
             await self.recorder.disconnectAndWait()
-            if let realtime, !realtime.editor.rollback() {
+            if let realtime, !(await realtime.editor.rollback()) {
                 self.realtimeModeNotice = "Realtime cancellation left the field untouched because SpeakPaste could no longer prove ownership of the provisional range."
             }
             if let realtime {
@@ -4698,7 +4700,7 @@ final class MacAppModel: ObservableObject {
                 self.releaseRealtimeDeliveryBarrier()
             }
             guard let salvagedAudioURL else {
-                if let realtime { _ = realtime.editor.rollback() }
+                if let realtime { _ = await realtime.editor.rollback() }
                 self.recordFailure(
                     self.diagnosticMessage(for: error),
                     deviceName: deviceName,

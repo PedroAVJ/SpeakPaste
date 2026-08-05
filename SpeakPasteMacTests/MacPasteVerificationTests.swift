@@ -67,6 +67,14 @@ final class MacPasteVerificationTests: XCTestCase {
 }
 
 final class MacPasteboardRecoveryPolicyTests: XCTestCase {
+    func testHeldRealtimeOutputRequiresDeliveryAttention() {
+        XCTAssertTrue(
+            MacDeliveryAttentionPolicy.requiresAttention(.held)
+        )
+        XCTAssertFalse(MacDeliveryAttentionPolicy.requiresAttention(.verifiedPaste))
+        XCTAssertFalse(MacDeliveryAttentionPolicy.requiresAttention(.clipboardFallback))
+    }
+
     func testUnverifiedOutputKeepsNewestTranscriptOnClipboard() {
         XCTAssertTrue(
             MacPasteboardRecoveryPolicy.shouldKeepTranscript(

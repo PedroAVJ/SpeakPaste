@@ -23,11 +23,147 @@ final class MacRealtimeTextEditTests: XCTestCase {
         )
         XCTAssertFalse(
             MacRealtimeElementOwnershipPolicy.permitsResolution(
+                valueMatches: true,
+                sameElement: true,
+                selectionMatches: true,
+                capturedInteractionGeneration: 12,
+                currentInteractionGeneration: 13
+            )
+        )
+        XCTAssertFalse(
+            MacRealtimeElementOwnershipPolicy.permitsResolution(
                 valueMatches: false,
                 sameElement: true,
                 selectionMatches: true,
                 capturedInteractionGeneration: 12,
                 currentInteractionGeneration: 12
+            )
+        )
+    }
+
+    func testInitialBindingRejectsAFieldChangeDuringMicrophoneWarmup() {
+        XCTAssertFalse(
+            MacRealtimeElementOwnershipPolicy.permitsInitialBinding(
+                sameElement: false,
+                snapshotMatches: true,
+                realtimeElementIsCapturedAncestor: false,
+                capturedInteractionGeneration: 12,
+                currentInteractionGeneration: 13
+            )
+        )
+        XCTAssertTrue(
+            MacRealtimeElementOwnershipPolicy.permitsInitialBinding(
+                sameElement: false,
+                snapshotMatches: true,
+                realtimeElementIsCapturedAncestor: false,
+                capturedInteractionGeneration: 12,
+                currentInteractionGeneration: 12
+            )
+        )
+        XCTAssertFalse(
+            MacRealtimeElementOwnershipPolicy.permitsInitialBinding(
+                sameElement: false,
+                snapshotMatches: true,
+                realtimeElementIsCapturedAncestor: false,
+                capturedInteractionGeneration: nil,
+                currentInteractionGeneration: nil
+            )
+        )
+    }
+
+    func testInitialBindingAcceptsOnlyAnUninterruptedCapturedProxyAncestor() {
+        XCTAssertTrue(
+            MacRealtimeElementOwnershipPolicy.permitsInitialBinding(
+                sameElement: false,
+                snapshotMatches: false,
+                realtimeElementIsCapturedAncestor: true,
+                capturedInteractionGeneration: 12,
+                currentInteractionGeneration: 12
+            )
+        )
+        XCTAssertFalse(
+            MacRealtimeElementOwnershipPolicy.permitsInitialBinding(
+                sameElement: false,
+                snapshotMatches: false,
+                realtimeElementIsCapturedAncestor: true,
+                capturedInteractionGeneration: 12,
+                currentInteractionGeneration: 13
+            )
+        )
+        XCTAssertFalse(
+            MacRealtimeElementOwnershipPolicy.permitsInitialBinding(
+                sameElement: false,
+                snapshotMatches: false,
+                realtimeElementIsCapturedAncestor: false,
+                capturedInteractionGeneration: 12,
+                currentInteractionGeneration: 12
+            )
+        )
+    }
+
+    func testChromiumReadbackRetriesOldSnapshotThenAcceptsExpectedValue() {
+        let policy = MacRealtimeReadbackPolicy()
+        XCTAssertEqual(
+            policy.observe(
+                value: "old",
+                previousValue: "old",
+                expectedValue: "new"
+            ),
+            .retry
+        )
+        XCTAssertEqual(
+            policy.observe(
+                value: "new",
+                previousValue: "old",
+                expectedValue: "new"
+            ),
+            .accept
+        )
+    }
+
+    func testChromiumReadbackRejectsConflictingUserText() {
+        let policy = MacRealtimeReadbackPolicy()
+        XCTAssertEqual(
+            policy.observe(
+                value: "old",
+                previousValue: "old",
+                expectedValue: "new"
+            ),
+            .retry
+        )
+        XCTAssertEqual(
+            policy.observe(
+                value: "user edit",
+                previousValue: "old",
+                expectedValue: "new"
+            ),
+            .reject
+        )
+    }
+
+    func testRealtimeCandidateSkipsUnusableProxyAndAcceptsTextAreaContract() {
+        XCTAssertFalse(
+            MacRealtimeWritableCandidatePolicy.accepts(
+                isSecure: false,
+                isEnabled: true,
+                hasReadableSnapshot: true,
+                hasSettableTextRange: false
+            )
+        )
+        XCTAssertTrue(
+            MacRealtimeWritableCandidatePolicy.accepts(
+                isSecure: false,
+                isEnabled: true,
+                hasReadableSnapshot: true,
+                hasSettableTextRange: true
+            )
+        )
+        XCTAssertFalse(
+            MacRealtimeWritableCandidatePolicy.accepts(
+                isSecure: true,
+                isEnabled: true,
+                hasReadableSnapshot: true,
+                hasSettableTextRange: true
             )
         )
     }

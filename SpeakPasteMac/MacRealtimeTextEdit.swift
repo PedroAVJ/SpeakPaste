@@ -28,6 +28,27 @@ struct MacRealtimeTextMutation: Equatable, Sendable {
 }
 
 enum MacRealtimeElementOwnershipPolicy {
+    static func permitsInitialBinding(
+        sameElement: Bool,
+        snapshotMatches: Bool,
+        realtimeElementIsCapturedAncestor: Bool,
+        capturedInteractionGeneration: UInt64?,
+        currentInteractionGeneration: UInt64?
+    ) -> Bool {
+        guard
+            sameElement || snapshotMatches || realtimeElementIsCapturedAncestor
+        else {
+            return false
+        }
+        if let capturedInteractionGeneration,
+           let currentInteractionGeneration {
+            return capturedInteractionGeneration == currentInteractionGeneration
+        }
+        // Without a complete interaction monitor boundary, only the exact AX
+        // object captured before microphone warmup is a safe destination.
+        return sameElement
+    }
+
     static func permitsResolution(
         valueMatches: Bool,
         sameElement: Bool,
@@ -36,14 +57,39 @@ enum MacRealtimeElementOwnershipPolicy {
         currentInteractionGeneration: UInt64?
     ) -> Bool {
         guard valueMatches else { return false }
-        if sameElement && selectionMatches { return true }
-        guard
-            let capturedInteractionGeneration,
-            let currentInteractionGeneration
-        else {
-            return false
+        if let capturedInteractionGeneration,
+           let currentInteractionGeneration {
+            return capturedInteractionGeneration == currentInteractionGeneration
         }
-        return capturedInteractionGeneration == currentInteractionGeneration
+        // If monitoring was unavailable at either boundary, do not infer that
+        // an Electron proxy replacement or normalized caret is app-owned.
+        return sameElement && selectionMatches
+    }
+}
+
+enum MacRealtimeReadbackDecision: Equatable {
+    case accept
+    case retry
+    case reject
+}
+
+/// A successful AX text setter can precede Chromium's readable AX update by a
+/// render tick. Retry only an unchanged/nil readback, never the text mutation;
+/// any third value is an external edit and fails closed immediately.
+struct MacRealtimeReadbackPolicy {
+    /// Up to 140 ms covers a busy Chromium render turn while remaining fully
+    /// asynchronous and serializing later hypotheses behind this one write.
+    static let maximumAttempts = 8
+    static let retryDelay: Duration = .milliseconds(20)
+
+    func observe(
+        value: String?,
+        previousValue: String,
+        expectedValue: String
+    ) -> MacRealtimeReadbackDecision {
+        guard let value else { return .retry }
+        if value == expectedValue { return .accept }
+        return value == previousValue ? .retry : .reject
     }
 }
 
@@ -203,6 +249,12 @@ final class MacRealtimeInlineTextSession {
     private var reconciler: MacRealtimeTextReconciler
     private(set) var isDetached = false
     private(set) var isFinalized = false
+    private(set) var isClosed = false
+    /// AX setters are synchronous, but Chromium publishes their result on a
+    /// later render turn. Serialize callers while yielding the main actor so
+    /// focus/input monitors remain responsive during bounded readback.
+    private var operationIsActive = false
+    private var operationWaiters: [CheckedContinuation<Void, Never>] = []
 
     private init(
         element: AXUIElement,
@@ -218,30 +270,48 @@ final class MacRealtimeInlineTextSession {
 
     static func make(
         element capturedElement: AXUIElement,
-        processIdentifier: pid_t
+        processIdentifier: pid_t,
+        capturedInteractionGeneration: UInt64?
     ) -> MacRealtimeInlineTextSession? {
-        let interactionGeneration = MacUserInteractionTracker.shared.snapshot
+        let currentInteractionGeneration = MacUserInteractionTracker.shared.snapshot
         guard
             !IsSecureEventInputEnabled(),
             NSWorkspace.shared.frontmostApplication?.processIdentifier
                 == processIdentifier,
-            let focused = MacAccessibility.focusedWritableElement(),
-            let capturedSnapshot = MacAccessibility.realtimeTextSnapshot(
-                of: capturedElement
+            let focused = MacAccessibility.focusedRealtimeWritableElement(
+                preferred: capturedElement,
+                processIdentifier: processIdentifier
             ),
-            MacAccessibility.realtimeTextAttributesAreSettable(on: focused),
-            let snapshot = MacAccessibility.realtimeTextSnapshot(of: focused),
-            (CFEqual(capturedElement, focused) || snapshot == capturedSnapshot),
+            let snapshot = MacAccessibility.realtimeTextSnapshot(of: focused)
+        else {
+            return nil
+        }
+        let sameElement = CFEqual(capturedElement, focused)
+        let capturedSnapshotMatches = sameElement
+            || MacAccessibility.realtimeTextSnapshot(of: capturedElement) == snapshot
+        let realtimeElementIsCapturedAncestor = MacAccessibility.isAncestor(
+            focused,
+            of: capturedElement,
+            processIdentifier: processIdentifier
+        )
+        guard
+            MacRealtimeElementOwnershipPolicy.permitsInitialBinding(
+                sameElement: sameElement,
+                snapshotMatches: capturedSnapshotMatches,
+                realtimeElementIsCapturedAncestor: realtimeElementIsCapturedAncestor,
+                capturedInteractionGeneration: capturedInteractionGeneration,
+                currentInteractionGeneration: currentInteractionGeneration
+            ),
             snapshot.selection.length == 0,
             let reconciler = MacRealtimeTextReconciler(originalSnapshot: snapshot),
-            interactionGeneration == MacUserInteractionTracker.shared.snapshot
+            currentInteractionGeneration == MacUserInteractionTracker.shared.snapshot
         else {
             return nil
         }
         return MacRealtimeInlineTextSession(
             element: focused,
             processIdentifier: processIdentifier,
-            interactionGeneration: interactionGeneration,
+            interactionGeneration: capturedInteractionGeneration,
             reconciler: reconciler
         )
     }
@@ -257,21 +327,27 @@ final class MacRealtimeInlineTextSession {
     /// real hypothesis are no-ops so the captured caret is not touched merely
     /// because the service emitted an empty partial.
     @discardableResult
-    func update(text: String) -> Bool {
-        guard !isDetached, !isFinalized else { return false }
+    func update(text: String) async -> Bool {
+        await withExclusiveOperation {
+            await updateWhileExclusive(text: text)
+        }
+    }
+
+    private func updateWhileExclusive(text: String) async -> Bool {
+        guard !isDetached, !isClosed else { return false }
         if text.isEmpty, !reconciler.hasProvisionalOutput { return true }
         // Committed and final frames frequently repeat the last full partial.
         // Verify ownership, but do not make Electron process another identical
         // AXSelectedText mutation.
         if reconciler.alreadyOwns(text: text) {
-            guard verifiedCurrentSnapshot() != nil else {
+            guard await verifiedCurrentSnapshot() != nil else {
                 isDetached = true
                 return false
             }
             return true
         }
         guard
-            let current = verifiedCurrentSnapshot(),
+            let current = await verifiedCurrentSnapshot(),
             let mutation = reconciler.planUpdate(
                 currentSnapshot: current,
                 text: text
@@ -280,7 +356,7 @@ final class MacRealtimeInlineTextSession {
             isDetached = true
             return false
         }
-        return apply(mutation)
+        return await apply(mutation)
     }
 
     /// Replaces the owned provisional span with the exact post-processed final
@@ -288,19 +364,34 @@ final class MacRealtimeInlineTextSession {
     /// delivery boundary; it deliberately avoids erasing visible text and then
     /// asking an Electron Paste menu to put the same words back.
     @discardableResult
-    func finalize(text: String) -> Bool {
-        guard !isDetached, !isFinalized, update(text: text) else { return false }
-        isFinalized = true
-        return true
+    func finalize(text: String) async -> Bool {
+        await withExclusiveOperation {
+            guard
+                !isDetached,
+                !isClosed,
+                await updateWhileExclusive(text: text)
+            else {
+                return false
+            }
+            isFinalized = true
+            isClosed = true
+            return true
+        }
     }
 
     /// Removes only the exact text this session still proves it owns and
     /// restores the pre-dictation caret. If the user typed, moved the caret,
     /// or changed focus, rollback is refused and nothing is touched.
     @discardableResult
-    func rollback() -> Bool {
-        guard !isDetached, !isFinalized else { return false }
-        guard let current = verifiedCurrentSnapshot() else {
+    func rollback() async -> Bool {
+        await withExclusiveOperation {
+            await rollbackWhileExclusive()
+        }
+    }
+
+    private func rollbackWhileExclusive() async -> Bool {
+        guard !isDetached, !isClosed else { return false }
+        guard let current = await verifiedCurrentSnapshot() else {
             isDetached = true
             return false
         }
@@ -309,6 +400,7 @@ final class MacRealtimeInlineTextSession {
                 isDetached = true
                 return false
             }
+            isClosed = true
             return true
         }
         guard
@@ -317,7 +409,38 @@ final class MacRealtimeInlineTextSession {
             isDetached = true
             return false
         }
-        return apply(mutation)
+        guard await apply(mutation) else { return false }
+        isClosed = true
+        return true
+    }
+
+    /// `willTerminate` cannot await. Normal Quit has already used the async
+    /// rollback path; this is a final best-effort exact check for abnormal
+    /// lifecycle exits and never polls or repeats a text mutation.
+    @discardableResult
+    func rollbackImmediately() -> Bool {
+        guard !operationIsActive, !isDetached, !isClosed else { return false }
+        operationIsActive = true
+        defer { releaseExclusiveOperation() }
+        guard
+            let current = resolveElementImmediately(
+                requiring: reconciler.expectedSnapshot
+            )
+        else {
+            isDetached = true
+            return false
+        }
+        guard reconciler.hasProvisionalOutput else {
+            isClosed = true
+            return true
+        }
+        guard let mutation = reconciler.planRollback(currentSnapshot: current) else {
+            isDetached = true
+            return false
+        }
+        guard applyImmediately(mutation) else { return false }
+        isClosed = true
+        return true
     }
 
     var caretFrame: CGRect? {
@@ -328,30 +451,44 @@ final class MacRealtimeInlineTextSession {
         )
     }
 
-    private func verifiedCurrentSnapshot() -> MacRealtimeTextSnapshot? {
-        resolveElement(requiring: reconciler.expectedSnapshot)
+    private func verifiedCurrentSnapshot() async -> MacRealtimeTextSnapshot? {
+        await resolveElement(requiring: reconciler.expectedSnapshot)
     }
 
-    private func apply(_ mutation: MacRealtimeTextMutation) -> Bool {
+    private func apply(_ mutation: MacRealtimeTextMutation) async -> Bool {
         let expectedBeforeMutation = reconciler.expectedSnapshot
-        guard
-            resolveElement(requiring: expectedBeforeMutation) != nil,
-            MacAccessibility.setRealtimeSelection(
-                mutation.replacementRange,
-                on: element
-            ),
-            resolveElement(
+        guard await resolveElement(requiring: expectedBeforeMutation) != nil else {
+            isDetached = true
+            return false
+        }
+        guard MacAccessibility.setRealtimeSelection(
+            mutation.replacementRange,
+            on: element
+        ) else {
+            isDetached = true
+            return false
+        }
+        guard await resolveElement(
                 requiring: MacRealtimeTextSnapshot(
                     value: expectedBeforeMutation.value,
                     selection: mutation.replacementRange
                 )
-            ) != nil,
-            MacAccessibility.replaceRealtimeSelection(
-                with: mutation.replacementText,
-                on: element
-            ),
-            resolveElement(requiring: mutation.resultingSnapshot) != nil
+            ) != nil
         else {
+            isDetached = true
+            return false
+        }
+        guard MacAccessibility.replaceRealtimeSelection(
+            with: mutation.replacementText,
+            on: element
+        ) else {
+            isDetached = true
+            return false
+        }
+        guard await resolveElement(
+            requiring: mutation.resultingSnapshot,
+            transientPreviousValue: expectedBeforeMutation.value
+        ) != nil else {
             // A setter may have succeeded before a later readback failed. That
             // ambiguity is precisely when another edit would be dangerous.
             isDetached = true
@@ -368,48 +505,211 @@ final class MacRealtimeInlineTextSession {
     /// When monitoring is unavailable, retain the older strict object/range
     /// behavior.
     private func resolveElement(
-        requiring expected: MacRealtimeTextSnapshot
-    ) -> MacRealtimeTextSnapshot? {
+        requiring expected: MacRealtimeTextSnapshot,
+        transientPreviousValue: String? = nil
+    ) async -> MacRealtimeTextSnapshot? {
+        let readbackPolicy = MacRealtimeReadbackPolicy()
+        let attemptCount = transientPreviousValue == nil
+            ? 1
+            : MacRealtimeReadbackPolicy.maximumAttempts
+
+        for attempt in 0..<attemptCount {
+            guard let observation = currentObservation() else {
+                guard transientPreviousValue != nil, attempt + 1 < attemptCount else {
+                    return nil
+                }
+                await waitForChromiumReadback()
+                continue
+            }
+            let focused = observation.element
+            let observed = observation.snapshot
+            let currentGeneration = observation.interactionGeneration
+            let sameElement = CFEqual(element, focused)
+
+            if let transientPreviousValue {
+                switch readbackPolicy.observe(
+                    value: observed.value,
+                    previousValue: transientPreviousValue,
+                    expectedValue: expected.value
+                ) {
+                case .accept:
+                    break
+                case .retry:
+                    if attempt + 1 < attemptCount {
+                        await waitForChromiumReadback()
+                        continue
+                    }
+                    return nil
+                case .reject:
+                    return nil
+                }
+            } else if observed.value != expected.value {
+                return nil
+            }
+
+            let selectionMatches = observed.selection == expected.selection
+            guard MacRealtimeElementOwnershipPolicy.permitsResolution(
+                valueMatches: observed.value == expected.value,
+                sameElement: sameElement,
+                selectionMatches: selectionMatches,
+                capturedInteractionGeneration: interactionGeneration,
+                currentInteractionGeneration: currentGeneration
+            ) else {
+                return nil
+            }
+
+            element = focused
+            if selectionMatches { return observed }
+            guard MacAccessibility.setRealtimeSelection(expected.selection, on: element) else {
+                return nil
+            }
+            return await waitForSelectionRepair(
+                expected,
+                initialInteractionGeneration: currentGeneration
+            )
+        }
+        return nil
+    }
+
+    private func waitForSelectionRepair(
+        _ expected: MacRealtimeTextSnapshot,
+        initialInteractionGeneration: UInt64?
+    ) async -> MacRealtimeTextSnapshot? {
+        for attempt in 0..<MacRealtimeReadbackPolicy.maximumAttempts {
+            guard let observation = currentObservation() else {
+                guard attempt + 1 < MacRealtimeReadbackPolicy.maximumAttempts else {
+                    return nil
+                }
+                await waitForChromiumReadback()
+                continue
+            }
+            let sameElement = CFEqual(element, observation.element)
+            guard MacRealtimeElementOwnershipPolicy.permitsResolution(
+                valueMatches: observation.snapshot.value == expected.value,
+                sameElement: sameElement,
+                selectionMatches: observation.snapshot.selection == expected.selection,
+                capturedInteractionGeneration: interactionGeneration,
+                currentInteractionGeneration: observation.interactionGeneration
+            ), observation.interactionGeneration == initialInteractionGeneration
+            else {
+                return nil
+            }
+            guard observation.snapshot.value == expected.value else { return nil }
+            if observation.snapshot == expected {
+                element = observation.element
+                return observation.snapshot
+            }
+            guard attempt + 1 < MacRealtimeReadbackPolicy.maximumAttempts else {
+                return nil
+            }
+            await waitForChromiumReadback()
+        }
+        return nil
+    }
+
+    private func currentObservation() -> (
+        element: AXUIElement,
+        snapshot: MacRealtimeTextSnapshot,
+        interactionGeneration: UInt64?
+    )? {
         guard
             !IsSecureEventInputEnabled(),
             NSWorkspace.shared.frontmostApplication?.processIdentifier
                 == processIdentifier,
-            let focused = MacAccessibility.focusedWritableElement(),
-            MacAccessibility.realtimeTextAttributesAreSettable(on: focused),
-            var snapshot = MacAccessibility.realtimeTextSnapshot(of: focused),
-            snapshot.value == expected.value
+            let focused = MacAccessibility.focusedRealtimeWritableElement(
+                preferred: element,
+                processIdentifier: processIdentifier
+            ),
+            let snapshot = MacAccessibility.realtimeTextSnapshot(of: focused)
         else {
             return nil
         }
+        return (
+            focused,
+            snapshot,
+            MacUserInteractionTracker.shared.snapshot
+        )
+    }
 
-        let sameElement = CFEqual(element, focused)
-        let selectionMatches = snapshot.selection == expected.selection
-        guard MacRealtimeElementOwnershipPolicy.permitsResolution(
-            valueMatches: true,
-            sameElement: sameElement,
-            selectionMatches: selectionMatches,
-            capturedInteractionGeneration: interactionGeneration,
-            currentInteractionGeneration: MacUserInteractionTracker.shared.snapshot
-        ) else {
+    private func waitForChromiumReadback() async {
+        try? await Task.sleep(for: MacRealtimeReadbackPolicy.retryDelay)
+    }
+
+    private func resolveElementImmediately(
+        requiring expected: MacRealtimeTextSnapshot
+    ) -> MacRealtimeTextSnapshot? {
+        guard let observation = currentObservation() else { return nil }
+        let sameElement = CFEqual(element, observation.element)
+        guard
+            observation.snapshot == expected,
+            MacRealtimeElementOwnershipPolicy.permitsResolution(
+                valueMatches: true,
+                sameElement: sameElement,
+                selectionMatches: true,
+                capturedInteractionGeneration: interactionGeneration,
+                currentInteractionGeneration: observation.interactionGeneration
+            )
+        else {
             return nil
         }
-        if !sameElement || !selectionMatches {
-            element = focused
-            if !selectionMatches {
-                guard
-                    MacAccessibility.setRealtimeSelection(
-                        expected.selection,
-                        on: element
-                    ),
-                    let repaired = MacAccessibility.realtimeTextSnapshot(of: element),
-                    repaired == expected
-                else {
-                    return nil
-                }
-                snapshot = repaired
-            }
+        element = observation.element
+        return observation.snapshot
+    }
+
+    private func applyImmediately(_ mutation: MacRealtimeTextMutation) -> Bool {
+        let expectedBeforeMutation = reconciler.expectedSnapshot
+        guard
+            resolveElementImmediately(requiring: expectedBeforeMutation) != nil,
+            MacAccessibility.setRealtimeSelection(
+                mutation.replacementRange,
+                on: element
+            ),
+            resolveElementImmediately(
+                requiring: MacRealtimeTextSnapshot(
+                    value: expectedBeforeMutation.value,
+                    selection: mutation.replacementRange
+                )
+            ) != nil,
+            MacAccessibility.replaceRealtimeSelection(
+                with: mutation.replacementText,
+                on: element
+            ),
+            MacAccessibility.setRealtimeSelection(
+                mutation.resultingSnapshot.selection,
+                on: element
+            ),
+            resolveElementImmediately(requiring: mutation.resultingSnapshot) != nil
+        else {
+            isDetached = true
+            return false
         }
-        element = focused
-        return snapshot == expected ? snapshot : nil
+        reconciler.accept(mutation)
+        return true
+    }
+
+    private func withExclusiveOperation<Result>(
+        _ operation: () async -> Result
+    ) async -> Result {
+        await acquireExclusiveOperation()
+        defer { releaseExclusiveOperation() }
+        return await operation()
+    }
+
+    private func acquireExclusiveOperation() async {
+        guard operationIsActive else {
+            operationIsActive = true
+            return
+        }
+        await withCheckedContinuation { continuation in
+            operationWaiters.append(continuation)
+        }
+    }
+
+    private func releaseExclusiveOperation() {
+        guard !operationWaiters.isEmpty else {
+            operationIsActive = false
+            return
+        }
+        operationWaiters.removeFirst().resume()
     }
 }
