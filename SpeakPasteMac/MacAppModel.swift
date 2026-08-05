@@ -998,10 +998,11 @@ final class MacAppModel: ObservableObject {
         case .ready, .succeeded, .failed:
             startDictation(on: mode)
         case .connecting:
-            // No audio exists yet, so this is wrong-key correction rather than
-            // switching. Retarget the attempt that has not produced anything.
+            // A capture exists the moment one is being acquired, so the other
+            // source key does no more here than it does mid-recording. A
+            // wrong-key start is corrected with Esc, then the right key.
             guard activeSource != mode else { return }
-            retargetConnection(to: mode)
+            nudgeWrongSourceKey(mode)
         case .recording:
             if activeSource == mode {
                 pauseDictation()
@@ -1028,25 +1029,6 @@ final class MacAppModel: ObservableObject {
             applySafeFloor()
             return
         }
-        selectDevice(device, semanticMode: mode)
-        activeSource = mode
-        finalizationOutcome = .rest
-        beginRecordingRequest()
-    }
-
-    private func retargetConnection(to mode: MacInputMode) {
-        guard let device = availableDevice(for: mode) else {
-            deviceSelectionNotice = unavailableMessage(for: mode)
-            return
-        }
-        captureRequestID = nil
-        captureStartTask?.cancel()
-        captureStartTask = nil
-        recorder.disconnect()
-        isMicrophoneConnected = false
-        connectedDeviceID = nil
-        connectionLatency = nil
-        deliveryTarget = nil
         selectDevice(device, semanticMode: mode)
         activeSource = mode
         finalizationOutcome = .rest
@@ -1120,7 +1102,17 @@ final class MacAppModel: ObservableObject {
         pipeline.showWrongSourceNudge(attempted: mode, live: activeSource)
         hudPipeline = pipeline
         let liveKey = MacDictationKey.sourceKey(for: activeSource ?? mode.opposite)
-        deviceSelectionNotice = "The \(activeSource?.title ?? "current") microphone is live, so \(mode.title) cannot take over mid-recording. Pause with \(liveKey.shortcutLabel), then resume with \(MacDictationKey.sourceKey(for: mode).shortcutLabel)."
+        let targetKey = MacDictationKey.sourceKey(for: mode)
+        if phase == .connecting {
+            // Nothing has been captured yet, so the cheap correction is to
+            // abandon this attempt outright rather than pause it.
+            deviceSelectionNotice = "Already connecting to the \(activeSource?.title ?? "selected") microphone. Press \(MacDictationKey.cancel.shortcutLabel) to abandon it, then \(targetKey.shortcutLabel) to start on \(mode.title)."
+            postAccessibilityAnnouncement(
+                "Already connecting. Press \(MacDictationKey.cancel.spokenLabel) first to start on the \(mode.title) microphone."
+            )
+            return
+        }
+        deviceSelectionNotice = "The \(activeSource?.title ?? "current") microphone is live, so \(mode.title) cannot take over mid-recording. Pause with \(liveKey.shortcutLabel), then resume with \(targetKey.shortcutLabel)."
         postAccessibilityAnnouncement(
             "Pause before switching to the \(mode.title) microphone."
         )

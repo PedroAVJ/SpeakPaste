@@ -38,10 +38,12 @@ final class MacDictationStateMatrixTests: XCTestCase {
 
     // MARK: Connecting
 
-    func testConnectingRetargetsWithTheOtherSourceKeyOnly() {
+    /// A capture exists from the moment one is being acquired, so neither
+    /// source key may start anything. Esc is the wrong-key correction.
+    func testNeitherSourceKeyActsWhileConnecting() {
         let map = indications(.connecting, source: .mac)
-        XCTAssertFalse(map[.macSource]?.isActive == true, "the key already connecting is inert")
-        XCTAssertTrue(map[.iPhoneSource]?.isActive == true)
+        XCTAssertEqual(map[.macSource], .inert(symbol: "laptopcomputer"))
+        XCTAssertEqual(map[.iPhoneSource], .refused(symbol: "iphone"))
     }
 
     func testEndIsInertWhileConnectingWithNothingBanked() {
@@ -73,6 +75,24 @@ final class MacDictationStateMatrixTests: XCTestCase {
             indications(.recording, source: .iPhone)[.macSource],
             .refused(symbol: "laptopcomputer")
         )
+    }
+
+    /// The property behind "no mid-recording switching": while any capture
+    /// exists, connecting or hot, neither source key may start one.
+    func testNoSourceKeyStartsAnythingWhileACaptureExists() {
+        for phase in [MacCapturePhase.connecting, .recording, .finalizing] {
+            for source in [MacInputMode.mac, .iPhone] {
+                let map = indications(phase, source: source)
+                for key in [MacDictationKey.macSource, .iPhoneSource] {
+                    guard case .active(let symbol, _) = map[key] else { continue }
+                    XCTAssertEqual(
+                        symbol,
+                        "pause.fill",
+                        "\(key) in \(phase) may only pause, never start"
+                    )
+                }
+            }
+        }
     }
 
     func testRecordingAlwaysOffersEndAndDiscard() {

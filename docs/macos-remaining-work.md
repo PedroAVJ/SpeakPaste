@@ -222,7 +222,9 @@ for the release evidence.
       segments are delivered in spoken order. Repeat in the opposite direction.
 - [ ] While speaking through the Mac, tap right ⌥. Confirm nothing switches,
       nothing is delivered, and the HUD shows only the wrong-source nudge.
-      Repeat in the opposite direction.
+      Repeat in the opposite direction, and again during Connecting rather
+      than Recording — a capture exists from the moment one is acquired, so
+      neither source key may start anything there either.
 - [ ] While connecting and while recording, press Escape once. Each must discard
       the live segment, release the microphone, and leave no capture indicator
       behind — landing on the safe floor: resting when earlier segments are

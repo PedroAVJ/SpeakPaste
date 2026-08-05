@@ -33,18 +33,18 @@ pending capture. States: **Idle**, **Connecting(source)**,
 | | right ⌘ | right ⌥ | fn | Esc |
 |---|---|---|---|---|
 | Idle | start Mac | start iPhone | inert | inert |
-| Connecting Mac | inert | retarget to iPhone | deliver banked, abort¹ | abort → safe floor |
-| Connecting iPhone | retarget to Mac | inert | deliver banked, abort¹ | abort → safe floor |
+| Connecting Mac | inert | inert + HUD nudge | deliver banked, abort¹ | abort → safe floor |
+| Connecting iPhone | inert + HUD nudge | inert | deliver banked, abort¹ | abort → safe floor |
 | Recording Mac | **pause** | inert + HUD nudge | end | discard |
 | Recording iPhone | inert + HUD nudge | **pause** | end | discard |
 | Paused | resume Mac | resume iPhone | end | discard all |
 
 ¹ Inert when nothing is banked.
 
-- **No mid-recording switching.** While a mic is hot the other source key
-  only nudges. Switching sources = pause, then resume on the other key.
-- **Connecting retarget** is wrong-key correction, not switching: no
-  audio exists yet.
+- **While any capture exists — connecting or recording — the other
+  source key does nothing** beyond a HUD nudge. Switching sources =
+  pause, then resume on the other key. A wrong-key start is corrected
+  with Esc, then the right key.
 - **Safe floor:** any failed or aborted transition (Esc during connect,
   iPhone unreachable) lands in Paused if audio is banked, Idle otherwise.
   Never a silent fallback to the other microphone. Destroying banked work

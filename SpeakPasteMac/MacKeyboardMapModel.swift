@@ -128,11 +128,12 @@ enum MacKeyboardMapState {
         case .paused:
             return .active(symbol: sourceSymbol, tint: .source)
         case .connecting:
-            // Wrong-key correction: the attempt has produced no audio yet, so
-            // the other source key just retargets it.
+            // A capture already exists, even though no audio has reached it
+            // yet, so the other source key refuses exactly as it does while
+            // recording. Esc is the correction for a wrong-key start.
             return activeSource == mode
                 ? .inert(symbol: sourceSymbol)
-                : .active(symbol: sourceSymbol, tint: .source)
+                : .refused(symbol: sourceSymbol)
         case .recording:
             return activeSource == mode
                 ? .active(symbol: "pause.fill", tint: .source)
