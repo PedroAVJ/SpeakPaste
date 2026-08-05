@@ -312,6 +312,12 @@ The recording session uses an input-only audio category without playback-only
 options. In particular, it must not combine `.record` with `.duckOthers`; that
 combination is invalid and produced the `OSStatus -50` evidence above.
 
+Capture is pinned to the iPhone's own microphone. The category omits Bluetooth
+HFP so AirPods or a car kit never appear as an input, and the session's
+preferred input is set to the built-in microphone at configuration, after
+activation, and again on any route change during recording, so a wired or USB
+accessory cannot take the input mid-sentence. Headset playback is unaffected.
+
 ### Removed generic and scene-identity routes
 
 The generic private `suspendReturningToLastApp:` route is excluded from the

@@ -308,11 +308,16 @@ final class AudioRecorder: ObservableObject {
             // Keep the session mixable: a non-mixable `.record` session is
             // refused in the background when another app owns audio, while
             // ducking leaves that audio alive and avoids a second-tap failure.
+            // Bluetooth HFP is deliberately absent: allowing it lets AirPods or
+            // a car kit claim the input and record narrowband audio from across
+            // the room. Dictation is a phone-in-hand interaction, so the
+            // iPhone's own microphone is the intended source.
             try session.setCategory(
                 .playAndRecord,
                 mode: .default,
-                options: [.duckOthers, .allowBluetoothHFP]
+                options: [.duckOthers]
             )
+            preferBuiltInMicrophone()
         } catch {
             resetFailedStart(attemptID: attemptID)
             throw AudioRecorderError.configurationFailed(
@@ -338,6 +343,9 @@ final class AudioRecorder: ObservableObject {
             try? session.setActive(false, options: .notifyOthersOnDeactivation)
             throw AudioRecorderError.cancelled
         }
+        // An inactive session can refuse a preferred input, and the built-in
+        // mic may only appear in `availableInputs` once the session is running.
+        preferBuiltInMicrophone()
 
         let settings: [String: Any] = [
             AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
@@ -395,6 +403,33 @@ final class AudioRecorder: ObservableObject {
         isRecording = true
         startMetering()
         return url
+    }
+
+    /// Pins capture to the iPhone's own microphone. Dropping Bluetooth HFP from
+    /// the category keeps wireless headsets out of `availableInputs` entirely;
+    /// this covers the routes that remain selectable, such as a wired headset
+    /// or a USB microphone, which iOS would otherwise prefer automatically.
+    ///
+    /// Best effort by design: a device with no usable built-in microphone must
+    /// still be able to dictate, so a refusal never fails the recording.
+    @discardableResult
+    private func preferBuiltInMicrophone() -> Bool {
+        guard let builtInMicrophone = session.availableInputs?.first(
+            where: { $0.portType == .builtInMic }
+        ) else {
+            return false
+        }
+        // Re-asserting an identical preference would emit another route change
+        // and re-enter this path, so treat an already-pinned session as done.
+        guard session.preferredInput?.uid != builtInMicrophone.uid else {
+            return true
+        }
+        do {
+            try session.setPreferredInput(builtInMicrophone)
+            return true
+        } catch {
+            return false
+        }
     }
 
     /// On a cold background launch, the recording grant tied to the Live
@@ -596,6 +631,9 @@ final class AudioRecorder: ObservableObject {
 
     private func handleRouteChange(reasonValue: UInt?) {
         guard isRecording else { return }
+        // A headset connected mid-sentence must not take the input away from
+        // the microphone the recording started on.
+        preferBuiltInMicrophone()
         let reason = AudioRecorderRouteChangeReason(
             avReason: reasonValue.flatMap(AVAudioSession.RouteChangeReason.init(rawValue:))
         )
