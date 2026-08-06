@@ -190,6 +190,29 @@ struct MacPasteController {
         )
     }
 
+    /// Delivers one paused/resumed dictation as one serialized insertion. Each
+    /// segment keeps its seam metadata until the live destination is resolved,
+    /// but no prefix can cross the output boundary ahead of a slower suffix.
+    func deliver(
+        _ chunks: [MacPreparedTranscriptChunk],
+        capturedTarget: MacDeliveryTarget?,
+        autoPaste: Bool,
+        policyForTarget: (MacDeliveryTarget) -> MacDeliveryPolicy? = { _ in nil },
+        copyOnHold: Bool = true,
+        heldClipboardOwner: MacHeldClipboardIdentity? = nil
+    ) async -> MacPasteDeliveryOutcome {
+        await deliveryGate.acquire()
+        defer { deliveryGate.release() }
+        return await deliverAfterAcquiringGate(
+            .prepared(chunks),
+            capturedTarget: capturedTarget,
+            autoPaste: autoPaste,
+            policyForTarget: policyForTarget,
+            copyOnHold: copyOnHold,
+            heldClipboardOwner: heldClipboardOwner
+        )
+    }
+
     /// Pastes wherever the caret is right now, for the explicit "give it to me
     /// here" shortcut. The user is asking for this destination, so no target
     /// match is required and nothing is activated.

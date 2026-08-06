@@ -20,23 +20,28 @@ Companion to `macos-dictation-controls.md`; the HUD renders that machine.
 
 States are distinguished by motion. The grammar: **pop = delivered,
 fold = dismissed to recovery, still = waiting on you, breath = waiting
-on the world, dots = being typed, rail = working.**
+on the world, dots = being typed.**
 
 - **Hot** — the live capture: source glyph at the bloom, then the red
-  waveform. Banked segments are invisible plumbing; the capsule is the
-  dictation.
-- **Resting** (= paused) — pause adds nothing; pause is the stack
-  refusing to leave. The front card goes still, dim, and gray — bars
+  waveform. The capsule, identity layer, and waveform layer persist;
+  capture-live expands the whole capsule at center while the glyph fades
+  and scales down and the already-mounted bars stand up. Nothing slides to
+  make room and no layer is structurally replaced. Banked segments are
+  invisible plumbing; the capsule is the dictation.
+- **Resting** (= paused) — pause adds nothing; pause is the capsule
+  refusing to leave. Its waveform goes still, dim, and gray — bars
   frozen in place, not settled. **The resting capsule is the whole
   dictation**: banked segments are plumbing and get no faces, no
-  slivers, no counts. (The `+N` overflow badge keeps its existing,
-  different job: separate dictations' work folded behind the stack.)
+  slivers, and no counts.
   Sourceless: no source glyph — there is no current source; the next
   source key decides. Never times out.
 - **Draining** — End was pressed. The capsule shrinks to the typing
   pill — dots jumping — if delivery cannot land at once (see *Closing
-  on deliver*), then the whole message
-  lands as one pop and the dictation seals into Away. Until the seal, a
+  on deliver*). Every paused/resumed segment waits behind that one face;
+  no completed prefix may reach the cursor ahead of a slower suffix. The
+  segments are seam-fitted, appended, and delivered in one external
+  transaction, then the whole message lands as one pop and the dictation
+  seals into Away. Until that delivery side effect begins, a
   source key **reopens** it (back to Hot) and Esc dismisses it to
   recovery — Draining is a Resting that leaves on its own.
 - **Away** — clean screen, nothing owed.
@@ -45,7 +50,7 @@ Invariants:
 
 - **Presence means owed text.** The HUD may not disappear while a
   dictation is open (Hot or Resting). Timeouts apply to transcription
-  rails only, never to a resting dictation.
+  work only, never to a resting dictation.
 - Esc's exit (the fold, a squash to nothing) is visibly distinct from
   End's (the pop, a bloom) — distinct shapes, both in place. Nothing
   travels.
@@ -64,8 +69,9 @@ the dismissed text back is a recovery action, not a keyboard one.
 ## Closing on deliver — the typing dots
 
 **The face is a loading state, not progress.** Decided: Scribe reports
-no progress and no ETA — one request, then the whole transcript at
-once — so the machine has no divisible quantity to draw; and a
+no progress and no ETA for any segment request, and a multi-segment
+dictation still crosses the output boundary only as one whole message,
+so the machine has no divisible quantity to draw; and a
 progress face invites supervising, when the product wants the user
 comfortable looking away. Kept principles: never a meter; the face
 draws only real signals; the animation alone never claims completion —
@@ -92,9 +98,9 @@ back up into the live wave; Esc folds the pill to recovery.
 
 The face's sound, settled with it. **No cue fires at the fn press**: the
 patter starts a moment later and is itself the acknowledgment, so a
-release chime there announced one act twice. (Pause and cancel keep
-`capture-released` — there the release is the whole event, and on
-iPhone it is the receipt that the phone is free again.) While the dots
+release chime there announced one act twice. (Pause and Escape keep
+their low held/fold cues — there the release is the whole event, and
+on iPhone it is the receipt that the phone is free again.) While the dots
 are up, the **typing patter** loops: the family's own struck tone
 played as keystrokes — short, dry, low, in irregular bursts across the
 low E-major degrees, well under every other cue so it can sit behind
@@ -166,9 +172,9 @@ is the thing that lets the user look away.
 Three families with fixed meanings. **Pings rise and mean forward
 progress**: capture-live at capture-live. **The wait family is low,
 soft, and level**: the tick (tap acknowledged, go-signal pending), the
-hold tone (paused — held, owed), and capture-released, which reports
-that the microphone is actually free after a pause or a cancel. Pause
-never plays a rising ping; suspension is not progress. **The closing
+hold tone (paused — held, owed), and the muted fold tone (dismissed to
+recovery). They fire only after the microphone is actually free. Pause never
+plays a rising ping; suspension is not progress. **The closing
 family is the message being written and landing**: the typing patter
 while the dots are up, then the delivery plop on the pop. Closing
 carries no rising ping at either end — see *Closing on deliver*.
@@ -180,9 +186,9 @@ carries no rising ping at either end — see *Closing on deliver*.
   keypress.
 - End needs no tick and no chime: the patter starts as the dots appear,
   and the plop lands on the pop.
-- The tick and the hold tone are assets still to be authored in the
-  family's voice. The Esc sound is open: a muted low tick, or silence
-  with the fold carrying it alone.
+- `wait-tick`, `dictation-held`, and `dismiss-fold` are low, restrained
+  members of the same synthesized family. The fold carries Escape visually;
+  its muted low tone only confirms that the dismissal reached recovery.
 - The Mac dissolve is silent — it is visual settling, not a state
   change, and first-voice can cut it short while the user is already
   speaking.

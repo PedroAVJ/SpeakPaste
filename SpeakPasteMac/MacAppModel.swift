@@ -35,6 +35,62 @@ private struct MacFinishedDictation {
     let languageConfidenceNotice: String?
 }
 
+/// A single external output transaction assembled from every successfully
+/// transcribed segment in one closed dictation. History and recovery remain
+/// segment-granular, while the cursor sees one folded insertion.
+private struct MacFinishedDictationBatch {
+    let segments: [MacFinishedDictation]
+
+    var preparedChunks: [MacPreparedTranscriptChunk] {
+        segments.map(\.preparedChunk)
+    }
+
+    var combinedPreparedChunk: MacPreparedTranscriptChunk {
+        MacTranscriptPostProcessor.combine(preparedChunks)
+    }
+
+    var text: String { combinedPreparedChunk.text }
+
+    var hudCardIDs: Set<UUID> { Set(segments.map(\.hudCardID)) }
+    var deliveryEscrowIDs: Set<UUID> {
+        Set(segments.compactMap(\.deliveryEscrowID))
+    }
+    var hasEveryDeliveryEscrow: Bool {
+        segments.allSatisfy { $0.deliveryEscrowID != nil }
+            && deliveryEscrowIDs.count == segments.count
+    }
+    var createdAt: Date { segments.first!.createdAt }
+    var target: MacDeliveryTarget? { segments.first?.target }
+    var deviceName: String { segments.first!.deviceName }
+    var recordingDuration: TimeInterval {
+        segments.reduce(0) { $0 + $1.recordingDuration }
+    }
+    var transcriptionDuration: TimeInterval {
+        segments.map(\.transcriptionDuration).max() ?? 0
+    }
+    var lastHistoryRecordID: UUID? {
+        segments.reversed().compactMap(\.historyRecordID).first
+    }
+    var lastDeliveryEscrowID: UUID? {
+        segments.reversed().compactMap(\.deliveryEscrowID).first
+    }
+    var hudOrdinal: Int? { segments.first?.hudOrdinal }
+    var primaryHUDCardID: UUID { segments.last!.hudCardID }
+    var languageConfidenceNotice: String? {
+        joinedNotices(segments.compactMap(\.languageConfidenceNotice))
+    }
+    var interruption: String? {
+        joinedNotices(segments.compactMap(\.interruption))
+    }
+
+    private func joinedNotices(_ notices: [String]) -> String? {
+        let unique = notices.reduce(into: [String]()) { result, notice in
+            if !result.contains(notice) { result.append(notice) }
+        }
+        return unique.isEmpty ? nil : unique.joined(separator: " ")
+    }
+}
+
 /// A finalized segment whose first recovery-journal attempt failed. Retaining
 /// the exact URL and stable journal ID lets a later normal Quit retry instead
 /// of trapping the app forever or forcing the user to lose speech.
@@ -149,8 +205,14 @@ enum MacHUDPlacement: String, CaseIterable, Identifiable {
     case bottom
     case left
     case right
+    case custom
 
     var id: String { rawValue }
+}
+
+struct MacHUDPosition: Equatable, Sendable {
+    let x: Double
+    let y: Double
 }
 
 /// The capture interaction state. Transcription deliberately lives outside
@@ -212,11 +274,22 @@ final class MacAppModel: ObservableObject {
         }
     }
     @Published var hudEnabled = true {
-        didSet { UserDefaults.standard.set(hudEnabled, forKey: Self.hudEnabledKey) }
+        didSet {
+            UserDefaults.standard.set(hudEnabled, forKey: Self.hudEnabledKey)
+            if !hudEnabled { hudPositioningMode = false }
+        }
     }
     @Published var hudPlacement: MacHUDPlacement = .top {
-        didSet { UserDefaults.standard.set(hudPlacement.rawValue, forKey: Self.hudPlacementKey) }
+        didSet {
+            UserDefaults.standard.set(hudPlacement.rawValue, forKey: Self.hudPlacementKey)
+            guard hudPlacement != oldValue, hudPlacement != .custom else { return }
+            hudCustomPosition = nil
+            UserDefaults.standard.removeObject(forKey: Self.hudPositionXKey)
+            UserDefaults.standard.removeObject(forKey: Self.hudPositionYKey)
+        }
     }
+    @Published private(set) var hudCustomPosition: MacHUDPosition?
+    @Published private(set) var hudPositioningMode = false
     @Published private(set) var hasCompletedOnboarding = false
     @Published private(set) var elapsed: TimeInterval = 0
     @Published private(set) var inputLevel: Double = 0
@@ -379,6 +452,10 @@ final class MacAppModel: ObservableObject {
     private var openDictationSequences = Set<Int>() {
         didSet { hasBankedSegments = !openDictationSequences.isEmpty }
     }
+    /// Tickets owned by the one dictation after fn closes it but before its
+    /// first delivered character seals it. A source key can move these tickets
+    /// back into `openDictationSequences`; Escape can move them into recovery.
+    private var closingDictationSequences = Set<Int>()
     private var lastHistoryRecordID: UUID?
     /// Tracks whether the editable "last transcript" is still backed by a
     /// pending delivery entry. If that entry is possibly delivered, the global
@@ -439,6 +516,8 @@ final class MacAppModel: ObservableObject {
     private static let spokenFormattingCommandsKey = "mac-spoken-formatting-commands"
     private static let hudEnabledKey = "mac-hud-enabled"
     private static let hudPlacementKey = "mac-hud-placement"
+    private static let hudPositionXKey = "mac-hud-position-x"
+    private static let hudPositionYKey = "mac-hud-position-y"
     private static let retainSuccessfulAudioKey = "mac-retain-successful-audio"
     private static let completedOnboardingKey = "mac-completed-onboarding"
     private static let retryableFailuresKey = "mac-retryable-failures"
@@ -701,6 +780,16 @@ final class MacAppModel: ObservableObject {
         if let storedPlacement = defaults.string(forKey: Self.hudPlacementKey),
            let placement = MacHUDPlacement(rawValue: storedPlacement) {
             hudPlacement = placement
+        }
+        if defaults.object(forKey: Self.hudPositionXKey) != nil,
+           defaults.object(forKey: Self.hudPositionYKey) != nil {
+            let position = MacHUDPosition(
+                x: defaults.double(forKey: Self.hudPositionXKey),
+                y: defaults.double(forKey: Self.hudPositionYKey)
+            )
+            if position.x.isFinite, position.y.isFinite {
+                hudCustomPosition = position
+            }
         }
         if defaults.object(forKey: Self.retainSuccessfulAudioKey) != nil {
             retainSuccessfulAudio = defaults.bool(forKey: Self.retainSuccessfulAudioKey)
@@ -982,11 +1071,33 @@ final class MacAppModel: ObservableObject {
 
     // MARK: The four dictation keys
 
+    func toggleHUDPositioning() {
+        guard hudEnabled else { return }
+        hudPositioningMode.toggle()
+    }
+
+    func finishHUDPositioning() {
+        hudPositioningMode = false
+    }
+
+    func saveHUDPosition(x: Double, y: Double) {
+        guard x.isFinite, y.isFinite else { return }
+        let position = MacHUDPosition(x: x, y: y)
+        guard position != hudCustomPosition else { return }
+        hudPlacement = .custom
+        hudCustomPosition = position
+        UserDefaults.standard.set(x, forKey: Self.hudPositionXKey)
+        UserDefaults.standard.set(y, forKey: Self.hudPositionYKey)
+    }
+
     /// Single entry point for the global control surface. Every transition in
     /// the product's state matrix is decided here, so the event tap stays a
     /// dumb recognizer and the matrix has exactly one implementation.
     func handleDictationKey(_ key: MacDictationKey) {
         guard !microphoneTestState.isRunning else { return }
+        // A real dictation always wins over the temporary placement preview.
+        // The panel returns to click-through before the shortcut takes effect.
+        finishHUDPositioning()
         switch key {
         case .macSource, .iPhoneSource:
             guard let mode = key.inputMode else { return }
@@ -1003,6 +1114,15 @@ final class MacAppModel: ObservableObject {
     private func sourceKeyPressed(_ mode: MacInputMode) {
         switch phase {
         case .ready, .succeeded, .failed:
+            if hudPipeline.isDraining {
+                // Until delivery crosses its side-effect boundary, a closing
+                // dictation is still the user's message. Reopening restores the
+                // same tickets and the same HUD face; it never starts a second
+                // message on top of the first one.
+                guard activeDeliveryEscrowIDs.isEmpty else { return }
+                openDictationSequences.formUnion(closingDictationSequences)
+                closingDictationSequences.removeAll()
+            }
             startDictation(on: mode)
         case .connecting:
             // A capture exists the moment one is being acquired, so the other
@@ -1039,6 +1159,11 @@ final class MacAppModel: ObservableObject {
         selectDevice(device, semanticMode: mode)
         activeSource = mode
         finalizationOutcome = .rest
+        if mode == .iPhone {
+            // The wait tick acknowledges the source key. Capture-live gets its
+            // own ping later, only after Continuity can actually carry audio.
+            sounds.playWaitTick()
+        }
         beginRecordingRequest()
     }
 
@@ -1084,8 +1209,16 @@ final class MacAppModel: ObservableObject {
     private func closeDictation() {
         activeSource = nil
         finalizationOutcome = .rest
+        closingDictationSequences.formUnion(openDictationSequences)
         openDictationSequences.removeAll()
+        var pipeline = hudPipeline
+        pipeline.beginDraining()
+        hudPipeline = pipeline
         phase = .ready
+        // Every banked segment may already have finished while the dictation
+        // was resting. Closing must actively wake the atomic drain instead of
+        // waiting for a network callback that may never come.
+        Task { await drainCompletedDictations() }
     }
 
     /// The safe floor: any failed or aborted transition lands in Paused when
@@ -1136,6 +1269,7 @@ final class MacAppModel: ObservableObject {
         pipeline.beginCapture(
             id: requestID,
             ordinal: nextSpeakSequence + 1,
+            source: activeSource ?? inputMode ?? .mac,
             at: Date()
         )
         hudPipeline = pipeline
@@ -1167,7 +1301,8 @@ final class MacAppModel: ObservableObject {
         case .finalizing:
             pipeline.updateCapture(id: captureID, activity: .releasing, at: date)
         case .failed:
-            pipeline.finish(id: captureID)
+            pipeline.discardCapture(id: captureID)
+            pipeline.dismissFace()
         case .paused, .ready, .succeeded:
             // Ready is the zero-gap handoff between recorder teardown and the
             // durable transcription job. `startTranscription` morphs this same
@@ -1177,8 +1312,8 @@ final class MacAppModel: ObservableObject {
         hudPipeline = pipeline
     }
 
-    /// The resting card mirrors the Paused phase exactly, and outlives every
-    /// visibility cap in the stack, so a dictation that is waiting for its End
+    /// The resting face mirrors the Paused phase exactly, and outlives every
+    /// transient visibility cap, so a dictation that is waiting for its End
     /// can never quietly disappear from the screen while still holding text.
     private func updateHUDResting(
         for phase: MacCapturePhase,
@@ -1201,20 +1336,18 @@ final class MacAppModel: ObservableObject {
         hudPipeline = pipeline
     }
 
-    /// The patter is tied to the typing dots and nothing else: it runs while a
-    /// dictation is being transcribed or is waiting its turn to deliver, and
-    /// stops the moment that state ends — delivered, dismissed, reopened, or
-    /// failed. A held card gets no patter; nothing is being typed for it.
+    private func finishHUDCards(_ ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+        var pipeline = hudPipeline
+        pipeline.finish(ids: ids)
+        hudPipeline = pipeline
+    }
+
+    /// The patter is tied to the one closed dictation and nothing else. Paused
+    /// segments transcribe eagerly in the background, but they are invisible
+    /// plumbing and must stay silent until fn turns the whole message into dots.
     private func syncTypingPatter() {
-        let isTyping = hudPipeline.dictations.contains { dictation in
-            switch dictation.stage {
-            case .transcribing, .awaitingDelivery:
-                true
-            case .held:
-                false
-            }
-        }
-        if isTyping {
+        if hudPipeline.isTyping {
             sounds.startTypingPatter()
         } else {
             sounds.stopTypingPatter()
@@ -1222,12 +1355,13 @@ final class MacAppModel: ObservableObject {
     }
 
     private func markHUDCardsDelivered(_ ids: Set<UUID>) {
-        guard !ids.isEmpty else { return }
-        recentlyDeliveredHUDCardIDs.formUnion(ids)
+        let faceIDs = hudPipeline.faceIDs(forWorkIDs: ids)
+        guard !faceIDs.isEmpty else { return }
+        recentlyDeliveredHUDCardIDs.formUnion(faceIDs)
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(1))
             guard let self else { return }
-            self.recentlyDeliveredHUDCardIDs.subtract(ids)
+            self.recentlyDeliveredHUDCardIDs.subtract(faceIDs)
         }
     }
 
@@ -1235,12 +1369,15 @@ final class MacAppModel: ObservableObject {
     /// instead of fading. The receipt is dropped a beat later: it exists only
     /// to label the removal that is already under way.
     private func markHUDCardsDismissed(_ ids: Set<UUID>) {
-        guard !ids.isEmpty else { return }
-        recentlyDismissedHUDCardIDs.formUnion(ids)
+        let faceIDs = hudPipeline.faceIDs(forWorkIDs: ids).union(
+            ids.filter { $0 == hudPipeline.visibleFaceID }
+        )
+        guard !faceIDs.isEmpty else { return }
+        recentlyDismissedHUDCardIDs.formUnion(faceIDs)
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(1))
             guard let self else { return }
-            self.recentlyDismissedHUDCardIDs.subtract(ids)
+            self.recentlyDismissedHUDCardIDs.subtract(faceIDs)
         }
     }
 
@@ -2542,7 +2679,7 @@ final class MacAppModel: ObservableObject {
             if let salvaged = error as? MacAudioRecorderSalvagedFailure {
                 // This error is surfaced only after recorder teardown has
                 // completed, so the mirrored closing cue is truthful here.
-                sounds.playRecordingStopped()
+                playFinalizationSound(for: finalizationOutcome)
                 recordingWarning = nil
                 automaticStopInProgress = false
                 let target = deliveryTarget
@@ -2583,9 +2720,7 @@ final class MacAppModel: ObservableObject {
         // one act twice. Pause and cancel keep the cue — there the release is
         // the whole event, and on iPhone it is the receipt that the phone is
         // free again.
-        if finalizationOutcome != .close {
-            sounds.playRecordingStopped()
-        }
+        playFinalizationSound(for: finalizationOutcome)
         isMicrophoneConnected = false
         connectedDeviceID = nil
         connectionLatency = nil
@@ -2629,10 +2764,35 @@ final class MacAppModel: ObservableObject {
                 phase = .paused
             }
         case .close:
-            // `.ready` already opened the ordered drain, which delivers every
-            // banked segment in turn; the dictation now owns none of them.
+            closingDictationSequences.formUnion(openDictationSequences)
             openDictationSequences.removeAll()
+            var pipeline = hudPipeline
+            pipeline.beginDraining()
+            hudPipeline = pipeline
         case .discard:
+            break
+        case .dismiss:
+            discardedSpeakSequences.formUnion(openDictationSequences)
+            openDictationSequences.removeAll()
+            closingDictationSequences.removeAll()
+            if let faceID = hudPipeline.visibleFaceID {
+                markHUDCardsDismissed([faceID])
+            }
+            var pipeline = hudPipeline
+            pipeline.dismissFace()
+            hudPipeline = pipeline
+        }
+    }
+
+    private func playFinalizationSound(for outcome: MacFinalizationOutcome) {
+        switch outcome {
+        case .rest:
+            sounds.playDictationHeld()
+        case .dismiss:
+            sounds.playDismissed()
+        case .discard:
+            break
+        case .close:
             break
         }
     }
@@ -3238,36 +3398,64 @@ final class MacAppModel: ObservableObject {
         }
     }
 
-    /// Escape always discards, and never more than the state it was pressed in
-    /// allows: the live segment while a microphone is held, and — only from a
-    /// resting dictation — the segments already banked.
+    /// Escape closes the one dictation into recovery. A connecting attempt has
+    /// no audio yet and therefore only returns to the safe floor.
     func requestRecordingCancellation() {
         guard !microphoneTestState.isRunning else { return }
         switch phase {
         case .connecting, .recording:
             cancelRecording()
         case .paused:
-            // The resting card is about to leave because the user dismissed
-            // it, so it folds; ending the phase is what actually removes it.
-            if let restingID = hudPipeline.resting?.id {
-                markHUDCardsDismissed([restingID])
+            if let faceID = hudPipeline.visibleFaceID {
+                markHUDCardsDismissed([faceID])
             }
+            sounds.playDismissed()
             discardBankedSegments()
-            closeDictation()
-        case .finalizing, .ready, .succeeded, .failed:
-            // A release already in flight owns the recorder; there is nothing
-            // left to abandon that the stop path is not already handling.
-            break
+            var pipeline = hudPipeline
+            pipeline.dismissFace()
+            hudPipeline = pipeline
+            activeSource = nil
+            finalizationOutcome = .rest
+            phase = .ready
+        case .finalizing:
+            // Teardown already owns the recorder. Change only the destination
+            // of the safely finalized segment: recovery instead of rest/end.
+            finalizationOutcome = .dismiss
+        case .ready, .succeeded, .failed:
+            guard hudPipeline.isDraining, activeDeliveryEscrowIDs.isEmpty else {
+                return
+            }
+            if let faceID = hudPipeline.visibleFaceID {
+                markHUDCardsDismissed([faceID])
+            }
+            sounds.playDismissed()
+            discardedSpeakSequences.formUnion(closingDictationSequences)
+            closingDictationSequences.removeAll()
+            var pipeline = hudPipeline
+            pipeline.dismissFace()
+            hudPipeline = pipeline
         }
     }
 
-    /// Abandons a recording in progress without transcribing it. The visual
-    /// release state stays visible until the recorder confirms that Continuity
-    /// is actually free; only then does the closing half of the sound pair fire.
+    /// Dismisses a recording without losing the live tail. A connection attempt
+    /// still aborts cheaply because it has not produced audio yet.
     func cancelRecording() {
         guard phase == .recording || phase == .connecting else { return }
-        let shouldPlayReleaseCue = phase == .recording
-        let cancelledHUDCardID = hudPipeline.capture?.id
+        if phase == .recording {
+            // Escape changes the destination to recovery; it does not throw
+            // away the live tail. The normal stop path finalizes and journals
+            // the segment before folding the one dictation face.
+            finalizationOutcome = .dismiss
+            stopMeter()
+            phase = .finalizing
+            Task { await stopAndTranscribe() }
+            return
+        }
+
+        // Connecting has captured nothing. Escape aborts only this pending
+        // source attempt and lands on the safe floor; prior banked speech keeps
+        // the same resting face.
+        let cancelledCaptureID = hudPipeline.capture?.id
         finalizationOutcome = .discard
         captureRequestID = nil
         captureStartTask?.cancel()
@@ -3281,22 +3469,19 @@ final class MacAppModel: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             await self.recorder.disconnectAndWait()
-            if shouldPlayReleaseCue {
-                self.sounds.playRecordingStopped()
-            }
             self.resolveSelection()
             self.endRecordingActivity()
             self.isMicrophoneConnected = false
             self.connectedDeviceID = nil
             self.connectionLatency = nil
-            if let cancelledHUDCardID {
-                self.markHUDCardsDismissed([cancelledHUDCardID])
-                var pipeline = self.hudPipeline
-                pipeline.finish(id: cancelledHUDCardID)
-                self.hudPipeline = pipeline
+            var pipeline = self.hudPipeline
+            pipeline.discardCapture(id: cancelledCaptureID)
+            if self.hasBankedSegments {
+                pipeline.beginResting()
+            } else {
+                pipeline.dismissFace()
             }
-            // Cancellation never resumes capture and never destroys banked
-            // work; it lands on the safe floor.
+            self.hudPipeline = pipeline
             self.applySafeFloor()
         }
     }
@@ -3327,26 +3512,66 @@ final class MacAppModel: ObservableObject {
         recoveryNotice = "Discarded this dictation. Its transcribed text stays recoverable below until you paste or delete it."
     }
 
-    /// Delivers finished dictations strictly in spoken order, so a short second
-    /// thought cannot overtake the sentence it belongs after. Nothing drains
-    /// while a dictation is open: only `fn` closes one, and only a closed
-    /// dictation reaches the cursor.
+    /// Delivers closed dictations strictly in spoken order. Pauses create
+    /// independently transcribed segments, but fn closes one user message: the
+    /// entire closing set must be ready before one folded paste is attempted.
     private func drainCompletedDictations() async {
         guard !isDrainingCompletedDictations else { return }
         isDrainingCompletedDictations = true
         defer { isDrainingCompletedDictations = false }
-        while let finished = completedDictations[nextDeliverySequence] {
+        while completedDictations[nextDeliverySequence] != nil {
             if phase.dictationIsOpen { break }
+
+            let closingBatch = MacOrderedDictationBatch(
+                sequences: closingDictationSequences
+            )
+            if closingBatch.starts(at: nextDeliverySequence) {
+                guard closingBatch.isReady(
+                    completedSequences: Set(completedDictations.keys)
+                ) else {
+                    break
+                }
+                let ordered = closingBatch.orderedSequences
+                let finishedBatch = ordered.compactMap { completedDictations[$0] }
+                for sequence in ordered {
+                    completedDictations[sequence] = nil
+                    openDictationSequences.remove(sequence)
+                    closingDictationSequences.remove(sequence)
+                    discardedSpeakSequences.remove(sequence)
+                }
+                nextDeliverySequence = (ordered.last ?? nextDeliverySequence) + 1
+                await deliver(finishedBatch)
+                continue
+            }
+
+            guard let finished = completedDictations[nextDeliverySequence] else { break }
             let sequence = nextDeliverySequence
             completedDictations[sequence] = nil
             nextDeliverySequence += 1
             openDictationSequences.remove(sequence)
+            closingDictationSequences.remove(sequence)
             if discardedSpeakSequences.remove(sequence) != nil {
                 bankDiscardedDictation(finished)
             } else {
                 await deliver(finished)
             }
         }
+    }
+
+    /// Keeps failures recoverable without letting one empty segment split the
+    /// remaining successful speech into several output transactions.
+    private func deliver(_ finishedBatch: [MacFinishedDictation]) async {
+        let failed = finishedBatch.filter { $0.text.isEmpty }
+        for finished in failed {
+            await deliver(finished)
+        }
+        let successful = finishedBatch.filter { !$0.text.isEmpty }
+        guard !successful.isEmpty else { return }
+        guard successful.count > 1 else {
+            await deliver(successful[0])
+            return
+        }
+        await deliverJoined(MacFinishedDictationBatch(segments: successful))
     }
 
     /// A discarded segment that had already been transcribed. It keeps its
@@ -3440,6 +3665,292 @@ final class MacAppModel: ObservableObject {
         }
     }
 
+    /// Sends every successful pause/resume segment as one output transaction.
+    /// Before any external side effect, the segment recovery rows are folded
+    /// into one durable handoff in a single store write. A crash therefore
+    /// recovers either all original segments or the combined message, never a
+    /// prefix that can be pasted independently from its suffix.
+    private func deliverJoined(_ batch: MacFinishedDictationBatch) async {
+        let originalEscrowIDs = batch.deliveryEscrowIDs
+        guard batch.hasEveryDeliveryEscrow else {
+            blockJoinedDelivery(
+                batch,
+                detail: "The complete dictation was not output because one of its segments could not save a durable delivery handoff. Every recoverable segment remains available for review."
+            )
+            return
+        }
+        for segment in batch.segments {
+            guard
+                let escrowID = segment.deliveryEscrowID,
+                let pending = pendingTranscriptStore.transcript(withID: escrowID),
+                pending.text == segment.text,
+                pending.deliveryState == .pending
+            else {
+                blockJoinedDelivery(
+                    batch,
+                    detail: "The complete dictation was not output because its segment recovery state changed before the atomic handoff. Review the waiting text before trying again."
+                )
+                return
+            }
+        }
+        guard ensureSourceRecoveryIsUnlinked(for: originalEscrowIDs) else {
+            blockJoinedDelivery(
+                batch,
+                detail: recoveryNotice
+                    ?? "The complete dictation is waiting for its source-audio recovery transaction. Nothing was output."
+            )
+            return
+        }
+        guard let combinedPending = consolidateDeliveryEscrows(for: batch) else {
+            blockJoinedDelivery(
+                batch,
+                detail: recoveryNotice
+                    ?? "The complete dictation could not be joined into one durable delivery handoff. Nothing was output."
+            )
+            return
+        }
+
+        originalTranscript = batch.text
+        transcript = batch.text
+        transcriptLearningNotice = nil
+        lastHistoryRecordID = batch.lastHistoryRecordID.flatMap { id in
+            history.records.contains(where: { $0.id == id }) ? id : nil
+        }
+        lastTranscriptPendingID = combinedPending.id
+        lastTranscriptOutputIsResolved = false
+
+        guard beginDeliveryEscrowAttempt(combinedPending.id) else {
+            presentPendingTranscript(
+                combinedPending,
+                target: batch.target,
+                preparedChunk: batch.combinedPreparedChunk,
+                hudCardID: batch.primaryHUDCardID,
+                hudOrdinal: batch.hudOrdinal,
+                recordingDuration: batch.recordingDuration
+            )
+            recordCompletedFailure(
+                recoveryNotice ?? "The combined delivery handoff could not be marked safely.",
+                deviceName: batch.deviceName,
+                recordingDuration: batch.recordingDuration,
+                transcriptionDuration: batch.transcriptionDuration
+            )
+            return
+        }
+
+        let completesHUDDictation = hudPipeline.finishesDrainingFace(
+            withWorkIDs: batch.hudCardIDs
+        )
+        activeDeliveryEscrowIDs.insert(combinedPending.id)
+        let heldClipboardOwner = MacHeldClipboardIdentity(
+            transcriptID: combinedPending.id,
+            createdAt: batch.createdAt,
+            sourceText: batch.text
+        )
+        let deliveryOutcome = await pasteController.deliver(
+            batch.preparedChunks,
+            capturedTarget: batch.target,
+            autoPaste: autoPaste,
+            policyForTarget: { self.deliveryPolicy(for: $0) },
+            copyOnHold: true,
+            heldClipboardOwner: heldClipboardOwner
+        )
+        let delivery = deliveryOutcome.result
+        let deliveredTarget = deliveryOutcome.target
+        activeDeliveryEscrowIDs.remove(combinedPending.id)
+
+        if delivery.isDelivered, completesHUDDictation {
+            markHUDCardsDelivered(batch.hudCardIDs)
+        }
+
+        var detail = delivery.detail
+        if case let .held(reason) = delivery {
+            restoreDeliveryEscrowPending(combinedPending.id)
+            let target = deliveredTarget ?? batch.target
+            if let target {
+                hold(
+                    batch.text,
+                    preparedChunk: batch.combinedPreparedChunk,
+                    for: target,
+                    pendingID: combinedPending.id,
+                    createdAt: batch.createdAt,
+                    hudCardID: batch.primaryHUDCardID,
+                    hudOrdinal: batch.hudOrdinal,
+                    recordingDuration: batch.recordingDuration,
+                    copyOnPersistenceFailure: false
+                )
+                finishHUDCards(batch.hudCardIDs.subtracting([batch.primaryHUDCardID]))
+                detail = "Held the complete dictation for \(target.applicationName) — \(reason.explanation)"
+            } else {
+                presentPendingTranscript(
+                    pendingTranscriptStore.transcript(withID: combinedPending.id)
+                        ?? combinedPending,
+                    target: nil,
+                    preparedChunk: batch.combinedPreparedChunk,
+                    hudCardID: batch.primaryHUDCardID,
+                    hudOrdinal: batch.hudOrdinal,
+                    recordingDuration: batch.recordingDuration,
+                    showTransientHUD: true
+                )
+                finishHUDCards(batch.hudCardIDs.subtracting([batch.primaryHUDCardID]))
+                detail = "Held the complete dictation for manual placement — \(reason.explanation)"
+            }
+        } else if case let .pasted(_, verified) = delivery,
+                  MacPasteboardRecoveryPolicy.shouldSuspendAutomaticRetry(
+                      deliveryReachedOutputBoundary: true,
+                      pasteWasVerified: verified
+                  ) {
+            presentPendingTranscript(
+                pendingTranscriptStore.transcript(withID: combinedPending.id)
+                    ?? combinedPending,
+                target: deliveredTarget,
+                preparedChunk: batch.combinedPreparedChunk,
+                hudCardID: batch.primaryHUDCardID,
+                hudOrdinal: batch.hudOrdinal,
+                recordingDuration: batch.recordingDuration
+            )
+            finishHUDCards(batch.hudCardIDs.subtracting([batch.primaryHUDCardID]))
+            detail = "\(delivery.detail); complete combined recovery copy retained"
+        } else if case .clipboardFallback = delivery {
+            _ = finishDeliveryEscrow(combinedPending.id)
+            finishHUDCards(batch.hudCardIDs.subtracting([batch.primaryHUDCardID]))
+            showClipboardFallbackHUD(
+                id: batch.primaryHUDCardID,
+                ordinal: batch.hudOrdinal,
+                createdAt: batch.createdAt,
+                recordingDuration: batch.recordingDuration
+            )
+            refreshHeldClipboardOwnership()
+        } else if case .clipboardFailed = delivery {
+            restoreDeliveryEscrowPending(combinedPending.id)
+            presentPendingTranscript(
+                pendingTranscriptStore.transcript(withID: combinedPending.id)
+                    ?? combinedPending,
+                target: deliveredTarget,
+                preparedChunk: batch.combinedPreparedChunk,
+                hudCardID: batch.primaryHUDCardID,
+                hudOrdinal: batch.hudOrdinal,
+                recordingDuration: batch.recordingDuration
+            )
+            finishHUDCards(batch.hudCardIDs.subtracting([batch.primaryHUDCardID]))
+        } else {
+            _ = finishDeliveryEscrow(combinedPending.id)
+            finishHUDCards(batch.hudCardIDs)
+            if let target = deliveredTarget {
+                detail = "\(delivery.detail) → \(target.applicationName)"
+            }
+        }
+
+        if let languageConfidenceNotice = batch.languageConfidenceNotice {
+            detail += " \(languageConfidenceNotice)"
+        }
+        if delivery.isDelivered, completesHUDDictation {
+            sounds.playDelivered()
+            announceHUDEvent(ordinal: batch.hudOrdinal, action: "was delivered")
+        }
+
+        if let interruption = batch.interruption {
+            attempts = reliabilityStore.prepend(
+                MacReliabilityAttempt(
+                    deviceName: batch.deviceName,
+                    recordingDuration: batch.recordingDuration,
+                    transcriptionDuration: batch.transcriptionDuration,
+                    outcome: .failure,
+                    detail: "A segment stopped early; the captured dictation was joined and handled together. \(detail). \(interruption)"
+                )
+            )
+            if !phase.isBusy {
+                sounds.playFailed()
+                phase = .failed("A segment stopped early — the captured dictation remains together. \(detail).")
+            }
+            return
+        }
+
+        if delivery.requiresDeliveryAttention {
+            attempts = reliabilityStore.prepend(
+                MacReliabilityAttempt(
+                    deviceName: batch.deviceName,
+                    recordingDuration: batch.recordingDuration,
+                    transcriptionDuration: batch.transcriptionDuration,
+                    outcome: .failure,
+                    detail: detail
+                )
+            )
+            guard !phase.isBusy else { return }
+            sounds.playFailed()
+            phase = .failed(detail)
+            return
+        }
+
+        attempts = reliabilityStore.prepend(
+            MacReliabilityAttempt(
+                deviceName: batch.deviceName,
+                recordingDuration: batch.recordingDuration,
+                transcriptionDuration: batch.transcriptionDuration,
+                outcome: .success,
+                detail: detail
+            )
+        )
+        guard !phase.isBusy else { return }
+        phase = .succeeded(detail)
+        scheduleReadyReset()
+    }
+
+    /// Replaces all per-segment pending rows with one combined row in one
+    /// document write. The original IDs remain intact if persistence fails.
+    private func consolidateDeliveryEscrows(
+        for batch: MacFinishedDictationBatch
+    ) -> MacPendingTranscript? {
+        guard let combinedID = batch.lastDeliveryEscrowID else { return nil }
+        let combined = MacPendingTranscript(
+            id: combinedID,
+            text: batch.text,
+            destinationApplicationName: batch.target?.applicationName
+                ?? "Current application",
+            destinationBundleIdentifier: batch.target?.bundleIdentifier,
+            createdAt: batch.createdAt
+        )
+        var proposed = pendingTranscriptStore.transcripts.filter {
+            !batch.deliveryEscrowIDs.contains($0.id)
+        }
+        proposed.append(combined)
+        do {
+            try pendingTranscriptStore.replaceAll(with: proposed)
+            heldTranscripts.removeAll { batch.deliveryEscrowIDs.contains($0.id) }
+            refreshHeldClipboardOwnership()
+            return combined
+        } catch {
+            recoveryNotice = "The paused segments could not be joined into one durable delivery handoff, so nothing was output: \(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    private func blockJoinedDelivery(
+        _ batch: MacFinishedDictationBatch,
+        detail: String
+    ) {
+        for segment in batch.segments {
+            if let escrowID = segment.deliveryEscrowID,
+               let pending = pendingTranscriptStore.transcript(withID: escrowID) {
+                presentPendingTranscript(
+                    pending,
+                    target: segment.target,
+                    preparedChunk: segment.preparedChunk,
+                    hudCardID: segment.hudCardID,
+                    hudOrdinal: segment.hudOrdinal,
+                    recordingDuration: segment.recordingDuration
+                )
+            } else {
+                finishHUDCard(segment.hudCardID)
+            }
+        }
+        recordCompletedFailure(
+            detail,
+            deviceName: batch.deviceName,
+            recordingDuration: batch.recordingDuration,
+            transcriptionDuration: batch.transcriptionDuration
+        )
+    }
+
     private func deliver(_ finished: MacFinishedDictation) async {
         guard !finished.text.isEmpty else {
             finishHUDCard(finished.hudCardID)
@@ -3451,6 +3962,9 @@ final class MacAppModel: ObservableObject {
             )
             return
         }
+        let completesHUDDictation = hudPipeline.finishesDrainingFace(
+            withWorkID: finished.hudCardID
+        )
 
         // Post-processing and a durable text commit happened before recovery
         // audio was removed, so this is the exact recoverable delivery text.
@@ -3614,7 +4128,7 @@ final class MacAppModel: ObservableObject {
         let delivery = deliveryOutcome.result
         let deliveredTarget = deliveryOutcome.target
         activeDeliveryEscrowIDs.remove(deliveryEscrowID)
-        if delivery.isDelivered {
+        if delivery.isDelivered, completesHUDDictation {
             markHUDCardsDelivered(Set([finished.hudCardID]))
         }
         var detail = delivery.detail
@@ -3733,7 +4247,7 @@ final class MacAppModel: ObservableObject {
         if let languageConfidenceNotice = finished.languageConfidenceNotice {
             detail += " \(languageConfidenceNotice)"
         }
-        if delivery.isDelivered {
+        if delivery.isDelivered, completesHUDDictation {
             sounds.playDelivered()
             announceHUDEvent(ordinal: finished.hudOrdinal, action: "was delivered")
         }

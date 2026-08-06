@@ -28,9 +28,11 @@ final class MacSoundEffects: ObservableObject {
     /// alert-volume channel, which can be muted even while ordinary audio is
     /// audible and would make every SpeakPaste cue disappear.
     private let captureLive: AVAudioPlayer?
-    private let captureReleased: AVAudioPlayer?
     private let deliveryVerified: AVAudioPlayer?
     private let needsAttention: AVAudioPlayer?
+    private let waitTick: AVAudioPlayer?
+    private let dictationHeld: AVAudioPlayer?
+    private let dismissFold: AVAudioPlayer?
     /// The closing face's pair. The patter is the only continuous sound in the
     /// product: it loops for exactly as long as the typing dots are on screen,
     /// which is what lets the user leave the HUD behind and still know the
@@ -48,9 +50,11 @@ final class MacSoundEffects: ObservableObject {
             : defaults.bool(forKey: Self.enabledKey)
 
         captureLive = Self.loadSound(named: "capture-live")
-        captureReleased = Self.loadSound(named: "capture-released")
         deliveryVerified = Self.loadSound(named: "delivery-verified")
         needsAttention = Self.loadSound(named: "needs-attention")
+        waitTick = Self.loadSound(named: "wait-tick")
+        dictationHeld = Self.loadSound(named: "dictation-held")
+        dismissFold = Self.loadSound(named: "dismiss-fold")
         typingPatter = Self.loadSound(named: "typing-patter")
         deliveryPlop = Self.loadSound(named: "delivery-plop")
         typingPatter?.numberOfLoops = -1
@@ -60,8 +64,22 @@ final class MacSoundEffects: ObservableObject {
         play(captureLive)
     }
 
-    func playRecordingStopped() {
-        play(captureReleased)
+    /// iPhone-only tap acknowledgment. It means "heard you, not live yet";
+    /// capture-live still gets the normal ping after Continuity is ready.
+    func playWaitTick() {
+        play(waitTick)
+    }
+
+    /// The microphone is free and the dictation remains owed to the user.
+    func playDictationHeld() {
+        play(dictationHeld)
+    }
+
+    /// The low fold sound, fired only once the live microphone has actually
+    /// been released (or immediately when an already-resting face is folded).
+    func playDismissed() {
+        stopTypingPatter()
+        play(dismissFold)
     }
 
     /// The arrival. A soft falling plop, not the rising delivery ping: against

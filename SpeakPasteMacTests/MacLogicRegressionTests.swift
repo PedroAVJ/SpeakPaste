@@ -229,6 +229,35 @@ final class MacTranscriptPostProcessorRegressionTests: XCTestCase {
         )
     }
 
+    func testPreparedChunkCombineClosesOnlyInternalSegmentSeams() {
+        let combined = MacTranscriptPostProcessor.combine(
+            ["one", "two.", "three"].map { prepare($0) }
+        )
+
+        XCTAssertEqual(combined.text, "one two. Three")
+        XCTAssertEqual(
+            MacTranscriptPostProcessor.fit(combined, after: "Draft"),
+            " one two. Three"
+        )
+    }
+
+    func testPreparedChunkCombinePreservesFirstReplacementCasing() {
+        let combined = MacTranscriptPostProcessor.combine([
+            prepare(
+                "iphone",
+                replacements: [replacement(spoken: "iphone", written: "iPhone")]
+            ),
+            prepare("works"),
+        ])
+
+        XCTAssertTrue(combined.preservesLeadingReplacementCase)
+        XCTAssertEqual(combined.text, "iPhone works")
+        XCTAssertEqual(
+            MacTranscriptPostProcessor.fit(combined, after: "Done."),
+            " iPhone works"
+        )
+    }
+
     private func process(
         _ transcript: String,
         replacements: [MacTextReplacement] = [],

@@ -2,8 +2,8 @@ import Combine
 import Foundation
 
 /// SF Symbols used for held-output state. Both preferred symbols predate the
-/// macOS 14 deployment floor. The runtime fallback keeps a misspelled or
-/// unexpectedly unavailable symbol from turning the HUD into an empty glyph.
+/// macOS 14 deployment floor. The runtime fallback keeps a missing symbol from
+/// turning the HUD into an empty capsule.
 enum MacHUDHeldSymbol {
     static let clipboard = "clipboard.fill"
     static let recovery = "doc.text.fill"
@@ -18,7 +18,6 @@ enum MacHUDHeldSymbol {
     }
 }
 
-/// The microphone-facing portion of one HUD card.
 enum MacHUDCaptureActivity: Equatable, Sendable {
     case inactive
     case connecting
@@ -26,47 +25,73 @@ enum MacHUDCaptureActivity: Equatable, Sendable {
     case releasing
 }
 
-/// Runtime-only presentation state for every dictation that still matters to
-/// the floating HUD. Its identifiers are deliberately independent of History,
-/// recovery-journal, and network-attempt identifiers: one card keeps this ID
-/// from the first connection pulse through transcription, held output, or
-/// verified delivery.
+/// The delivery gate for one user-owned dictation. Segment transcription may
+/// complete in any order, but none of it is eligible for output until every
+/// sequence in the closed dictation has produced a result.
+struct MacOrderedDictationBatch: Equatable, Sendable {
+    let sequences: Set<Int>
+
+    var orderedSequences: [Int] { sequences.sorted() }
+
+    func starts(at nextDeliverySequence: Int) -> Bool {
+        orderedSequences.first == nextDeliverySequence
+    }
+
+    func isReady(completedSequences: Set<Int>) -> Bool {
+        !sequences.isEmpty && sequences.isSubset(of: completedSequences)
+    }
+}
+
+/// Runtime-only state for the floating indicator.
+///
+/// A segment is deliberately not a visual card. Several segments can be
+/// transcribing behind one open dictation, but the HUD has one face because the
+/// user still owns one message. Segment entries remain here only so the face can
+/// stay in its draining state until every piece reaches the delivery boundary.
 struct MacHUDPipeline: Equatable, Sendable {
-    /// The wordless answer to pressing the other source key while a microphone
-    /// is already hot. Nothing switches: the nudge exists to say that switching
-    /// is pause-then-resume, not a mid-recording handover.
     struct SourceNudge: Equatable, Sendable {
-        let id: UUID
         let attempted: MacInputMode
         let live: MacInputMode?
         let startedAt: Date
     }
 
-    /// A dictation that has released the microphone with work banked. It has
-    /// no start-relative lifetime: resting is a place the stack stays.
-    struct Resting: Equatable, Sendable {
-        let id: UUID
-        let startedAt: Date
-    }
-
     struct Capture: Equatable, Sendable {
+        /// Recorder request/segment identity. This may change on resume.
         let id: UUID
         let ordinal: Int?
+        let source: MacInputMode
         var activity: MacHUDCaptureActivity
         var stageStartedAt: Date
     }
 
+    enum FaceStage: Equatable, Sendable {
+        case capture(
+            source: MacInputMode,
+            activity: MacHUDCaptureActivity,
+            stageStartedAt: Date
+        )
+        case resting(startedAt: Date)
+        case draining(startedAt: Date)
+        case held(startedAt: Date)
+    }
+
+    struct Face: Equatable, Identifiable, Sendable {
+        /// Stable for the whole dictation, including every pause and resume.
+        let id: UUID
+        let createdAt: Date
+        var stage: FaceStage
+    }
+
     enum DictationStage: Equatable, Sendable {
         case transcribing
-        /// The network result is ready but an older spoken ticket still owns
-        /// the delivery turn. Keeping this stage visible closes the old hole
-        /// where an out-of-order result vanished before it could be inserted.
         case awaitingDelivery
         case held
     }
 
     struct Dictation: Equatable, Identifiable, Sendable {
+        /// Segment/work identity, not a HUD identity.
         let id: UUID
+        var faceID: UUID?
         let ordinal: Int?
         let createdAt: Date
         var stage: DictationStage
@@ -76,19 +101,32 @@ struct MacHUDPipeline: Equatable, Sendable {
     }
 
     private(set) var sourceNudge: SourceNudge?
-    private(set) var resting: Resting?
+    private(set) var face: Face?
     private(set) var capture: Capture?
     private(set) var dictations: [Dictation] = []
 
+    var isDraining: Bool {
+        guard let face else { return false }
+        if case .draining = face.stage { return true }
+        return false
+    }
+
+    var isTyping: Bool { isDraining }
+
+    var visibleFaceID: UUID? { face?.id }
+
     var heldIDs: [UUID] {
-        orderedDictations
-            .filter { $0.stage == .held }
-            .map(\.id)
+        dictations.filter { $0.stage == .held }.map(\.id)
     }
 
     var orderedDictations: [Dictation] {
         dictations.enumerated().sorted { lhs, rhs in
-            Self.isOlder(lhs.element, than: rhs.element, lhsOffset: lhs.offset, rhsOffset: rhs.offset)
+            Self.isOlder(
+                lhs.element,
+                than: rhs.element,
+                lhsOffset: lhs.offset,
+                rhsOffset: rhs.offset
+            )
         }.map(\.element)
     }
 
@@ -98,36 +136,59 @@ struct MacHUDPipeline: Equatable, Sendable {
         at date: Date = Date()
     ) {
         sourceNudge = SourceNudge(
-            id: UUID(),
             attempted: attempted,
             live: live,
             startedAt: date
         )
     }
 
-    /// Idempotent, and deliberately so: re-entering rest must not restart any
-    /// animation or replace the card's identity, because pause is the stack
-    /// refusing to leave rather than a new event.
+    /// Resting keeps the same face. It is not another card and it has no
+    /// deadline; the next source key will update this face back to capture.
     mutating func beginResting(at date: Date = Date()) {
-        guard resting == nil else { return }
-        resting = Resting(id: UUID(), startedAt: date)
+        guard var face else { return }
+        if case .resting = face.stage { return }
+        face.stage = .resting(startedAt: date)
+        self.face = face
+        capture = nil
+        sourceNudge = nil
     }
 
-    mutating func endResting() {
-        resting = nil
-    }
+    /// Phase changes call this before `beginCapture`. It intentionally does not
+    /// erase the face: doing so would break identity across pause/resume.
+    mutating func endResting() {}
 
     mutating func beginCapture(
         id: UUID,
         ordinal: Int?,
+        source: MacInputMode,
         at date: Date = Date()
     ) {
         capture = Capture(
             id: id,
             ordinal: ordinal,
+            source: source,
             activity: .connecting,
             stageStartedAt: date
         )
+        if var face, face.canReopen {
+            face.stage = .capture(
+                source: source,
+                activity: .connecting,
+                stageStartedAt: date
+            )
+            self.face = face
+        } else {
+            face = Face(
+                id: id,
+                createdAt: date,
+                stage: .capture(
+                    source: source,
+                    activity: .connecting,
+                    stageStartedAt: date
+                )
+            )
+        }
+        sourceNudge = nil
     }
 
     mutating func updateCapture(
@@ -137,14 +198,47 @@ struct MacHUDPipeline: Equatable, Sendable {
     ) {
         guard var current = capture, current.id == id else { return }
         guard current.activity != activity else { return }
+        // The Mac source glyph is one courtesy beat measured from the keypress,
+        // not a second half-second delay after the recorder reports live. The
+        // iPhone has a real wait edge, while Releasing starts its own cap.
+        let stageStartedAt = activity == .listening && current.source == .mac
+            ? current.stageStartedAt
+            : date
         current.activity = activity
-        current.stageStartedAt = date
+        current.stageStartedAt = stageStartedAt
         capture = current
+        guard var face else { return }
+        face.stage = .capture(
+            source: current.source,
+            activity: activity,
+            stageStartedAt: stageStartedAt
+        )
+        self.face = face
     }
 
     mutating func discardCapture(id: UUID?) {
         guard let id, capture?.id == id else { return }
         capture = nil
+    }
+
+    mutating func beginDraining(at date: Date = Date()) {
+        guard var face else { return }
+        face.stage = .draining(startedAt: date)
+        self.face = face
+        capture = nil
+        sourceNudge = nil
+    }
+
+    /// Removes the face immediately and detaches its segment work. Completion
+    /// may still populate recovery, but it cannot replay the dismissed HUD.
+    mutating func dismissFace() {
+        guard let faceID = face?.id else { return }
+        face = nil
+        capture = nil
+        sourceNudge = nil
+        for index in dictations.indices where dictations[index].faceID == faceID {
+            dictations[index].faceID = nil
+        }
     }
 
     mutating func beginTranscription(
@@ -156,7 +250,9 @@ struct MacHUDPipeline: Equatable, Sendable {
     ) {
         discardCapture(id: id)
         let duration = recordingDuration.isFinite ? max(0, recordingDuration) : 0
+        let faceID = face?.id
         if let index = dictations.firstIndex(where: { $0.id == id }) {
+            dictations[index].faceID = dictations[index].faceID ?? faceID
             dictations[index].stage = .transcribing
             dictations[index].stageStartedAt = date
             dictations[index].transcribingStartedAt = date
@@ -166,6 +262,7 @@ struct MacHUDPipeline: Equatable, Sendable {
         dictations.append(
             Dictation(
                 id: id,
+                faceID: faceID,
                 ordinal: ordinal,
                 createdAt: createdAt,
                 stage: .transcribing,
@@ -190,35 +287,97 @@ struct MacHUDPipeline: Equatable, Sendable {
         recordingDuration: TimeInterval = 0,
         at date: Date = Date()
     ) {
+        let resolvedFaceID: UUID?
         if let index = dictations.firstIndex(where: { $0.id == id }) {
             dictations[index].stage = .held
             dictations[index].stageStartedAt = date
-            return
-        }
-        dictations.append(
-            Dictation(
-                id: id,
-                ordinal: ordinal,
-                createdAt: createdAt,
-                stage: .held,
-                stageStartedAt: date,
-                transcribingStartedAt: date,
-                recordingDuration: recordingDuration.isFinite
-                    ? max(0, recordingDuration)
-                    : 0
+            resolvedFaceID = dictations[index].faceID
+        } else {
+            let faceID = face?.id ?? id
+            dictations.append(
+                Dictation(
+                    id: id,
+                    faceID: faceID,
+                    ordinal: ordinal,
+                    createdAt: createdAt,
+                    stage: .held,
+                    stageStartedAt: date,
+                    transcribingStartedAt: date,
+                    recordingDuration: recordingDuration.isFinite
+                        ? max(0, recordingDuration)
+                        : 0
+                )
             )
-        )
+            resolvedFaceID = faceID
+            if face == nil {
+                face = Face(
+                    id: faceID,
+                    createdAt: createdAt,
+                    stage: .held(startedAt: date)
+                )
+            }
+        }
+        guard let resolvedFaceID, var face, face.id == resolvedFaceID else { return }
+        face.stage = .held(startedAt: date)
+        self.face = face
+        capture = nil
+        sourceNudge = nil
     }
 
     mutating func finish(id: UUID) {
         if capture?.id == id { capture = nil }
+        let removedFaceID = dictations.first(where: { $0.id == id })?.faceID
         dictations.removeAll { $0.id == id }
+        removeFinishedFaceIfNeeded(candidateID: removedFaceID)
     }
 
     mutating func finish(ids: Set<UUID>) {
         guard !ids.isEmpty else { return }
         if let capture, ids.contains(capture.id) { self.capture = nil }
+        let candidateFaceIDs = Set(
+            dictations.lazy.filter { ids.contains($0.id) }.compactMap(\.faceID)
+        )
         dictations.removeAll { ids.contains($0.id) }
+        for faceID in candidateFaceIDs {
+            removeFinishedFaceIfNeeded(candidateID: faceID)
+        }
+    }
+
+    /// Maps segment receipts back to the one user-visible dictation identity.
+    func faceIDs(forWorkIDs ids: Set<UUID>) -> Set<UUID> {
+        Set(ids.compactMap { id in
+            if face?.id == id { return id }
+            return dictations.first(where: { $0.id == id })?.faceID
+        })
+    }
+
+    /// True only when removing this work item will finish the one draining face.
+    func finishesDrainingFace(withWorkID id: UUID) -> Bool {
+        finishesDrainingFace(withWorkIDs: Set([id]))
+    }
+
+    /// True when one atomic output transaction owns every remaining piece of
+    /// the visible draining dictation.
+    func finishesDrainingFace(withWorkIDs ids: Set<UUID>) -> Bool {
+        guard let face, case .draining = face.stage else { return false }
+        let workIDs = Set(
+            dictations.lazy.filter { $0.faceID == face.id }.map(\.id)
+        )
+        return !workIDs.isEmpty && workIDs.isSubset(of: ids)
+    }
+
+    private mutating func removeFinishedFaceIfNeeded(candidateID: UUID?) {
+        guard let candidateID, let currentFace = face, currentFace.id == candidateID else {
+            return
+        }
+        guard !dictations.contains(where: { $0.faceID == candidateID }) else { return }
+        switch currentFace.stage {
+        case .draining, .held:
+            face = nil
+            sourceNudge = nil
+        case .capture, .resting:
+            break
+        }
     }
 
     private static func isOlder(
@@ -241,238 +400,149 @@ struct MacHUDPipeline: Equatable, Sendable {
     }
 }
 
-/// The resolved, bounded depth stack consumed by SwiftUI. It is a projection
-/// of the full pipeline, never the authority for delivery state.
+private extension MacHUDPipeline.Face {
+    /// Capture/rest/drain are phases of one still-open dictation. Held is a
+    /// terminal recovery acknowledgment; a new source press should visually
+    /// morph the shared capsule but must start a new model identity.
+    var canReopen: Bool {
+        switch stage {
+        case .capture, .resting, .draining:
+            true
+        case .held:
+            false
+        }
+    }
+}
+
+/// The one-card projection consumed by SwiftUI. `cards` remains an array so the
+/// controller can keep its small diffing surface, but its budget is one by
+/// contract: an open dictation is never serialized as a stack of segments.
 struct MacHUDStack: Equatable, Sendable {
     enum CardContent: Equatable, Sendable {
         case sourceNudge(attempted: MacInputMode, live: MacInputMode?)
-        case capture(MacHUDCaptureActivity)
-        /// The dictation is resting: still, dim, and — because no microphone is
-        /// live — carrying no source glyph at all.
-        case resting
-        case transcription(
-            stage: MacHUDPipeline.DictationStage,
-            enqueuedAt: Date,
-            recordingDuration: TimeInterval
+        case capture(
+            source: MacInputMode,
+            activity: MacHUDCaptureActivity,
+            stageStartedAt: Date
         )
-        /// One just-finished chunk could not leave safely. Durable queue
-        /// depth belongs to the dashboard; the floating HUD reports only the
-        /// current event and never becomes a notification counter.
+        case resting
+        case draining
         case held
+        case positioning
     }
 
     struct Card: Equatable, Identifiable, Sendable {
         let id: UUID
         let content: CardContent
-        /// Zero is frontmost. Depth drives scale, lift, and dimming.
-        let depth: Int
-        /// Work folded between the front and the oldest visible rear cards.
-        let hiddenDeeperCount: Int
-        let ordinal: Int?
     }
 
-    static let visibleCardBudget = 3
+    static let visibleCardBudget = 1
     static let sourceNudgeVisibilityCap: TimeInterval = 1.4
+    static let macStartVisibilityCap: TimeInterval = 0.5
     static let connectingVisibilityCap: TimeInterval = 20
     static let releasingVisibilityCap: TimeInterval = 15
-    static let transcriptionVisibilityCap: TimeInterval = 90
+    static let drainingVisibilityCap: TimeInterval = 90
     static let heldVisibilityCap: TimeInterval = 2
-    static let empty = MacHUDStack(
-        cards: [],
-        totalTranscriptionCount: 0,
-        hasTransientHold: false,
-        isResting: false
+    static let empty = MacHUDStack(cards: [])
+    static let positioning = MacHUDStack(
+        cards: [
+            Card(
+                id: UUID(uuidString: "5EC18866-1373-414D-984D-82EA8858F795")!,
+                content: .positioning
+            )
+        ]
     )
 
-    /// Front-to-back. The rearmost visible work is always the oldest, which is
-    /// the next spoken ticket eligible to deliver.
     let cards: [Card]
-    let totalTranscriptionCount: Int
-    let hasTransientHold: Bool
-    let isResting: Bool
 
     var isEmpty: Bool { cards.isEmpty }
-    var liveDictationCount: Int { totalTranscriptionCount }
+    var isResting: Bool { cards.first?.content == .resting }
+    var isDraining: Bool { cards.first?.content == .draining }
     var frontIsReleasing: Bool {
-        cards.first?.content == .capture(.releasing)
+        guard case .capture(_, .releasing, _) = cards.first?.content else {
+            return false
+        }
+        return true
     }
 
     static func resolve(
         pipeline: MacHUDPipeline,
         at date: Date = Date()
     ) -> MacHUDStack {
-        struct Entry {
-            let id: UUID
-            let content: CardContent
-            let ordinal: Int?
-            let createdAt: Date
-        }
+        guard let face = pipeline.face else { return .empty }
+        let content: CardContent
 
-        let activeDictations = pipeline.orderedDictations.filter { dictation in
-            switch dictation.stage {
-            case .held:
-                date.timeIntervalSince(dictation.stageStartedAt)
-                    < heldVisibilityCap
-            case .transcribing, .awaitingDelivery:
-                date.timeIntervalSince(dictation.transcribingStartedAt)
-                    < transcriptionVisibilityCap
-            }
-        }
-        let held = activeDictations.filter { $0.stage == .held }
-        let transcribing = activeDictations.filter { $0.stage != .held }
-
-        var oldestFirst: [Entry] = transcribing.map { dictation in
-            Entry(
-                id: dictation.id,
-                content: .transcription(
-                    stage: dictation.stage,
-                    enqueuedAt: dictation.transcribingStartedAt,
-                    recordingDuration: dictation.recordingDuration
-                ),
-                ordinal: dictation.ordinal,
-                createdAt: dictation.createdAt
-            )
-        }
-        // Several chunks may become held close together, but the HUD reports
-        // only the newest event. The ordered queue stays in the dashboard.
-        if let newestHeld = held.max(by: { lhs, rhs in
-            if lhs.stageStartedAt == rhs.stageStartedAt {
-                return lhs.createdAt < rhs.createdAt
-            }
-            return lhs.stageStartedAt < rhs.stageStartedAt
-        }) {
-            oldestFirst.append(
-                Entry(
-                    id: newestHeld.id,
-                    content: .held,
-                    ordinal: newestHeld.ordinal,
-                    createdAt: newestHeld.createdAt
-                )
-            )
-        }
-        oldestFirst.sort { lhs, rhs in
-            switch (lhs.ordinal, rhs.ordinal) {
-            case let (left?, right?) where left != right:
-                return left < right
-            case (_?, nil):
-                return false
-            case (nil, _?):
-                return true
-            default:
-                return lhs.createdAt < rhs.createdAt
-            }
-        }
-
-        var frontToBack = Array(oldestFirst.reversed())
-        // Resting and capture are mutually exclusive by construction: a resting
-        // dictation has already handed the microphone back.
-        if let resting = pipeline.resting {
-            frontToBack.insert(
-                Entry(
-                    id: resting.id,
-                    content: .resting,
-                    ordinal: nil,
-                    createdAt: resting.startedAt
-                ),
-                at: 0
-            )
-        }
-        if let capture = visibleCapture(in: pipeline, at: date) {
-            frontToBack.insert(
-                Entry(
-                    id: capture.id,
-                    content: .capture(capture.activity),
-                    ordinal: capture.ordinal,
-                    createdAt: capture.stageStartedAt
-                ),
-                at: 0
-            )
-        }
-        if let nudge = visibleSourceNudge(in: pipeline, at: date) {
-            frontToBack.insert(
-                Entry(
-                    id: nudge.id,
-                    content: .sourceNudge(
-                        attempted: nudge.attempted,
-                        live: nudge.live
-                    ),
-                    ordinal: nil,
-                    createdAt: nudge.startedAt
-                ),
-                at: 0
-            )
-        }
-        guard !frontToBack.isEmpty else { return .empty }
-
-        let visible: [Entry]
-        let hiddenCount: Int
-        if frontToBack.count <= visibleCardBudget {
-            visible = frontToBack
-            hiddenCount = 0
+        if let nudge = visibleSourceNudge(in: pipeline, at: date),
+           case .capture = face.stage {
+            content = .sourceNudge(attempted: nudge.attempted, live: nudge.live)
         } else {
-            // Keep the semantic front plus the two oldest cards. Hidden middle
-            // work is summarized on the oldest/rearmost visible surface.
-            visible = [frontToBack[0]] + frontToBack.suffix(visibleCardBudget - 1)
-            hiddenCount = frontToBack.count - visibleCardBudget
-        }
-
-        return MacHUDStack(
-            cards: visible.enumerated().map { depth, entry in
-                Card(
-                    id: entry.id,
-                    content: entry.content,
-                    depth: depth,
-                    hiddenDeeperCount: depth == visible.count - 1 ? hiddenCount : 0,
-                    ordinal: entry.ordinal
+            switch face.stage {
+            case let .capture(source, activity, stageStartedAt):
+                let elapsed = date.timeIntervalSince(stageStartedAt)
+                let connectingCap = source == .mac
+                    ? macStartVisibilityCap
+                    : connectingVisibilityCap
+                if activity == .inactive
+                    || (activity == .connecting && elapsed >= connectingCap)
+                    || (activity == .releasing && elapsed >= releasingVisibilityCap) {
+                    return .empty
+                }
+                content = .capture(
+                    source: source,
+                    activity: activity,
+                    stageStartedAt: stageStartedAt
                 )
-            },
-            totalTranscriptionCount: transcribing.count,
-            hasTransientHold: !held.isEmpty,
-            isResting: pipeline.resting != nil
-        )
+            case .resting:
+                content = .resting
+            case let .draining(startedAt):
+                guard date.timeIntervalSince(startedAt) < drainingVisibilityCap else {
+                    return .empty
+                }
+                content = .draining
+            case let .held(startedAt):
+                guard date.timeIntervalSince(startedAt) < heldVisibilityCap else {
+                    return .empty
+                }
+                content = .held
+            }
+        }
+        return MacHUDStack(cards: [Card(id: face.id, content: content)])
     }
 
     static func nextExpiry(
         in pipeline: MacHUDPipeline,
         after date: Date = Date()
     ) -> Date? {
-        var deadlines = pipeline.dictations.compactMap { dictation -> Date? in
-            let deadline: Date
-            switch dictation.stage {
-            case .held:
-                deadline = dictation.stageStartedAt.addingTimeInterval(
-                    heldVisibilityCap
-                )
-            case .transcribing, .awaitingDelivery:
-                deadline = dictation.transcribingStartedAt.addingTimeInterval(
-                    transcriptionVisibilityCap
-                )
-            }
-            return deadline > date ? deadline : nil
-        }
-        if let capture = pipeline.capture {
-            let cap: TimeInterval?
-            switch capture.activity {
-            case .connecting:
-                cap = connectingVisibilityCap
-            case .releasing:
-                cap = releasingVisibilityCap
-            case .listening, .inactive:
-                cap = nil
-            }
-            if let cap {
-                let deadline = capture.stageStartedAt.addingTimeInterval(cap)
-                if deadline > date { deadlines.append(deadline) }
-            }
-        }
+        var deadlines: [Date] = []
         if let nudge = pipeline.sourceNudge {
-            let deadline = nudge.startedAt.addingTimeInterval(
-                sourceNudgeVisibilityCap
-            )
+            let deadline = nudge.startedAt.addingTimeInterval(sourceNudgeVisibilityCap)
             if deadline > date { deadlines.append(deadline) }
         }
-        // A resting dictation contributes no deadline on purpose. It leaves the
-        // screen when the user ends or discards it, never when a timer says so.
+        if let face = pipeline.face {
+            let deadline: Date?
+            switch face.stage {
+            case let .capture(source, activity, stageStartedAt):
+                switch activity {
+                case .connecting:
+                    deadline = stageStartedAt.addingTimeInterval(
+                        source == .mac
+                            ? macStartVisibilityCap
+                            : connectingVisibilityCap
+                    )
+                case .releasing:
+                    deadline = stageStartedAt.addingTimeInterval(releasingVisibilityCap)
+                case .listening, .inactive:
+                    deadline = nil
+                }
+            case .resting:
+                deadline = nil
+            case let .draining(startedAt):
+                deadline = startedAt.addingTimeInterval(drainingVisibilityCap)
+            case let .held(startedAt):
+                deadline = startedAt.addingTimeInterval(heldVisibilityCap)
+            }
+            if let deadline, deadline > date { deadlines.append(deadline) }
+        }
         return deadlines.min()
     }
 
@@ -481,16 +551,14 @@ struct MacHUDStack: Equatable, Sendable {
         heldClipboardBacked: Bool = false
     ) -> String {
         var parts = ["SpeakPaste"]
-        if case .sourceNudge(let attempted, _) = cards.first?.content {
+        guard let content = cards.first?.content else { return parts[0] }
+        switch content {
+        case let .sourceNudge(attempted, _):
             parts.append("Pause before switching to the \(attempted.title) microphone")
-        }
-        if isResting {
-            parts.append("Dictation resting — nothing has been delivered")
-        }
-        if case .capture(let activity) = cards.first?.content {
+        case let .capture(source, activity, _):
             switch activity {
             case .connecting:
-                parts.append("Connecting")
+                parts.append(source == .iPhone ? "Waiting for iPhone microphone" : "Starting Mac microphone")
             case .listening:
                 parts.append("Listening")
             case .releasing:
@@ -499,17 +567,17 @@ struct MacHUDStack: Equatable, Sendable {
                 break
             }
             if let sourceName { parts.append(sourceName) }
-        }
-        if totalTranscriptionCount == 1 {
-            parts.append("1 dictation transcribing")
-        } else if totalTranscriptionCount > 1 {
-            parts.append("\(totalTranscriptionCount) dictations transcribing")
-        }
-        if hasTransientHold {
+        case .resting:
+            parts.append("Dictation resting — nothing has been delivered")
+        case .draining:
+            parts.append("Dictation transcribing for delivery")
+        case .held:
             parts.append("Dictation held")
             if heldClipboardBacked {
                 parts.append("The held dictation is on the clipboard")
             }
+        case .positioning:
+            parts.append("Move mode. Drag the capsule, then choose Done Moving HUD from the menu bar")
         }
         return parts.joined(separator: ", ")
     }
@@ -522,24 +590,6 @@ struct MacHUDStack: Equatable, Sendable {
             .map { resolve(pipeline: $0) }
             .removeDuplicates()
             .eraseToAnyPublisher()
-    }
-
-    private static func visibleCapture(
-        in pipeline: MacHUDPipeline,
-        at date: Date
-    ) -> MacHUDPipeline.Capture? {
-        guard let capture = pipeline.capture, capture.activity != .inactive else {
-            return nil
-        }
-        let elapsed = date.timeIntervalSince(capture.stageStartedAt)
-        switch capture.activity {
-        case .connecting where elapsed >= connectingVisibilityCap:
-            return nil
-        case .releasing where elapsed >= releasingVisibilityCap:
-            return nil
-        default:
-            return capture
-        }
     }
 
     private static func visibleSourceNudge(

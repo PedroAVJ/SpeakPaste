@@ -76,6 +76,9 @@
 		D10000000000000000000057 /* needs-attention.caf in Resources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000057 /* needs-attention.caf */; };
 		D100000000000000000000A1 /* typing-patter.caf in Resources */ = {isa = PBXBuildFile; fileRef = D200000000000000000000A1 /* typing-patter.caf */; };
 		D100000000000000000000A2 /* delivery-plop.caf in Resources */ = {isa = PBXBuildFile; fileRef = D200000000000000000000A2 /* delivery-plop.caf */; };
+		D100000000000000000000A3 /* wait-tick.caf in Resources */ = {isa = PBXBuildFile; fileRef = D200000000000000000000A3 /* wait-tick.caf */; };
+		D100000000000000000000A4 /* dictation-held.caf in Resources */ = {isa = PBXBuildFile; fileRef = D200000000000000000000A4 /* dictation-held.caf */; };
+		D100000000000000000000A5 /* dismiss-fold.caf in Resources */ = {isa = PBXBuildFile; fileRef = D200000000000000000000A5 /* dismiss-fold.caf */; };
 		D10000000000000000000058 /* MacTranscriptionWorkload.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000058 /* MacTranscriptionWorkload.swift */; };
 		D1000000000000000000005D /* MacApplicationPresence.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2000000000000000000005D /* MacApplicationPresence.swift */; };
 		E10000000000000000000001 /* DictationActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000000000000000000001 /* DictationActivityAttributes.swift */; };
@@ -195,6 +198,9 @@
 		D20000000000000000000057 /* needs-attention.caf */ = {isa = PBXFileReference; lastKnownFileType = audio.caf; path = "needs-attention.caf"; sourceTree = "<group>"; };
 		D200000000000000000000A1 /* typing-patter.caf */ = {isa = PBXFileReference; lastKnownFileType = audio.caf; path = "typing-patter.caf"; sourceTree = "<group>"; };
 		D200000000000000000000A2 /* delivery-plop.caf */ = {isa = PBXFileReference; lastKnownFileType = audio.caf; path = "delivery-plop.caf"; sourceTree = "<group>"; };
+		D200000000000000000000A3 /* wait-tick.caf */ = {isa = PBXFileReference; lastKnownFileType = audio.caf; path = "wait-tick.caf"; sourceTree = "<group>"; };
+		D200000000000000000000A4 /* dictation-held.caf */ = {isa = PBXFileReference; lastKnownFileType = audio.caf; path = "dictation-held.caf"; sourceTree = "<group>"; };
+		D200000000000000000000A5 /* dismiss-fold.caf */ = {isa = PBXFileReference; lastKnownFileType = audio.caf; path = "dismiss-fold.caf"; sourceTree = "<group>"; };
 		D20000000000000000000058 /* MacTranscriptionWorkload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacTranscriptionWorkload.swift; sourceTree = "<group>"; };
 		D2000000000000000000005D /* MacApplicationPresence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacApplicationPresence.swift; sourceTree = "<group>"; };
 		D2000000000000000000000F /* SpeakPaste.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SpeakPaste.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -329,6 +335,9 @@
 				D20000000000000000000057 /* needs-attention.caf */,
 				D200000000000000000000A1 /* typing-patter.caf */,
 				D200000000000000000000A2 /* delivery-plop.caf */,
+				D200000000000000000000A3 /* wait-tick.caf */,
+				D200000000000000000000A4 /* dictation-held.caf */,
+				D200000000000000000000A5 /* dismiss-fold.caf */,
 			);
 			path = Sounds;
 			sourceTree = "<group>";
@@ -444,7 +453,7 @@
 
 /* Begin PBXResourcesBuildPhase section */
 		A60000000000000000000002 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A1000000000000000000000B, ); runOnlyForDeploymentPostprocessing = 0; };
-		D60000000000000000000002 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (D1000000000000000000000C, D10000000000000000000054, D10000000000000000000055, D10000000000000000000056, D10000000000000000000057, D100000000000000000000A1, D100000000000000000000A2, ); runOnlyForDeploymentPostprocessing = 0; };
+		D60000000000000000000002 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (D1000000000000000000000C, D10000000000000000000054, D10000000000000000000055, D10000000000000000000056, D10000000000000000000057, D100000000000000000000A1, D100000000000000000000A2, D100000000000000000000A3, D100000000000000000000A4, D100000000000000000000A5, ); runOnlyForDeploymentPostprocessing = 0; };
 		E60000000000000000000002 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = ( ); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXResourcesBuildPhase section */
 

@@ -45,6 +45,9 @@ enum MacFinalizationOutcome: Equatable {
     case close
     /// Abandon the segment without transcribing it, then apply the safe floor.
     case discard
+    /// Close the whole dictation into recovery. The live segment is finalized
+    /// and transcribed too; Escape changes destination, never data retention.
+    case dismiss
 }
 
 /// The four keys that drive a dictation. Each one owns exactly one verb, and

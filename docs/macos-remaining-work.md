@@ -71,33 +71,40 @@ TCC grants, or Application Support.
       while the detected-language review warning appears.
 - [ ] Exercise the capture indicator at top, bottom, left, and right. Confirm the
       active display is chosen correctly, the pill stays click-through, and no
-      state clips at normal accessibility text sizes.
-- [ ] Exercise Connecting, Listening, Releasing, and Transcribing. Confirm the
-      native Liquid Glass surface is used on macOS 26 and the stack stays
-      wordless apart from live-work numeric badges. Confirm the
-      listening waveform follows the real voice level with fast attack and
-      slower release, state changes spring-morph, and each transcription card
-      uses its own directional heuristic progress that never reaches completion
-      before the request does. The indicator must hide at idle and after the
-      last in-flight transcription, success, errors, and offline state; it must
-      never become an error notification. Dictate several rapid chunks and
-      confirm the capture card is always frontmost, earlier transcriptions
-      recede behind it with their own rails, deeper work folds into the "+N"
-      badge on the rearmost card, and only verified deliveries pop from the
-      rear; overflow and timeout changes must fold or crossfade. Force a held
+      state clips at normal accessibility text sizes. From the menu-bar panel,
+      choose Move HUD, drag the capsule to several arbitrary positions and a
+      second display, then choose Done Moving HUD. Confirm the exact position
+      survives an app relaunch, normal HUD states are click-through again, and
+      choosing a fixed Placement clears the custom position.
+- [ ] Exercise Connecting, Listening, Releasing, Resting, and Draining. Confirm
+      the native Liquid Glass surface is used on macOS 26 and the single capsule
+      stays wordless. Confirm the Mac start shows a brief neutral laptop glyph,
+      the iPhone start holds a neutral phone with an amber breathing wait-dot
+      until capture is actually live, and both resolve into the centered real
+      voice waveform with fast attack and slower release. Dictate several rapid
+      segments and confirm they never create cards, rails, slivers, counts, or
+      badges: the capsule keeps one identity for the whole dictation. Pause and
+      confirm the actual waveform freezes in place, gray and sourceless, without
+      timing out. Press fn and confirm it morphs directly into the small typing
+      dots with no gray intermediate; only verified delivery may pop it outward.
+      Reopen while draining and confirm the same capsule stands back up into the
+      live waveform. Press Escape from hot, resting, and draining and confirm the
+      capsule folds inward while all owed text moves to recovery. The indicator
+      must hide at idle, after delivery, and for success, errors, and offline
+      state; it must never become an error notification. Force a held
       chunk and confirm one count-free clipboard glyph appears only while the
       hold owns the private live pasteboard claim, changes to a neutral document
       glyph after another app replaces the clipboard, and disappears within two
       seconds. Relaunch with waiting or uncertain recovery entries and confirm
       none are replayed into the HUD; the dashboard remains authoritative. Hold the
-      model in Connecting and Releasing
-      and confirm those cards hide no later than 20 and 15 seconds after the
-      phases began, respectively. Keep one request transcribing and confirm its
+      Mac start pending and confirm the laptop beat hides after 0.5 seconds;
+      hold iPhone Connecting and Releasing and confirm those faces hide no later
+      than 20 and 15 seconds after the phases began, respectively. Keep one request transcribing and confirm its
       card hides after 90 continuously visible seconds — without hiding
       younger cards — while the dashboard and menu bar continue to report the
-      real work state. With Reduce Motion enabled, confirm depth changes and
-      state changes become restrained crossfades without depth travel and
-      without losing state clarity.
+      real work state. With Reduce Motion enabled, confirm state changes become
+      restrained crossfades without scale travel and without losing state
+      clarity.
 - [ ] Dictate three rapid chunks into one field and confirm delivery remains in
       spoken order even when Scribe completes them out of order. Verify every
       seam against the live caret: words get exactly one needed space,
@@ -123,13 +130,17 @@ TCC grants, or Application Support.
       the cursor at any pause. Press fn and confirm all three arrive at once, in
       spoken order. Confirm the End after a long pause is effectively instant,
       because pausing already started transcription.
-- [ ] With VoiceOver, confirm capture/transcription/held/delivery announcements
-      identify chunk ordinals. With Reduce Motion, confirm stack depth changes
-      and delivery removal crossfade rather than travel or scale.
-- [ ] On MacBook speakers at low volume, confirm capture and release are distinct
-      E5/B5 single pings with no load delay, then a higher E6 single ping plays
-      only after verified insertion. Confirm errors use the only two-note phrase,
-      E4 to B3 low and falling, and disabling Sounds silences the complete family.
+- [ ] With VoiceOver, confirm capture, rest, draining, held, delivery, and
+      dismissal announcements describe the consequential phase without exposing
+      internal segment ordinals. With Reduce Motion, confirm pop and fold become
+      restrained crossfades rather than scale travel.
+- [ ] On MacBook speakers at low volume, confirm the iPhone wait tick is low and
+      level, capture-live gets one rising ping with no load delay, pause gets the
+      low held tone, and Escape gets the muted fold tone. Confirm fn itself is
+      silent, the low irregular typing patter runs only while the dots are up,
+      and the falling delivery plop plays only after verified insertion. Confirm
+      errors use the only two-note phrase, E4 to B3 low and falling, and disabling
+      Sounds silences the complete family.
 - [ ] Verify every vocabulary action: add, search, edit Save/Cancel, paste-list
       Save/Cancel, file-picker Cancel, and remove confirm/Cancel. Check the
       1,000-term ceiling, fewer-than-50-character and five-word limits, forbidden
@@ -213,10 +224,10 @@ for the release evidence.
       any stored mode being consulted. Quit, relaunch, tap right ⌘, and confirm
       the Mac microphone is used — no source may survive a launch.
 - [ ] While recording on the Mac, tap right ⌘ once. Confirm the microphone is
-      released, the segment banks, the HUD front card goes still, dim, and
+      released, the segment banks, the HUD waveform freezes in place, dim, and
       **sourceless**, and nothing is delivered. Leave it resting for several
-      minutes and confirm the card never times out even after the transcription
-      rails behind it expire.
+      minutes and confirm the capsule never times out while the banked segment
+      continues transcribing invisibly.
 - [ ] From that resting state tap right ⌥. Confirm iPhone Connecting then
       Listening begins as the next ordered segment. Tap fn and confirm both
       segments are delivered in spoken order. Repeat in the opposite direction.

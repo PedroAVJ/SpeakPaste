@@ -64,10 +64,10 @@ struct MacTranscriptionWorkload: Equatable, Sendable {
         return .moreRemain(nextHeadID: head.id)
     }
 
-    /// Every outstanding attempt oldest-first. The HUD depth stack renders
-    /// one card per attempt, each with its own heuristic rail; combining
-    /// concurrent jobs into one percentage would imply knowledge the app
-    /// does not have.
+    /// Every outstanding attempt oldest-first. The HUD deliberately does not
+    /// serialize these jobs: banked segments are invisible plumbing and the
+    /// one dictation face becomes typing dots only when the whole message is
+    /// closing. This ordering still governs delivery and recovery.
     var orderedJobs: [Job] {
         jobs.enumerated().sorted { lhs, rhs in
             if lhs.element.enqueuedAt == rhs.element.enqueuedAt {

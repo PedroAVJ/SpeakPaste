@@ -28,11 +28,9 @@ final class MacHUDHeldSymbolTests: XCTestCase {
             MacHUDHeldSymbol.fallback,
         ] {
             XCTAssertNotNil(
-                NSImage(systemSymbolName: name, accessibilityDescription: nil),
-                "Expected supported macOS 14 SF Symbol: \(name)"
+                NSImage(systemSymbolName: name, accessibilityDescription: nil)
             )
         }
-
         XCTAssertEqual(
             MacHUDHeldSymbol.systemName(
                 clipboardBacked: true,
@@ -43,439 +41,420 @@ final class MacHUDHeldSymbolTests: XCTestCase {
     }
 }
 
+final class MacOrderedDictationBatchTests: XCTestCase {
+    func testClosedDictationWaitsForEveryPausedSegment() {
+        let batch = MacOrderedDictationBatch(sequences: [4, 5, 6])
+
+        XCTAssertTrue(batch.starts(at: 4))
+        XCTAssertFalse(batch.isReady(completedSequences: [4, 6]))
+        XCTAssertTrue(batch.isReady(completedSequences: [4, 5, 6, 9]))
+        XCTAssertEqual(batch.orderedSequences, [4, 5, 6])
+    }
+
+    func testLaterClosedDictationCannotOvertakeEarlierTicket() {
+        let batch = MacOrderedDictationBatch(sequences: [8, 9])
+
+        XCTAssertFalse(batch.starts(at: 7))
+        XCTAssertTrue(batch.starts(at: 8))
+    }
+}
+
 final class MacHUDStackTests: XCTestCase {
     private let base = Date(timeIntervalSince1970: 10_000)
 
-    private func pipelineWithTranscriptions(
-        _ entries: [(id: UUID, ordinal: Int, offset: TimeInterval)],
-        duration: TimeInterval = 10
-    ) -> MacHUDPipeline {
-        var pipeline = MacHUDPipeline()
-        for entry in entries {
-            let createdAt = base.addingTimeInterval(entry.offset)
-            pipeline.beginTranscription(
-                id: entry.id,
-                ordinal: entry.ordinal,
-                recordingDuration: duration,
-                createdAt: createdAt,
-                at: createdAt
+    func testEmptyPipelineResolvesToEmptyHUD() {
+        let pipeline = MacHUDPipeline()
+        XCTAssertEqual(MacHUDStack.resolve(pipeline: pipeline, at: base), .empty)
+        XCTAssertNil(MacHUDStack.nextExpiry(in: pipeline, after: base))
+    }
+
+    func testPositioningPreviewIsOneWordlessStableCapsule() {
+        XCTAssertEqual(MacHUDStack.positioning.cards.count, 1)
+        XCTAssertEqual(MacHUDStack.positioning.cards.first?.content, .positioning)
+        XCTAssertEqual(
+            MacHUDStack.positioning.accessibilityLabel(sourceName: nil),
+            "SpeakPaste, Move mode. Drag the capsule, then choose Done Moving HUD from the menu bar"
+        )
+    }
+
+    func testMacAndIPhoneStartsCarryNeutralSourceIdentityInOneCard() {
+        let macID = UUID()
+        var mac = MacHUDPipeline()
+        mac.beginCapture(
+            id: macID,
+            ordinal: 1,
+            source: .mac,
+            at: base
+        )
+        XCTAssertEqual(
+            MacHUDStack.resolve(pipeline: mac, at: base).cards,
+            [
+                MacHUDStack.Card(
+                    id: macID,
+                    content: .capture(
+                        source: .mac,
+                        activity: .connecting,
+                        stageStartedAt: base
+                    )
+                )
+            ]
+        )
+
+        let phoneID = UUID()
+        var phone = MacHUDPipeline()
+        phone.beginCapture(
+            id: phoneID,
+            ordinal: 1,
+            source: .iPhone,
+            at: base
+        )
+        XCTAssertEqual(
+            MacHUDStack.resolve(pipeline: phone, at: base).cards.first?.content,
+            .capture(
+                source: .iPhone,
+                activity: .connecting,
+                stageStartedAt: base
             )
-        }
-        return pipeline
+        )
     }
 
-    func testEmptyPipelineResolvesToEmptyStack() {
-        let stack = MacHUDStack.resolve(pipeline: MacHUDPipeline(), at: base)
+    func testMacCourtesyBeatCapsAtHalfASecondWhileIPhoneWaitsForCaptureLive() {
+        var mac = MacHUDPipeline()
+        let macID = UUID()
+        mac.beginCapture(id: macID, ordinal: 1, source: .mac, at: base)
+        XCTAssertEqual(
+            MacHUDStack.nextExpiry(in: mac, after: base),
+            base.addingTimeInterval(MacHUDStack.macStartVisibilityCap)
+        )
+        XCTAssertTrue(
+            MacHUDStack.resolve(
+                pipeline: mac,
+                at: base.addingTimeInterval(MacHUDStack.macStartVisibilityCap)
+            ).isEmpty
+        )
 
-        XCTAssertTrue(stack.isEmpty)
-        XCTAssertEqual(stack, .empty)
-        XCTAssertNil(MacHUDStack.nextExpiry(in: MacHUDPipeline(), after: base))
+        mac.updateCapture(
+            id: macID,
+            activity: .listening,
+            at: base.addingTimeInterval(0.2)
+        )
+        XCTAssertEqual(
+            MacHUDStack.resolve(
+                pipeline: mac,
+                at: base.addingTimeInterval(0.2)
+            ).cards.first?.content,
+            .capture(
+                source: .mac,
+                activity: .listening,
+                stageStartedAt: base
+            )
+        )
+
+        var phone = MacHUDPipeline()
+        phone.beginCapture(id: UUID(), ordinal: 1, source: .iPhone, at: base)
+        XCTAssertEqual(
+            MacHUDStack.nextExpiry(in: phone, after: base),
+            base.addingTimeInterval(MacHUDStack.connectingVisibilityCap)
+        )
+        XCTAssertFalse(
+            MacHUDStack.resolve(
+                pipeline: phone,
+                at: base.addingTimeInterval(1)
+            ).isEmpty
+        )
     }
 
-    func testWrongSourceNudgeAppearsImmediatelyInFrontAndExpires() {
-        let captureID = UUID()
+    func testOneFaceKeepsItsIdentityAcrossPauseResumeAndNewSegments() {
+        let firstSegment = UUID()
+        let secondSegment = UUID()
         var pipeline = MacHUDPipeline()
-        pipeline.beginCapture(id: captureID, ordinal: 1, at: base)
+        pipeline.beginCapture(
+            id: firstSegment,
+            ordinal: 1,
+            source: .mac,
+            at: base
+        )
+        let faceID = pipeline.visibleFaceID
+
+        pipeline.updateCapture(
+            id: firstSegment,
+            activity: .listening,
+            at: base.addingTimeInterval(1)
+        )
+        pipeline.beginTranscription(
+            id: firstSegment,
+            ordinal: 1,
+            recordingDuration: 3,
+            createdAt: base,
+            at: base.addingTimeInterval(2)
+        )
+        pipeline.beginResting(at: base.addingTimeInterval(2))
+
+        let resting = MacHUDStack.resolve(
+            pipeline: pipeline,
+            at: base.addingTimeInterval(30)
+        )
+        XCTAssertEqual(resting.cards.count, 1)
+        XCTAssertEqual(resting.cards.first?.id, faceID)
+        XCTAssertEqual(resting.cards.first?.content, .resting)
+        XCTAssertFalse(pipeline.isTyping)
+
+        pipeline.beginCapture(
+            id: secondSegment,
+            ordinal: 2,
+            source: .iPhone,
+            at: base.addingTimeInterval(31)
+        )
+        pipeline.updateCapture(
+            id: secondSegment,
+            activity: .listening,
+            at: base.addingTimeInterval(33)
+        )
+
+        let resumed = MacHUDStack.resolve(
+            pipeline: pipeline,
+            at: base.addingTimeInterval(33)
+        )
+        XCTAssertEqual(resumed.cards.count, 1)
+        XCTAssertEqual(resumed.cards.first?.id, faceID)
+        XCTAssertEqual(
+            resumed.cards.first?.content,
+            .capture(
+                source: .iPhone,
+                activity: .listening,
+                stageStartedAt: base.addingTimeInterval(33)
+            )
+        )
+    }
+
+    func testBankedSegmentTranscriptionNeverGetsItsOwnFace() {
+        let segment = UUID()
+        var pipeline = MacHUDPipeline()
+        pipeline.beginCapture(
+            id: segment,
+            ordinal: 1,
+            source: .mac,
+            at: base
+        )
+        pipeline.beginTranscription(
+            id: segment,
+            ordinal: 1,
+            recordingDuration: 10,
+            createdAt: base,
+            at: base.addingTimeInterval(1)
+        )
+        pipeline.beginResting(at: base.addingTimeInterval(1))
+
+        let stack = MacHUDStack.resolve(
+            pipeline: pipeline,
+            at: base.addingTimeInterval(20)
+        )
+        XCTAssertEqual(stack.cards.map(\.content), [.resting])
+        XCTAssertEqual(stack.cards.count, MacHUDStack.visibleCardBudget)
+        XCTAssertFalse(pipeline.isTyping)
+    }
+
+    func testWrongSourceNudgeTemporarilyReplacesRatherThanStacksOnFace() {
+        let segment = UUID()
+        var pipeline = MacHUDPipeline()
+        pipeline.beginCapture(
+            id: segment,
+            ordinal: 1,
+            source: .mac,
+            at: base
+        )
+        pipeline.updateCapture(
+            id: segment,
+            activity: .listening,
+            at: base
+        )
         pipeline.showWrongSourceNudge(
             attempted: .iPhone,
             live: .mac,
             at: base.addingTimeInterval(1)
         )
 
-        let visible = MacHUDStack.resolve(
+        let nudged = MacHUDStack.resolve(
             pipeline: pipeline,
-            at: base.addingTimeInterval(1.5)
+            at: base.addingTimeInterval(1.2)
         )
-
-        XCTAssertEqual(visible.cards.count, 2)
+        XCTAssertEqual(nudged.cards.count, 1)
+        XCTAssertEqual(nudged.cards.first?.id, pipeline.visibleFaceID)
         XCTAssertEqual(
-            visible.cards[0].content,
+            nudged.cards.first?.content,
             .sourceNudge(attempted: .iPhone, live: .mac)
         )
-        XCTAssertEqual(visible.cards[1].id, captureID)
-        XCTAssertEqual(
-            visible.accessibilityLabel(sourceName: "Mac"),
-            "SpeakPaste, Pause before switching to the iPhone microphone"
-        )
-        XCTAssertEqual(
-            MacHUDStack.nextExpiry(in: pipeline, after: base.addingTimeInterval(1)),
-            base.addingTimeInterval(1 + MacHUDStack.sourceNudgeVisibilityCap)
-        )
 
-        let expired = MacHUDStack.resolve(
+        let restored = MacHUDStack.resolve(
             pipeline: pipeline,
             at: base.addingTimeInterval(
                 1 + MacHUDStack.sourceNudgeVisibilityCap + 0.001
             )
         )
-        XCTAssertEqual(expired.cards.map(\.id), [captureID])
-    }
-
-    func testRepeatedNudgeReplacesThePreviousOneAndRestartsExpiry() {
-        var pipeline = MacHUDPipeline()
-        pipeline.showWrongSourceNudge(attempted: .iPhone, live: .mac, at: base)
-        let firstID = MacHUDStack.resolve(pipeline: pipeline, at: base).cards[0].id
-
-        pipeline.showWrongSourceNudge(
-            attempted: .mac,
-            live: .iPhone,
-            at: base.addingTimeInterval(0.4)
-        )
-        let repeated = MacHUDStack.resolve(
-            pipeline: pipeline,
-            at: base.addingTimeInterval(0.5)
-        )
-
-        XCTAssertNotEqual(repeated.cards[0].id, firstID)
         XCTAssertEqual(
-            repeated.cards[0].content,
-            .sourceNudge(attempted: .mac, live: .iPhone)
-        )
-        XCTAssertEqual(
-            MacHUDStack.nextExpiry(in: pipeline, after: base.addingTimeInterval(0.5)),
-            base.addingTimeInterval(0.4 + MacHUDStack.sourceNudgeVisibilityCap)
+            restored.cards.first?.content,
+            .capture(source: .mac, activity: .listening, stageStartedAt: base)
         )
     }
 
-    /// The property that makes resting safe to leave on screen: it has no
-    /// deadline of its own, and it survives every rail expiring behind it.
-    func testRestingNeverTimesOutAndOutlivesItsRails() {
-        let dictationID = UUID()
+    func testDrainingGroupsEverySegmentIntoOneTypingFace() {
+        let first = UUID()
+        let second = UUID()
         var pipeline = MacHUDPipeline()
-        pipeline.beginTranscription(
-            id: dictationID,
+        pipeline.beginCapture(
+            id: first,
             ordinal: 1,
-            recordingDuration: 3,
+            source: .mac,
+            at: base
+        )
+        let faceID = pipeline.visibleFaceID
+        pipeline.beginTranscription(
+            id: first,
+            ordinal: 1,
+            recordingDuration: 4,
             createdAt: base,
+            at: base.addingTimeInterval(1)
+        )
+        pipeline.beginResting(at: base.addingTimeInterval(1))
+        pipeline.beginCapture(
+            id: second,
+            ordinal: 2,
+            source: .mac,
+            at: base.addingTimeInterval(2)
+        )
+        pipeline.beginTranscription(
+            id: second,
+            ordinal: 2,
+            recordingDuration: 5,
+            createdAt: base.addingTimeInterval(2),
+            at: base.addingTimeInterval(3)
+        )
+        pipeline.beginDraining(at: base.addingTimeInterval(3))
+
+        let stack = MacHUDStack.resolve(
+            pipeline: pipeline,
+            at: base.addingTimeInterval(4)
+        )
+        XCTAssertEqual(stack.cards, [MacHUDStack.Card(id: faceID!, content: .draining)])
+        XCTAssertTrue(pipeline.isTyping)
+        XCTAssertFalse(pipeline.finishesDrainingFace(withWorkID: first))
+        XCTAssertFalse(pipeline.finishesDrainingFace(withWorkID: second))
+
+        pipeline.finish(id: first)
+        XCTAssertTrue(pipeline.finishesDrainingFace(withWorkID: second))
+        XCTAssertEqual(pipeline.visibleFaceID, faceID)
+        pipeline.finish(id: second)
+        XCTAssertNil(pipeline.visibleFaceID)
+        XCTAssertFalse(pipeline.isTyping)
+    }
+
+    func testNewCaptureAfterHeldAcknowledgmentGetsFreshDictationIdentity() {
+        let heldWork = UUID()
+        let newCapture = UUID()
+        var pipeline = MacHUDPipeline()
+        pipeline.markHeld(id: heldWork, at: base)
+        let heldFaceID = pipeline.visibleFaceID
+
+        pipeline.beginCapture(
+            id: newCapture,
+            ordinal: 2,
+            source: .mac,
+            at: base.addingTimeInterval(1)
+        )
+
+        XCTAssertEqual(pipeline.visibleFaceID, newCapture)
+        XCTAssertNotEqual(pipeline.visibleFaceID, heldFaceID)
+        XCTAssertEqual(pipeline.faceIDs(forWorkIDs: [heldWork]), [heldFaceID!])
+    }
+
+    func testRestingNeverExpiresButDrainingAndHeldDo() {
+        let segment = UUID()
+        var pipeline = MacHUDPipeline()
+        pipeline.beginCapture(
+            id: segment,
+            ordinal: 1,
+            source: .mac,
             at: base
         )
         pipeline.beginResting(at: base)
-
-        let resting = MacHUDStack.resolve(pipeline: pipeline, at: base)
-        XCTAssertTrue(resting.isResting)
-        XCTAssertEqual(resting.cards[0].content, .resting)
-        XCTAssertEqual(resting.cards.map(\.id).last, dictationID)
-
-        // Long after every transcription rail has timed out.
-        let later = base.addingTimeInterval(
-            MacHUDStack.transcriptionVisibilityCap + 600
+        XCTAssertNil(MacHUDStack.nextExpiry(in: pipeline, after: base))
+        XCTAssertFalse(
+            MacHUDStack.resolve(
+                pipeline: pipeline,
+                at: base.addingTimeInterval(10_000)
+            ).isEmpty
         )
-        let stillResting = MacHUDStack.resolve(pipeline: pipeline, at: later)
-        XCTAssertEqual(stillResting.cards.map(\.content), [.resting])
-        XCTAssertNil(MacHUDStack.nextExpiry(in: pipeline, after: later))
-        XCTAssertTrue(
-            stillResting
-                .accessibilityLabel(sourceName: nil)
-                .contains("Dictation resting")
-        )
-    }
-
-    func testEnteringRestingTwiceKeepsTheSameCard() {
-        var pipeline = MacHUDPipeline()
-        pipeline.beginResting(at: base)
-        let firstID = pipeline.resting?.id
-        pipeline.beginResting(at: base.addingTimeInterval(30))
-
-        XCTAssertEqual(pipeline.resting?.id, firstID)
-        XCTAssertEqual(pipeline.resting?.startedAt, base)
-
-        pipeline.endResting()
-        XCTAssertNil(pipeline.resting)
-        XCTAssertFalse(MacHUDStack.resolve(pipeline: pipeline, at: base).isResting)
-    }
-
-    func testOneCardKeepsItsIdentityFromCaptureThroughTranscriptionAndHeld() {
-        let id = UUID()
-        var pipeline = MacHUDPipeline()
-        pipeline.beginCapture(id: id, ordinal: 1, at: base)
-
-        let capture = MacHUDStack.resolve(pipeline: pipeline, at: base)
-        XCTAssertEqual(capture.cards.map(\.id), [id])
-        XCTAssertEqual(capture.cards[0].content, .capture(.connecting))
-        XCTAssertEqual(capture.cards[0].ordinal, 1)
 
         pipeline.beginTranscription(
-            id: id,
+            id: segment,
             ordinal: 1,
-            recordingDuration: 7,
+            recordingDuration: 2,
             createdAt: base,
-            at: base.addingTimeInterval(2)
+            at: base
         )
-        let transcription = MacHUDStack.resolve(
-            pipeline: pipeline,
-            at: base.addingTimeInterval(3)
-        )
-        XCTAssertNil(pipeline.capture)
-        XCTAssertEqual(transcription.cards.map(\.id), [id])
-        XCTAssertEqual(
-            transcription.cards[0].content,
-            .transcription(
-                stage: .transcribing,
-                enqueuedAt: base.addingTimeInterval(2),
-                recordingDuration: 7
-            )
-        )
-
-        pipeline.markHeld(id: id, at: base.addingTimeInterval(4))
-        let held = MacHUDStack.resolve(
-            pipeline: pipeline,
-            at: base.addingTimeInterval(5)
-        )
-        XCTAssertEqual(held.cards.map(\.id), [id])
-        XCTAssertEqual(held.cards[0].content, .held)
-        XCTAssertEqual(held.cards[0].ordinal, 1)
-    }
-
-    func testCaptureIsFrontmostAndOldestPendingDictationIsRearmost() {
-        let first = UUID()
-        let second = UUID()
-        let captureID = UUID()
-        var pipeline = pipelineWithTranscriptions([
-            (second, 2, 4),
-            (first, 1, 1),
-        ])
-        pipeline.beginCapture(id: captureID, ordinal: 3, at: base.addingTimeInterval(5))
-        pipeline.updateCapture(
-            id: captureID,
-            activity: .listening,
-            at: base.addingTimeInterval(6)
-        )
-
-        let stack = MacHUDStack.resolve(
-            pipeline: pipeline,
-            at: base.addingTimeInterval(7)
-        )
-
-        XCTAssertEqual(stack.cards.map(\.id), [captureID, second, first])
-        XCTAssertEqual(stack.cards.map(\.depth), [0, 1, 2])
-        XCTAssertEqual(stack.cards.map(\.ordinal), [3, 2, 1])
-        XCTAssertEqual(stack.cards.first?.content, .capture(.listening))
-        XCTAssertEqual(stack.cards.last?.id, first, "The oldest spoken ticket is next to deliver")
-        XCTAssertEqual(stack.liveDictationCount, 2)
-    }
-
-    func testStackKeepsFrontAndTwoOldestPeeksWithArbitraryOverflowCount() {
-        let ids = (0..<8).map { _ in UUID() }
-        let captureID = UUID()
-        var pipeline = pipelineWithTranscriptions(
-            ids.enumerated().map { index, id in
-                (id, index + 1, TimeInterval(index))
-            }
-        )
-        pipeline.beginCapture(id: captureID, ordinal: 9, at: base.addingTimeInterval(9))
-
-        let stack = MacHUDStack.resolve(
-            pipeline: pipeline,
-            at: base.addingTimeInterval(10)
-        )
-
-        XCTAssertEqual(stack.cards.count, MacHUDStack.visibleCardBudget)
-        XCTAssertEqual(stack.cards.map(\.id), [captureID, ids[1], ids[0]])
-        XCTAssertEqual(stack.cards.map(\.hiddenDeeperCount), [0, 0, 6])
-        XCTAssertEqual(stack.totalTranscriptionCount, 8)
-    }
-
-    func testConnectingAndReleasingHaveIndependentVisibilityCaps() {
-        let id = UUID()
-        var pipeline = MacHUDPipeline()
-        pipeline.beginCapture(id: id, ordinal: 1, at: base)
-
-        XCTAssertFalse(
-            MacHUDStack.resolve(
-                pipeline: pipeline,
-                at: base.addingTimeInterval(19.999)
-            ).isEmpty
-        )
+        pipeline.beginDraining(at: base)
         XCTAssertEqual(
             MacHUDStack.nextExpiry(in: pipeline, after: base),
-            base.addingTimeInterval(20)
+            base.addingTimeInterval(MacHUDStack.drainingVisibilityCap)
         )
         XCTAssertTrue(
             MacHUDStack.resolve(
                 pipeline: pipeline,
-                at: base.addingTimeInterval(20)
+                at: base.addingTimeInterval(MacHUDStack.drainingVisibilityCap)
             ).isEmpty
         )
 
-        let releaseStart = base.addingTimeInterval(30)
-        pipeline.updateCapture(id: id, activity: .releasing, at: releaseStart)
-        XCTAssertFalse(
-            MacHUDStack.resolve(
-                pipeline: pipeline,
-                at: releaseStart.addingTimeInterval(14.999)
-            ).isEmpty
-        )
-        XCTAssertEqual(
-            MacHUDStack.nextExpiry(in: pipeline, after: releaseStart),
-            releaseStart.addingTimeInterval(15)
-        )
-        XCTAssertTrue(
-            MacHUDStack.resolve(
-                pipeline: pipeline,
-                at: releaseStart.addingTimeInterval(15)
-            ).isEmpty
-        )
-    }
-
-    func testListeningPersistsWhileHeldStatusExpires() {
-        let listeningID = UUID()
-        let heldID = UUID()
-        var pipeline = MacHUDPipeline()
-        pipeline.beginCapture(id: listeningID, ordinal: 2, at: base)
-        pipeline.updateCapture(id: listeningID, activity: .listening, at: base)
-        pipeline.markHeld(id: heldID, ordinal: 1, createdAt: base, at: base)
-
-        let shortlyAfter = base.addingTimeInterval(1)
-        XCTAssertEqual(
-            Set(MacHUDStack.resolve(pipeline: pipeline, at: shortlyAfter).cards.map(\.id)),
-            Set([listeningID, heldID])
-        )
+        pipeline.markHeld(id: segment, at: base)
         XCTAssertEqual(
             MacHUDStack.nextExpiry(in: pipeline, after: base),
             base.addingTimeInterval(MacHUDStack.heldVisibilityCap)
         )
-
-        let muchLater = base.addingTimeInterval(10_000)
-        let stack = MacHUDStack.resolve(pipeline: pipeline, at: muchLater)
-
-        XCTAssertEqual(stack.cards.map(\.id), [listeningID])
-        XCTAssertNil(MacHUDStack.nextExpiry(in: pipeline, after: muchLater))
     }
 
-    func testTranscribingAndAwaitingDeliveryShareNinetySecondCap() {
-        let transcribingID = UUID()
-        let awaitingID = UUID()
-        var pipeline = pipelineWithTranscriptions([
-            (transcribingID, 1, 0),
-            (awaitingID, 2, 10),
-        ])
-        pipeline.markAwaitingDelivery(id: awaitingID, at: base.addingTimeInterval(20))
-
-        let beforeFirstExpiry = MacHUDStack.resolve(
-            pipeline: pipeline,
-            at: base.addingTimeInterval(89.999)
-        )
-        XCTAssertEqual(Set(beforeFirstExpiry.cards.map(\.id)), Set([transcribingID, awaitingID]))
-        XCTAssertEqual(
-            MacHUDStack.nextExpiry(in: pipeline, after: base.addingTimeInterval(20)),
-            base.addingTimeInterval(90)
-        )
-
-        let afterFirstExpiry = MacHUDStack.resolve(
-            pipeline: pipeline,
-            at: base.addingTimeInterval(90)
-        )
-        XCTAssertEqual(afterFirstExpiry.cards.map(\.id), [awaitingID])
-        XCTAssertEqual(
-            afterFirstExpiry.cards[0].content,
-            .transcription(
-                stage: .awaitingDelivery,
-                enqueuedAt: base.addingTimeInterval(10),
-                recordingDuration: 10
-            )
-        )
-        XCTAssertTrue(
-            MacHUDStack.resolve(
-                pipeline: pipeline,
-                at: base.addingTimeInterval(100)
-            ).isEmpty
-        )
-    }
-
-    func testSeveralHeldDictationsBecomeOneNewestTransientStatusWithoutCount() {
-        let oldest = UUID()
-        let middle = UUID()
-        let newest = UUID()
+    func testDismissDetachesWorkSoRecoveryCannotReplayTheHUD() {
+        let segment = UUID()
         var pipeline = MacHUDPipeline()
-        pipeline.markHeld(
-            id: newest,
-            ordinal: 3,
-            createdAt: base.addingTimeInterval(2),
-            at: base.addingTimeInterval(5)
-        )
-        pipeline.markHeld(
-            id: oldest,
+        pipeline.beginCapture(
+            id: segment,
             ordinal: 1,
+            source: .mac,
+            at: base
+        )
+        pipeline.beginTranscription(
+            id: segment,
+            ordinal: 1,
+            recordingDuration: 2,
             createdAt: base,
-            at: base.addingTimeInterval(5)
+            at: base
         )
-        pipeline.markHeld(
-            id: middle,
-            ordinal: 2,
-            createdAt: base.addingTimeInterval(1),
-            at: base.addingTimeInterval(5)
-        )
+        let faceID = pipeline.visibleFaceID
+        pipeline.dismissFace()
 
-        let stack = MacHUDStack.resolve(
-            pipeline: pipeline,
-            at: base.addingTimeInterval(6)
-        )
-
-        XCTAssertEqual(stack.cards.count, 1)
-        XCTAssertEqual(stack.cards[0].id, newest)
-        XCTAssertEqual(stack.cards[0].content, .held)
-        XCTAssertEqual(stack.cards[0].ordinal, 3)
-        XCTAssertTrue(stack.hasTransientHold)
-        XCTAssertEqual(pipeline.heldIDs, [oldest, middle, newest])
+        XCTAssertTrue(MacHUDStack.resolve(pipeline: pipeline, at: base).isEmpty)
+        XCTAssertEqual(pipeline.faceIDs(forWorkIDs: [segment]), [])
+        pipeline.markHeld(id: segment, at: base.addingTimeInterval(1))
+        XCTAssertNil(pipeline.visibleFaceID)
+        XCTAssertNotNil(faceID)
     }
 
-    func testCardsPreserveSpokenOrdinalsForVoiceOverAndAggregateLabel() {
-        let first = UUID()
-        let second = UUID()
-        var pipeline = pipelineWithTranscriptions([
-            (second, 2, 1),
-            (first, 1, 0),
-        ])
-        pipeline.markHeld(id: first, at: base.addingTimeInterval(2))
-        let stack = MacHUDStack.resolve(
-            pipeline: pipeline,
-            at: base.addingTimeInterval(3)
-        )
-
-        XCTAssertEqual(stack.cards.map(\.ordinal), [2, 1])
-        XCTAssertEqual(stack.cards[0].id, second)
-        XCTAssertEqual(stack.cards[1].id, first)
-        XCTAssertEqual(
-            stack.accessibilityLabel(
-                sourceName: nil,
-                heldClipboardBacked: true
-            ),
-            "SpeakPaste, 1 dictation transcribing, Dictation held, The held dictation is on the clipboard"
-        )
-    }
-
-    func testPublisherEmitsDistinctResolvedStackChanges() {
+    func testPublisherSuppressesDuplicateOneFaceSnapshots() {
         let subject = CurrentValueSubject<MacHUDPipeline, Never>(MacHUDPipeline())
         var received: [MacHUDStack] = []
-        let observation = MacHUDStack.publisher(subject)
-            .sink { received.append($0) }
-        let id = UUID()
-        let now = Date()
+        let observation = MacHUDStack.publisher(subject).sink { received.append($0) }
 
+        subject.send(MacHUDPipeline())
         var pipeline = MacHUDPipeline()
-        pipeline.beginCapture(id: id, ordinal: 1, at: now)
-        subject.send(pipeline)
-        subject.send(pipeline)
-        pipeline.updateCapture(id: id, activity: .listening, at: now)
-        subject.send(pipeline)
-        pipeline.beginTranscription(
-            id: id,
+        let now = Date()
+        pipeline.beginCapture(
+            id: UUID(),
             ordinal: 1,
-            recordingDuration: 3,
-            createdAt: now,
+            source: .iPhone,
             at: now
         )
         subject.send(pipeline)
+        subject.send(pipeline)
 
-        XCTAssertEqual(received.count, 4)
-        XCTAssertEqual(received[0], .empty)
-        XCTAssertEqual(received[1].cards[0].content, .capture(.connecting))
-        XCTAssertEqual(received[2].cards[0].content, .capture(.listening))
-        XCTAssertEqual(received[3].cards[0].id, id)
-        XCTAssertEqual(
-            received[3].cards[0].content,
-            .transcription(stage: .transcribing, enqueuedAt: now, recordingDuration: 3)
-        )
+        XCTAssertEqual(received.count, 2)
         withExtendedLifetime(observation) {}
     }
 }

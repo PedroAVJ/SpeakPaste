@@ -445,6 +445,29 @@ enum MacTranscriptPostProcessor {
         return insertion
     }
 
+    /// Joins the internal seams of one paused/resumed dictation while leaving
+    /// its leading seam unresolved for the real destination. This is the
+    /// durable representation used when several segment escrows become one
+    /// user-owned delivery handoff.
+    static func combine(
+        _ chunks: [MacPreparedTranscriptChunk]
+    ) -> MacPreparedTranscriptChunk {
+        guard let first = chunks.first else {
+            return MacPreparedTranscriptChunk(
+                text: "",
+                preservesLeadingReplacementCase: false
+            )
+        }
+        var combined = first.text
+        for chunk in chunks.dropFirst() {
+            combined.append(fit(chunk, after: combined))
+        }
+        return MacPreparedTranscriptChunk(
+            text: combined,
+            preservesLeadingReplacementCase: first.preservesLeadingReplacementCase
+        )
+    }
+
     /// The small deterministic command set that does not require a second
     /// language model. Scribe already handles punctuation and backtracking; the
     /// missing piece is layout that cannot be represented in ordinary speech.

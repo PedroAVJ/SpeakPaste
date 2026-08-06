@@ -3,49 +3,48 @@ import Combine
 import Foundation
 import SwiftUI
 
-/// The panel and its SwiftUI surface share this presentation snapshot so a
-/// state can morph all the way out before AppKit removes the window. The
-/// model remains the authority for product state; this object owns only the
-/// few hundred milliseconds of visual choreography around it.
+private enum MacHUDExitStyle: Equatable {
+    case fade
+    case pop
+    case fold
+}
+
+/// Keeps the final meaningful face mounted while its exit animation runs.
+/// Product state remains in `MacAppModel`; this object owns only presentation
+/// choreography around the AppKit panel boundary.
 @MainActor
 private final class MacHUDPresentationState: ObservableObject {
     @Published private(set) var stack = MacHUDStack.empty
-    @Published private(set) var isExiting = false
+    @Published private(set) var exitStyle: MacHUDExitStyle?
 
     func show(_ stack: MacHUDStack) {
         self.stack = stack
-        isExiting = false
+        exitStyle = nil
     }
 
-    func beginExit() {
+    func beginExit(_ style: MacHUDExitStyle) {
         guard !stack.isEmpty else { return }
-        isExiting = true
+        exitStyle = style
     }
 
     func finishExit() {
         stack = .empty
-        isExiting = false
+        exitStyle = nil
     }
 }
 
 @MainActor
-final class MacStatusHUDController: ObservableObject {
+final class MacStatusHUDController: NSObject, ObservableObject, NSWindowDelegate {
     private let model: MacAppModel
     private let panel: MacStatusPanel
     private let presentation = MacHUDPresentationState()
     private var stateCancellables = Set<AnyCancellable>()
-    /// The last emitted pipeline snapshot. Each chunk keeps one UUID through
-    /// capture, transcription, queueing, and a possible held state, so SwiftUI
-    /// can morph the same surface instead of swapping anonymous status pills.
     private var currentPipeline = MacHUDPipeline()
-    /// Re-resolves the stack when the earliest per-card visibility cap
-    /// (connecting, releasing, a transcription card's 90 seconds, or a held
-    /// card's two seconds) lapses.
     private var expiryTask: Task<Void, Never>?
     private var releaseBridgeTask: Task<Void, Never>?
     private var fadeOutTask: Task<Void, Never>?
-    /// Invalidates an in-flight fade-out when a newer show or hide begins.
     private var hideGeneration = 0
+    private var isProgrammaticPositioning = false
 
     init(model: MacAppModel) {
         self.model = model
@@ -57,7 +56,9 @@ final class MacStatusHUDController: ObservableObject {
             defer: false
         )
         self.panel = panel
+        super.init()
 
+        panel.delegate = self
         panel.level = .statusBar
         panel.collectionBehavior = [
             .canJoinAllSpaces,
@@ -66,15 +67,10 @@ final class MacStatusHUDController: ObservableObject {
         ]
         panel.backgroundColor = .clear
         panel.isOpaque = false
-        // The card stack morphs inside a fixed transparent panel. An AppKit
-        // window shadow would hug a stale outline mid-morph, so the SwiftUI
-        // surface draws its own per-card shadows instead.
         panel.hasShadow = false
         panel.hidesOnDeactivate = false
         panel.isFloatingPanel = true
         panel.becomesKeyOnlyIfNeeded = true
-        // Always click-through: the indicator has no controls, so it must
-        // never intercept a click meant for the app underneath it.
         panel.ignoresMouseEvents = true
         panel.isMovable = false
         panel.isReleasedWhenClosed = false
@@ -92,8 +88,6 @@ final class MacStatusHUDController: ObservableObject {
         panel.contentView = hostingView
     }
 
-    /// Starts mirroring the app model into the floating panel. Safe to call
-    /// repeatedly from a SwiftUI scene lifecycle callback.
     func start() {
         guard stateCancellables.isEmpty else {
             currentPipeline = model.hudPipeline
@@ -103,64 +97,56 @@ final class MacStatusHUDController: ObservableObject {
 
         currentPipeline = model.hudPipeline
         model.$hudPipeline
-        // A serial main-queue delivery preserves the exact Combine emission
-        // order. Spawning one unstructured Task per value can reorder the
-        // short releasing → hidden → transcribing burst and strand the panel
-        // in a stale state with no later emission to repair it.
-        .receive(on: DispatchQueue.main)
-        .sink { [weak self] pipeline in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                self.currentPipeline = pipeline
-                self.present()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] pipeline in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.currentPipeline = pipeline
+                    self.present()
+                }
             }
-        }
-        .store(in: &stateCancellables)
+            .store(in: &stateCancellables)
 
-        // These values affect chrome, placement, or visibility caps without
-        // changing the semantic stack inputs. Re-present the last emitted state.
         Publishers.MergeMany(
             model.$hudEnabled.map { _ in () }.eraseToAnyPublisher(),
             model.$hudPlacement.map { _ in () }.eraseToAnyPublisher(),
+            model.$hudCustomPosition.map { _ in () }.eraseToAnyPublisher(),
+            model.$hudPositioningMode.map { _ in () }.eraseToAnyPublisher(),
             model.$selectedDeviceID.map { _ in () }.eraseToAnyPublisher(),
             model.$devices.map { _ in () }.eraseToAnyPublisher()
         )
         .receive(on: DispatchQueue.main)
         .sink { [weak self] _ in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                self.present()
-            }
+            MainActor.assumeIsolated { self?.present() }
         }
         .store(in: &stateCancellables)
         present()
     }
 
-    /// The stack exists while SpeakPaste holds (or is acquiring or releasing)
-    /// the microphone, while spoken dictations still await text, and — for two
-    /// seconds only — when a just-finished chunk is held instead of delivered.
-    /// The hold marker is declarative and transient; the durable held queue,
-    /// along with ready, success, failure, offline, and setup states, lives in
-    /// the dashboard and menu bar.
     private func present() {
         expiryTask?.cancel()
         expiryTask = nil
 
         guard model.hudEnabled else {
+            configurePanelForStatus()
             hidePanel()
             return
         }
 
+        if model.hudPositioningMode {
+            panel.ignoresMouseEvents = false
+            panel.isMovableByWindowBackground = true
+            showPanel(.positioning)
+            return
+        }
+        configurePanelForStatus()
+
         let now = Date()
-        let stack = MacHUDStack.resolve(
-            pipeline: currentPipeline,
-            at: now
-        )
+        let stack = MacHUDStack.resolve(pipeline: currentPipeline, at: now)
         guard !stack.isEmpty else {
-            // `phase = .ready` is published just before its durable audio is
-            // admitted to the transcription workload. Hold the collapsing
-            // waveform for one beat so that ordinary release morphs directly
-            // into its progress card instead of flashing an empty panel.
+            // Recorder teardown publishes a short releasing -> no capture ->
+            // draining sequence. Preserve the waveform for one beat so the
+            // direct handoff to dots never flashes an empty panel.
             if presentation.stack.frontIsReleasing {
                 scheduleReleaseBridgeHide()
             } else {
@@ -172,14 +158,10 @@ final class MacStatusHUDController: ObservableObject {
         scheduleNextExpiry(at: now)
     }
 
-    /// Nothing is scheduled while only an uncapped listening capture is
-    /// visible; every other surface — including the two-second transient hold
-    /// marker — reports its deadline through `nextExpiry`.
     private func scheduleNextExpiry(at now: Date) {
-        guard let next = MacHUDStack.nextExpiry(
-            in: currentPipeline,
-            after: now
-        ) else { return }
+        guard let next = MacHUDStack.nextExpiry(in: currentPipeline, after: now) else {
+            return
+        }
         let delay = max(0.05, next.timeIntervalSince(now))
         expiryTask = Task { @MainActor [weak self] in
             do {
@@ -193,8 +175,6 @@ final class MacStatusHUDController: ObservableObject {
     }
 
     private func showPanel(_ stack: MacHUDStack) {
-        // A pending gentle fade-out must never order the panel back out after
-        // this show. Invalidate it and restore full opacity so entry is brisk.
         releaseBridgeTask?.cancel()
         releaseBridgeTask = nil
         fadeOutTask?.cancel()
@@ -206,14 +186,14 @@ final class MacStatusHUDController: ObservableObject {
             panel.setContentSize(MacHUDMetrics.panelSize)
         }
         positionPanelOnActiveScreen()
-        // `orderFrontRegardless` works while SpeakPaste is inactive; the panel
-        // is nonactivating and never becomes key, so it cannot steal focus
-        // from the app receiving dictated text.
         panel.orderFrontRegardless()
     }
 
-    /// Exit is deliberately gentle: SwiftUI collapses the last meaningful
-    /// surface before AppKit orders out its fixed transparent host window.
+    private func configurePanelForStatus() {
+        panel.ignoresMouseEvents = true
+        panel.isMovableByWindowBackground = false
+    }
+
     private func hidePanel() {
         releaseBridgeTask?.cancel()
         releaseBridgeTask = nil
@@ -223,10 +203,24 @@ final class MacStatusHUDController: ObservableObject {
         }
         hideGeneration &+= 1
         let generation = hideGeneration
-        presentation.beginExit()
+        let cardID = presentation.stack.cards.first?.id
+        let style: MacHUDExitStyle
+        if let cardID, model.recentlyDismissedHUDCardIDs.contains(cardID) {
+            style = .fold
+        } else if let cardID, model.recentlyDeliveredHUDCardIDs.contains(cardID) {
+            style = .pop
+        } else {
+            style = .fade
+        }
+        presentation.beginExit(style)
         fadeOutTask?.cancel()
         fadeOutTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(0.35))
+            let duration: TimeInterval = switch style {
+            case .pop: 0.27
+            case .fold: 0.35
+            case .fade: 0.18
+            }
+            try? await Task.sleep(for: .seconds(duration + 0.03))
             guard let self, !Task.isCancelled else { return }
             guard self.hideGeneration == generation else { return }
             self.panel.orderOut(nil)
@@ -249,7 +243,19 @@ final class MacStatusHUDController: ObservableObject {
     }
 
     private func positionPanelOnActiveScreen() {
-        let screen = (panel.isVisible ? panel.screen : nil)
+        let savedOrigin = model.hudCustomPosition.map {
+            NSPoint(x: $0.x, y: $0.y)
+        }
+        let savedCenter = savedOrigin.map {
+            NSPoint(
+                x: $0.x + panel.frame.width / 2,
+                y: $0.y + panel.frame.height / 2
+            )
+        }
+        let screen = savedCenter.flatMap { center in
+            NSScreen.screens.first(where: { $0.frame.contains(center) })
+        }
+            ?? (panel.isVisible ? panel.screen : nil)
             ?? NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) })
             ?? NSScreen.main
             ?? NSScreen.screens.first
@@ -258,8 +264,8 @@ final class MacStatusHUDController: ObservableObject {
         let visibleFrame = screen.visibleFrame
         let inset: CGFloat = 4
         let size = panel.frame.size
-        let desired = Self.anchorOrigin(for: model.hudPlacement, on: screen, size: size)
-
+        let desired = savedOrigin
+            ?? Self.anchorOrigin(for: model.hudPlacement, on: screen, size: size)
         let x = min(
             max(desired.x, visibleFrame.minX + inset),
             visibleFrame.maxX - size.width - inset
@@ -268,28 +274,28 @@ final class MacStatusHUDController: ObservableObject {
             max(desired.y, visibleFrame.minY),
             visibleFrame.maxY - size.height
         )
+        isProgrammaticPositioning = true
         panel.setFrameOrigin(NSPoint(x: x.rounded(), y: y.rounded()))
+        isProgrammaticPositioning = false
     }
 
-    /// Top is the default because the apps SpeakPaste dictates into put their
-    /// text field at the bottom center of the window, which is exactly where a
-    /// bottom-anchored HUD lands — it covered the insertion point it was
-    /// reporting on. The other placements exist for users whose work lives at
-    /// the top of the screen instead. `visibleFrame` already excludes the menu
-    /// bar, any notch, and the Dock.
+    func windowDidMove(_ notification: Notification) {
+        guard model.hudPositioningMode, !isProgrammaticPositioning else { return }
+        model.saveHUDPosition(
+            x: panel.frame.origin.x,
+            y: panel.frame.origin.y
+        )
+    }
+
     private static func anchorOrigin(
         for placement: MacHUDPlacement,
         on screen: NSScreen,
         size: NSSize
     ) -> NSPoint {
         let visibleFrame = screen.visibleFrame
-        // The panel includes transparent breathing room around the 36-point
-        // cards for shadows and for the receding levels that lift above the
-        // front card. Four points here preserves the prior visible edge gap.
         let inset: CGFloat = 4
         let centeredX = visibleFrame.midX - size.width / 2
         let centeredY = visibleFrame.midY - size.height / 2
-
         return switch placement {
         case .top:
             NSPoint(x: centeredX, y: visibleFrame.maxY - size.height - inset)
@@ -299,6 +305,10 @@ final class MacStatusHUDController: ObservableObject {
             NSPoint(x: visibleFrame.minX + inset, y: centeredY)
         case .right:
             NSPoint(x: visibleFrame.maxX - size.width - inset, y: centeredY)
+        case .custom:
+            // A missing or no-longer-visible custom coordinate falls back to
+            // the safe default until the user deliberately moves it again.
+            NSPoint(x: centeredX, y: visibleFrame.maxY - size.height - inset)
         }
     }
 }
@@ -308,70 +318,44 @@ private final class MacStatusPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
-/// Shared geometry between the AppKit panel and the SwiftUI cards. The panel
-/// never resizes; the cards morph and recede centered inside it, which keeps
-/// every transition in Core Animation and out of AppKit frame changes.
-private enum MacHUDMetrics {
-    // Leave enough transparent breathing room for the SwiftUI shadows at
-    // every card width, plus headroom for two receding card levels lifting
-    // above the front card; clipping either is the quickest way for glass to
-    // read like a flat rounded rectangle.
-    static let panelSize = NSSize(width: 216, height: 84)
-    static let capsuleHeight: CGFloat = 36
-    /// iOS-notification-stack recession per depth level.
-    static let depthScaleStep: CGFloat = 0.92
-    static let depthLift: CGFloat = 6
-    static let depthOpacityStep: Double = 0.16
-    /// Keeps the front card at the prior visual position now that the panel
-    /// carries extra top headroom for the receding levels.
-    static let frontCardDrop: CGFloat = 6
+enum MacHUDVisualState: Equatable {
+    case nudge
+    case source(MacInputMode, waiting: Bool)
+    case waveform(frozen: Bool)
+    case typing
+    case held
+    case positioning
+}
 
-    /// Under Reduce Motion every surface holds one width so state changes are
-    /// pure crossfades with no shape travel.
+private enum MacHUDMetrics {
+    static let panelSize = NSSize(width: 190, height: 66)
+    static let capsuleHeight: CGFloat = 36
+
     static func capsuleWidth(
-        for content: MacHUDStack.CardContent,
+        for visual: MacHUDVisualState,
         reduceMotion: Bool
     ) -> CGFloat {
-        switch content {
-        case .sourceNudge:
-            return reduceMotion ? 150 : 104
-        case .resting:
-            return reduceMotion ? 150 : 88
-        case .held:
-            return reduceMotion ? 150 : 56
-        case .capture(.connecting), .capture(.inactive):
-            return reduceMotion ? 150 : 56
-        case .capture(.listening):
-            return reduceMotion ? 150 : 176
-        case .capture(.releasing):
-            return reduceMotion ? 150 : 120
-        // The typing pill: the capsule shrinks past every other width as the
-        // wave hands off to the dots.
-        case .transcription:
-            return reduceMotion ? 150 : 64
+        if reduceMotion { return 150 }
+        return switch visual {
+        case .nudge: 104
+        case .source: 54
+        case .waveform: 150
+        case .typing: 64
+        case .held: 56
+        case .positioning: 56
         }
     }
 }
 
-/// The depth stack: one Liquid Glass card per dictation, capture always
-/// frontmost, transcriptions receding behind it oldest-rearmost, and a
-/// transient held marker taking its slot for the two seconds before it
-/// expires. Cards show no words, timers, or spinners — state is carried by
-/// shape, motion, and color; the held marker is a single restrained glyph.
-/// Descriptive text lives in the accessibility label.
 private struct MacStatusHUDView: View {
     @ObservedObject var model: MacAppModel
     @ObservedObject var presentation: MacHUDPresentationState
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        let stack = presentation.stack
-        ZStack {
-            // Rear cards first so the front card paints on top; the explicit
-            // zIndex keeps that order stable while cards insert and remove.
-            ForEach(renderedCards(for: stack).reversed()) { rendered in
-                let card = rendered.card
-                MacHUDStackCardView(
+        Group {
+            if let card = presentation.stack.cards.first {
+                MacHUDCapsuleView(
                     card: card,
                     inputLevel: model.inputLevel,
                     heldClipboardBacked: model.hasVisibleClipboardFallback
@@ -379,220 +363,256 @@ private struct MacStatusHUDView: View {
                     reduceMotion: reduceMotion
                 )
                 .scaleEffect(
-                    pow(MacHUDMetrics.depthScaleStep, CGFloat(card.depth))
+                    x: exitScale.width,
+                    y: exitScale.height,
+                    anchor: .center
                 )
-                .offset(
-                    y: MacHUDMetrics.frontCardDrop
-                        - MacHUDMetrics.depthLift * CGFloat(card.depth)
-                )
-                .opacity(1 - MacHUDMetrics.depthOpacityStep * Double(card.depth))
-                .zIndex(Double(MacHUDStack.visibleCardBudget - card.depth))
-                .transition(transition(for: card))
+                .opacity(presentation.exitStyle == nil ? 1 : 0)
+                .animation(exitAnimation, value: presentation.exitStyle)
             }
         }
-        .scaleEffect(presentation.isExiting && !reduceMotion ? 0.90 : 1)
-        .opacity(presentation.isExiting ? 0 : 1)
         .frame(
             width: MacHUDMetrics.panelSize.width,
             height: MacHUDMetrics.panelSize.height
         )
-        .animation(stackAnimation, value: stack)
-        .animation(exitAnimation, value: presentation.isExiting)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(
-            stack.accessibilityLabel(
-                sourceName: sourceName,
+            presentation.stack.accessibilityLabel(
+                sourceName: model.activeSource?.title,
                 heldClipboardBacked: model.hasVisibleClipboardFallback
                     || model.heldClipboardOwnerID != nil
             )
         )
     }
 
-    /// Identity handed to SwiftUI. With full motion a card keeps one identity
-    /// across depth changes so it visibly travels backward and forward in the
-    /// pile. Under Reduce Motion the depth joins the identity, so a depth
-    /// change is a crossfade between two stationary renderings instead of
-    /// animated depth travel.
-    private struct RenderedCard: Identifiable {
-        struct Key: Hashable {
-            let cardID: UUID
-            let depthSlot: Int
-        }
-
-        let card: MacHUDStack.Card
-        let id: Key
-    }
-
-    private func renderedCards(for stack: MacHUDStack) -> [RenderedCard] {
-        stack.cards.map { card in
-            RenderedCard(
-                card: card,
-                id: RenderedCard.Key(
-                    cardID: card.id,
-                    depthSlot: reduceMotion ? card.depth : 0
-                )
-            )
-        }
-    }
-
-    private var stackAnimation: Animation {
-        reduceMotion
-            ? .easeInOut(duration: 0.25)
-            : .spring(response: 0.35, dampingFraction: 0.8)
-    }
-
-    /// Entry is brisk (a small scale-up with the surface spring). The two
-    /// terminal exits are shapes, never travel: **pop** — a bloom outward —
-    /// when the model published a verified delivery receipt, and **fold** — a
-    /// squash to nothing — when the user dismissed the dictation with Escape.
-    /// A bubble pops where it stands, so neither exit slides anywhere. Every
-    /// other removal (a capture morphing into its typing pill, overflow
-    /// folding, a timeout, the held marker's two-second expiry) is a
-    /// presentation change and therefore a plain crossfade.
-    private func transition(for card: MacHUDStack.Card) -> AnyTransition {
-        if reduceMotion { return .opacity }
-        let insertion = AnyTransition.scale(scale: 0.86).combined(with: .opacity)
-        if model.recentlyDismissedHUDCardIDs.contains(card.id) {
-            return .asymmetric(insertion: insertion, removal: .macHUDFold)
-        }
-        switch card.content {
-        case .sourceNudge, .resting, .capture:
-            return .asymmetric(insertion: insertion, removal: .opacity)
-        case .transcription, .held:
-            if model.recentlyDeliveredHUDCardIDs.contains(card.id) {
-                return .asymmetric(insertion: insertion, removal: .macHUDPop)
-            }
-            return .opacity
+    private var exitScale: CGSize {
+        guard !reduceMotion else { return CGSize(width: 1, height: 1) }
+        return switch presentation.exitStyle {
+        case .pop:
+            CGSize(width: 1.12, height: 1.12)
+        case .fold:
+            CGSize(width: 0.5, height: 0.16)
+        case .fade, nil:
+            CGSize(width: 1, height: 1)
         }
     }
 
     private var exitAnimation: Animation {
-        reduceMotion
-            ? .easeOut(duration: 0.16)
-            : .spring(response: 0.28, dampingFraction: 0.92)
-    }
-
-    /// Only ever the microphone that is actually live. A resting dictation has
-    /// no source, so it must not inherit the last one's name.
-    private var sourceName: String? {
-        model.activeSource?.title
-    }
-}
-
-/// The two terminal exits. Both happen in place — the capsule never travels,
-/// because a bubble pops where it stands — and they are told apart by shape
-/// alone: the pop blooms outward as the message lands, the fold squashes flat
-/// as a dismissed dictation drops away to recovery.
-private struct MacHUDCapsuleScale: ViewModifier {
-    let width: CGFloat
-    let height: CGFloat
-    let opacity: Double
-
-    func body(content: Content) -> some View {
-        content
-            .scaleEffect(x: width, y: height)
-            .opacity(opacity)
+        if reduceMotion { return .easeOut(duration: 0.16) }
+        return switch presentation.exitStyle {
+        case .pop:
+            .easeOut(duration: 0.26)
+        case .fold:
+            .timingCurve(0.6, 0, 0.9, 0.5, duration: 0.34)
+        case .fade, nil:
+            .easeOut(duration: 0.16)
+        }
     }
 }
 
-private extension AnyTransition {
-    static var macHUDPop: AnyTransition {
-        .modifier(
-            active: MacHUDCapsuleScale(width: 1.12, height: 1.12, opacity: 0),
-            identity: MacHUDCapsuleScale(width: 1, height: 1, opacity: 1)
-        )
-    }
-
-    static var macHUDFold: AnyTransition {
-        .modifier(
-            active: MacHUDCapsuleScale(width: 0.5, height: 0.16, opacity: 0),
-            identity: MacHUDCapsuleScale(width: 1, height: 1, opacity: 1)
-        )
-    }
-}
-
-/// One card surface: fixed-height capsule whose width and contents track the
-/// card content, with the "+N" overflow badge riding the rearmost card.
-private struct MacHUDStackCardView: View {
+/// One stable capsule. Every layer lives at the same center, so changing state
+/// never shifts the visual address sideways and a paused waveform can preserve
+/// the exact envelope that was visible when capture ended.
+private struct MacHUDCapsuleView: View {
     let card: MacHUDStack.Card
     let inputLevel: Double
     let heldClipboardBacked: Bool
     let reduceMotion: Bool
 
+    @State private var envelope = MacHUDLevelEnvelope()
+    @State private var frozenAt = Date()
+
     var body: some View {
-        content
+        TimelineView(
+            .animation(minimumInterval: reduceMotion ? 1.0 / 15 : 1.0 / 60)
+        ) { context in
+            let visual = visualState(at: context.date)
+            let nudge = nudgeValues
+            let source = sourceValues(for: visual)
+            let waveform = waveformValues(for: visual)
+            ZStack {
+                MacHUDSourceNudge(attempted: nudge.attempted, live: nudge.live)
+                    .opacity(visual == .nudge ? 1 : 0)
+                    .scaleEffect(visual == .nudge ? 1 : 0.82)
+
+                MacHUDSourceIdentity(
+                    source: source.mode,
+                    showsWaitDot: source.waiting,
+                    pulseDate: context.date,
+                    reduceMotion: reduceMotion
+                )
+                .opacity(source.visible ? 1 : 0)
+                .scaleEffect(source.visible ? 1 : 0.7)
+
+                MacHUDWaveform(
+                    level: inputLevel,
+                    date: waveform.frozen ? frozenAt : context.date,
+                    frozen: waveform.frozen,
+                    isActive: waveform.visible,
+                    reduceMotion: reduceMotion,
+                    envelope: envelope
+                )
+                .opacity(waveform.visible ? 1 : 0)
+                .scaleEffect(x: 1, y: waveform.visible ? 1 : 0.08)
+
+                MacHUDTypingDots(date: context.date, reduceMotion: reduceMotion)
+                    .opacity(visual == .typing ? 1 : 0)
+                    .scaleEffect(visual == .typing ? 1 : 0.72)
+
+                MacHUDHeldBadge(clipboardBacked: heldClipboardBacked)
+                    .opacity(visual == .held ? 1 : 0)
+                    .scaleEffect(visual == .held ? 1 : 0.72)
+
+                Image(systemName: "arrow.up.and.down.and.arrow.left.and.right")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Color(nsColor: .secondaryLabelColor))
+                    .accessibilityHidden(true)
+                    .opacity(visual == .positioning ? 1 : 0)
+                    .scaleEffect(visual == .positioning ? 1 : 0.72)
+            }
             .frame(height: MacHUDMetrics.capsuleHeight)
             .frame(
                 width: MacHUDMetrics.capsuleWidth(
-                    for: card.content,
+                    for: visual,
                     reduceMotion: reduceMotion
                 )
             )
             .modifier(MacHUDSurface())
-            // The panel's AppKit shadow is off so it cannot lag behind the
-            // morph; these per-card shadows are the stack's sense of depth.
             .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
-            .overlay(alignment: .topTrailing) {
-                if card.hiddenDeeperCount > 0 {
-                    MacHUDOverflowBadge(count: card.hiddenDeeperCount)
-                        .offset(x: 8, y: -8)
-                }
-            }
+            .opacity(card.content == .resting ? 0.78 : 1)
+            // The courtesy beat changes `visual` without changing the model's
+            // listening state. Keying choreography to the visual state makes
+            // the pill expansion, icon fade, and bar rise one continuous
+            // morph instead of two unrelated updates.
+            .animation(stateAnimation, value: visual)
+        }
+        .help(card.content == .positioning ? "Drag to move the SpeakPaste HUD" : "")
+        .onChange(of: card.content) { _, content in
+            if content == .resting { frozenAt = Date() }
+        }
     }
 
-    @ViewBuilder
-    private var content: some View {
-        switch card.content {
-        case let .sourceNudge(attempted, live):
-            MacHUDSourceNudge(
-                attempted: attempted,
-                live: live,
-                reduceMotion: reduceMotion
-            )
-        case .resting:
-            MacHUDRestingMark()
-        case .capture(.connecting), .capture(.inactive):
-            MacHUDWakeSignal(reduceMotion: reduceMotion)
-        case .capture(.listening):
-            MacHUDWaveform(
-                level: inputLevel,
-                isCollapsing: false,
-                reduceMotion: reduceMotion
-            )
-        case .capture(.releasing):
-            MacHUDWaveform(
-                level: inputLevel,
-                isCollapsing: true,
-                reduceMotion: reduceMotion
-            )
-        case .transcription:
-            MacHUDTypingDots(reduceMotion: reduceMotion)
-        case .held:
-            MacHUDHeldBadge(clipboardBacked: heldClipboardBacked)
+    private var nudgeValues: (attempted: MacInputMode, live: MacInputMode?) {
+        guard case let .sourceNudge(attempted, live) = card.content else {
+            return (.mac, nil)
         }
+        return (attempted, live)
+    }
+
+    private func sourceValues(
+        for visual: MacHUDVisualState
+    ) -> (mode: MacInputMode, waiting: Bool, visible: Bool) {
+        let mode: MacInputMode = if case let .capture(source, _, _) = card.content {
+            source
+        } else if case let .source(source, _) = visual {
+            source
+        } else {
+            .mac
+        }
+        guard case let .source(_, waiting) = visual else {
+            // Keep the outgoing identity stable while it fades. Switching an
+            // iPhone symbol back to the default Mac symbol during that fade is
+            // still a replacement, even when the layer is almost transparent.
+            return (mode, false, false)
+        }
+        return (mode, waiting, true)
+    }
+
+    private func waveformValues(
+        for visual: MacHUDVisualState
+    ) -> (frozen: Bool, visible: Bool) {
+        guard case let .waveform(frozen) = visual else {
+            return (false, false)
+        }
+        return (frozen, true)
+    }
+
+    private func visualState(at date: Date) -> MacHUDVisualState {
+        switch card.content {
+        case .sourceNudge:
+            return .nudge
+        case let .capture(source, activity, stageStartedAt):
+            switch activity {
+            case .connecting, .inactive:
+                return .source(source, waiting: source == .iPhone)
+            case .listening:
+                // Mac capture is already live during this courtesy beat. The
+                // first real voice sample cuts it short; otherwise it lasts no
+                // more than half a second. Continuity's glyph/dot disappear on
+                // capture-live, so its waveform starts immediately here.
+                if source == .mac,
+                   date.timeIntervalSince(stageStartedAt) < 0.5,
+                   inputLevel < 0.006 {
+                    return .source(.mac, waiting: false)
+                }
+                return .waveform(frozen: false)
+            case .releasing:
+                return .waveform(frozen: false)
+            }
+        case .resting:
+            return .waveform(frozen: true)
+        case .draining:
+            return .typing
+        case .held:
+            return .held
+        case .positioning:
+            return .positioning
+        }
+    }
+
+    private var stateAnimation: Animation {
+        reduceMotion
+            ? .easeInOut(duration: 0.22)
+            : .spring(response: 0.35, dampingFraction: 0.8)
     }
 }
 
-/// The wrong source key, pressed while the other microphone is hot. The live
-/// device holds its place and the attempted one is struck through: nothing is
-/// switching, because switching is pause-then-resume. A single restrained
-/// shake carries the refusal without ever becoming an alert.
+private struct MacHUDSourceIdentity: View {
+    let source: MacInputMode
+    let showsWaitDot: Bool
+    let pulseDate: Date
+    let reduceMotion: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: source == .mac ? "laptopcomputer" : "iphone")
+                .font(.system(size: 15, weight: .regular))
+                // Identity is deliberately neutral. Status belongs to the
+                // separate amber wait dot and the red live waveform.
+                .foregroundStyle(Color(nsColor: .secondaryLabelColor))
+            if showsWaitDot {
+                let pulse = reduceMotion
+                    ? 0.5
+                    : (sin(pulseDate.timeIntervalSinceReferenceDate * 6.6) + 1) / 2
+                Circle()
+                    .fill(Color(nsColor: .systemOrange))
+                    .frame(width: 7, height: 7)
+                    .scaleEffect(reduceMotion ? 1 : 0.85 + 0.3 * pulse)
+                    .opacity(0.48 + 0.47 * pulse)
+                    .shadow(
+                        color: Color(nsColor: .systemOrange).opacity(
+                            reduceMotion ? 0 : 0.14 + 0.26 * pulse
+                        ),
+                        radius: reduceMotion ? 0 : 2 + 3 * pulse
+                    )
+            }
+        }
+        .accessibilityHidden(true)
+    }
+}
+
 private struct MacHUDSourceNudge: View {
     let attempted: MacInputMode
     let live: MacInputMode?
-    let reduceMotion: Bool
-
-    @State private var shake: CGFloat = 0
 
     var body: some View {
         HStack(spacing: 9) {
-            if let live {
-                deviceGlyph(for: live, isLive: true)
-            }
+            if let live { deviceGlyph(for: live).opacity(0.9) }
             Image(systemName: "pause.circle")
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(Color(nsColor: .secondaryLabelColor))
-            deviceGlyph(for: attempted, isLive: false)
+            deviceGlyph(for: attempted)
+                .opacity(0.48)
                 .overlay {
                     Capsule()
                         .fill(Color(nsColor: .secondaryLabelColor))
@@ -600,195 +620,96 @@ private struct MacHUDSourceNudge: View {
                         .rotationEffect(.degrees(-32))
                 }
         }
-        .offset(x: shake)
-        .onAppear {
-            guard !reduceMotion else { return }
-            withAnimation(
-                .spring(response: 0.14, dampingFraction: 0.28)
-            ) {
-                shake = 3
-            }
-            withAnimation(
-                .spring(response: 0.32, dampingFraction: 0.55).delay(0.14)
-            ) {
-                shake = 0
-            }
-        }
         .accessibilityHidden(true)
     }
 
-    private func deviceGlyph(
-        for mode: MacInputMode,
-        isLive: Bool
-    ) -> some View {
+    private func deviceGlyph(for mode: MacInputMode) -> some View {
         Image(systemName: mode == .mac ? "laptopcomputer" : "iphone")
-            .font(.system(size: 14, weight: isLive ? .semibold : .regular))
-            .foregroundStyle(
-                isLive
-                    ? Color(nsColor: .systemRed)
-                    : Color(nsColor: .secondaryLabelColor)
-            )
-            .opacity(isLive ? 1 : 0.48)
+            .font(.system(size: 14, weight: .regular))
+            .foregroundStyle(Color(nsColor: .secondaryLabelColor))
     }
 }
 
-/// Resting. The card is deliberately the quietest surface in the product: two
-/// still bars, dimmed, with no laptop or phone glyph — no microphone is live,
-/// so there is no current source to name, and the next source key decides.
-/// Nothing animates and nothing counts down; the stack is simply refusing to
-/// leave until the dictation is ended or discarded.
-private struct MacHUDRestingMark: View {
-    var body: some View {
-        HStack(spacing: 5) {
-            ForEach(0..<2, id: \.self) { _ in
-                Capsule()
-                    .fill(Color(nsColor: .secondaryLabelColor))
-                    .frame(width: 3.5, height: 14)
-            }
-        }
-        .opacity(0.5)
-        .accessibilityHidden(true)
-    }
-}
-
-/// Connecting: a minimal wake signal. A single warm dot breathes while the
-/// session starts — deliberately not a spinner, because nothing is being
-/// measured yet; the system is only waking up.
-private struct MacHUDWakeSignal: View {
-    let reduceMotion: Bool
-
-    var body: some View {
-        TimelineView(
-            .animation(
-                minimumInterval: reduceMotion ? 1 : 1.0 / 30,
-                paused: reduceMotion
-            )
-        ) { context in
-            let pulse = reduceMotion
-                ? 0.5
-                : (sin(context.date.timeIntervalSinceReferenceDate * 3.5) + 1) / 2
-            Circle()
-                .fill(Color(nsColor: .systemOrange))
-                .frame(width: 7, height: 7)
-                .scaleEffect(reduceMotion ? 1 : 0.82 + 0.42 * pulse)
-                .opacity(0.48 + 0.47 * pulse)
-                .shadow(
-                    color: Color(nsColor: .systemOrange).opacity(
-                        reduceMotion ? 0 : 0.16 + 0.36 * pulse
-                    ),
-                    radius: reduceMotion ? 0 : 2 + 4 * pulse
-                )
-        }
-        .accessibilityHidden(true)
-    }
-}
-
-/// Listening and releasing: a compact center-symmetric waveform driven by the
-/// real captured input level, answering the one question the HUD exists for —
-/// "is my voice reaching this microphone". During release the target level
-/// drops to zero so the same bars visibly collapse: the voice handing off
-/// directly to the typing dots, with no still gray beat in between — a frozen
-/// wave would wear Resting's body at the one moment the dictation is leaving.
 private struct MacHUDWaveform: View {
     let level: Double
-    let isCollapsing: Bool
+    let date: Date
+    let frozen: Bool
+    let isActive: Bool
     let reduceMotion: Bool
+    let envelope: MacHUDLevelEnvelope
 
-    @State private var envelope = MacHUDLevelEnvelope()
-
-    private static let barCount = 15
+    private static let barCount = 13
     private static let barWidth: CGFloat = 3.5
-    private static let barSpacing: CGFloat = 3.5
+    private static let barSpacing: CGFloat = 3
     private static let minBarHeight: CGFloat = 3
     private static let maxBarHeight: CGFloat = 22
 
-    private static var canvasWidth: CGFloat {
-        CGFloat(barCount) * barWidth + CGFloat(barCount - 1) * barSpacing
-    }
-
     var body: some View {
-        TimelineView(
-            .animation(minimumInterval: reduceMotion ? 1.0 / 15 : 1.0 / 60)
-        ) { context in
-            Canvas { graphics, size in
-                drawBars(in: graphics, size: size, at: context.date)
+        HStack(spacing: Self.barSpacing) {
+            ForEach(0..<Self.barCount, id: \.self) { index in
+                Capsule()
+                    .fill(
+                        frozen
+                            ? Color(nsColor: .secondaryLabelColor)
+                            : Color(nsColor: .systemRed)
+                    )
+                    .frame(width: Self.barWidth, height: height(for: index))
             }
         }
-        .frame(width: Self.canvasWidth, height: Self.maxBarHeight + 2)
+        .opacity(frozen ? 0.72 : 1)
         .accessibilityHidden(true)
     }
 
-    private func drawBars(in graphics: GraphicsContext, size: CGSize, at date: Date) {
-        let target = isCollapsing ? 0 : min(max(level, 0), 1)
+    private func height(for index: Int) -> CGFloat {
         let display = envelope.step(
-            toward: target,
+            toward: min(max(level, 0), 1),
             at: date,
-            collapsing: isCollapsing
+            frozen: frozen || !isActive
         )
-        // The recorder publishes linear amplitude, where ordinary laptop-mic
-        // speech occupies only the bottom few percent. Remove the true noise
-        // floor, then lift that real signal into the small visual range so a
-        // normal voice reads as bars instead of a nearly static row of dots.
         let perceptualInput = min(max((display - 0.004) * 10, 0), 1)
         let shaped = pow(perceptualInput, 0.60)
-        let time = date.timeIntervalSinceReferenceDate
-        let midY = size.height / 2
-
-        for index in 0..<Self.barCount {
-            let fraction = Double(index) / Double(Self.barCount - 1)
-            // Center-symmetric arch so the shape reads as a voice waveform at
-            // a glance rather than a VU meter.
-            let arch = 0.30 + 0.70 * sin(fraction * .pi)
-            let wobble: Double
-            if reduceMotion {
-                wobble = 1
-            } else {
-                // Deterministic per-bar drift, scaled by the same level so
-                // silence stays calm instead of shimmering artificially.
-                let speed = 6.5 + Double(index).truncatingRemainder(dividingBy: 4) * 1.4
-                let phase = Double(index) * 1.7
-                wobble = 0.78 + 0.22 * sin(time * speed + phase)
-            }
-            let height = Self.minBarHeight
-                + (Self.maxBarHeight - Self.minBarHeight) * CGFloat(arch * wobble * shaped)
-            let x = CGFloat(index) * (Self.barWidth + Self.barSpacing)
-            let bar = CGRect(
-                x: x,
-                y: midY - height / 2,
-                width: Self.barWidth,
-                height: height
+        let fraction = Double(index) / Double(Self.barCount - 1)
+        let arch = 0.30 + 0.70 * sin(fraction * .pi)
+        let wobble: Double
+        if frozen || reduceMotion {
+            // A deterministic non-flat silhouette stays frozen across every
+            // frame, preserving the impression of the voice that just stopped.
+            wobble = 0.78 + 0.22 * sin(
+                frozenAtPhase * (6.5 + Double(index % 4) * 1.4)
+                    + Double(index) * 1.7
             )
-            graphics.fill(
-                Path(roundedRect: bar, cornerRadius: Self.barWidth / 2),
-                with: .color(
-                    Color(nsColor: .systemRed).opacity(0.45 + 0.55 * arch)
-                )
+        } else {
+            wobble = 0.78 + 0.22 * sin(
+                date.timeIntervalSinceReferenceDate
+                    * (6.5 + Double(index % 4) * 1.4)
+                    + Double(index) * 1.7
             )
         }
+        return Self.minBarHeight
+            + (Self.maxBarHeight - Self.minBarHeight)
+                * CGFloat(arch * wobble * shaped)
+    }
+
+    private var frozenAtPhase: TimeInterval {
+        date.timeIntervalSinceReferenceDate
     }
 }
 
-/// Asymmetric level smoothing: attack is near-instant so speech onsets are
-/// never missed, decay is slower so the waveform breathes instead of
-/// flickering at the ~12 Hz the recorder publishes. Collapse (release) decays
-/// faster than listening so letting go feels decisive. A reference type so
-/// the Canvas can integrate across timeline frames without triggering SwiftUI
-/// invalidation.
 private final class MacHUDLevelEnvelope {
-    private var displayLevel: Double = 0
+    private var displayLevel: Double = 0.12
     private var lastStepAt: Date?
 
-    func step(toward target: Double, at date: Date, collapsing: Bool) -> Double {
+    func step(toward target: Double, at date: Date, frozen: Bool) -> Double {
+        if frozen { return displayLevel }
         let dt: TimeInterval
         if let lastStepAt {
             dt = min(max(date.timeIntervalSince(lastStepAt), 0), 0.25)
         } else {
             dt = 1.0 / 60
         }
-        lastStepAt = date
-
+        self.lastStepAt = date
         let rising = target > displayLevel
-        let timeConstant = rising ? 0.045 : (collapsing ? 0.12 : 0.32)
+        let timeConstant = rising ? 0.045 : 0.32
         let alpha = 1 - exp(-dt / timeConstant)
         displayLevel += (target - displayLevel) * alpha
         if displayLevel < 0.0005 { displayLevel = 0 }
@@ -796,58 +717,30 @@ private final class MacHUDLevelEnvelope {
     }
 }
 
-/// Transcribing: the typing indicator. Three dots hopping in sequence — the
-/// messaging idiom for a message being composed for you, which is exactly what
-/// SpeakPaste is doing, and which carries exactly the expectation this state
-/// needs: the text arrives whole, there is nothing to supervise, and looking
-/// away costs nothing.
-///
-/// Deliberately not progress. Scribe answers one request with the whole
-/// transcript — no progress events, no ETA — so there is no divisible quantity
-/// to draw, and an estimate drawn as a bar is a promise that breaks in public
-/// (an early snap or a stall near the end). The dots claim nothing, so they can
-/// loop for as long as the network takes without ever lying. Completion is the
-/// card leaving, never the animation.
 private struct MacHUDTypingDots: View {
+    let date: Date
     let reduceMotion: Bool
 
-    private static let dotDiameter: CGFloat = 7
-    private static let dotSpacing: CGFloat = 5
     private static let period: TimeInterval = 1.25
     private static let stagger: TimeInterval = 0.15
-    private static let hopHeight: CGFloat = 5
-    /// The share of each dot's cycle spent hopping. The rest is rest: without
-    /// it the row throbs continuously instead of reading as a passing wave.
     private static let hopShare = 0.4
 
     var body: some View {
-        TimelineView(
-            .animation(
-                minimumInterval: reduceMotion ? 1 : 1.0 / 60,
-                paused: reduceMotion
-            )
-        ) { context in
-            let time = context.date.timeIntervalSinceReferenceDate
-            HStack(spacing: Self.dotSpacing) {
-                ForEach(0..<3, id: \.self) { index in
-                    let hop = reduceMotion ? 0 : Self.hop(at: time, index: index)
-                    Circle()
-                        .fill(Color(nsColor: .secondaryLabelColor))
-                        .frame(
-                            width: Self.dotDiameter,
-                            height: Self.dotDiameter
-                        )
-                        .opacity(0.45 + 0.55 * hop)
-                        .offset(y: -Self.hopHeight * hop)
-                }
+        HStack(spacing: 5) {
+            ForEach(0..<3, id: \.self) { index in
+                let hop = reduceMotion ? 0 : Self.hop(at: date, index: index)
+                Circle()
+                    .fill(Color(nsColor: .secondaryLabelColor))
+                    .frame(width: 7, height: 7)
+                    .opacity(0.45 + 0.55 * hop)
+                    .offset(y: -5 * hop)
             }
         }
         .accessibilityHidden(true)
     }
 
-    /// One dot's hop as 0…1, offset per dot so the lift travels left to right.
-    private static func hop(at time: TimeInterval, index: Int) -> Double {
-        let shifted = time - Double(index) * stagger
+    private static func hop(at date: Date, index: Int) -> Double {
+        let shifted = date.timeIntervalSinceReferenceDate - Double(index) * stagger
         let phase = shifted.truncatingRemainder(dividingBy: period)
         let normalized = (phase < 0 ? phase + period : phase) / period
         guard normalized < hopShare else { return 0 }
@@ -855,12 +748,6 @@ private struct MacHUDTypingDots: View {
     }
 }
 
-/// The transient hold marker: a single wordless glyph, on screen for two
-/// seconds, declaring that the just-finished chunk stayed here instead of
-/// leaving. The clipboard glyph appears only when a private live claim proves
-/// Command-V is backed by the newest held chunk; otherwise a neutral document says
-/// "saved here." No count, hint, or control — the durable queue and every
-/// release action live in the dashboard and menu bar.
 private struct MacHUDHeldBadge: View {
     let clipboardBacked: Bool
 
@@ -873,39 +760,16 @@ private struct MacHUDHeldBadge: View {
                 }
             )
         )
-            .font(.system(size: 13, weight: .semibold))
-            .foregroundStyle(
-                clipboardBacked
-                    ? Color(nsColor: .systemOrange)
-                    : Color(nsColor: .secondaryLabelColor)
-            )
-            .accessibilityHidden(true)
+        .font(.system(size: 13, weight: .semibold))
+        .foregroundStyle(
+            clipboardBacked
+                ? Color(nsColor: .systemOrange)
+                : Color(nsColor: .secondaryLabelColor)
+        )
+        .accessibilityHidden(true)
     }
 }
 
-/// "+N": dictations folded behind the rearmost visible card. Numeric only, so
-/// the stack stays wordless while its true depth remains honest.
-private struct MacHUDOverflowBadge: View {
-    let count: Int
-
-    var body: some View {
-        Text("+\(count)")
-            .font(.caption2.weight(.semibold))
-            .monospacedDigit()
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(.regularMaterial, in: Capsule())
-            .overlay {
-                Capsule().strokeBorder(Color.primary.opacity(0.12), lineWidth: 1)
-            }
-            .accessibilityHidden(true)
-    }
-}
-
-/// The HUD chrome: native Liquid Glass on macOS 26 and later, with a plain
-/// material capsule standing in down to the macOS 14 deployment target. The
-/// compiler guard keeps the file building under pre-26 SDKs, where the glass
-/// API does not exist even behind a runtime availability check.
 private struct MacHUDSurface: ViewModifier {
     func body(content: Content) -> some View {
         #if compiler(>=6.2)

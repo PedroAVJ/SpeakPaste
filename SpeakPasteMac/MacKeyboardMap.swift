@@ -169,6 +169,10 @@ struct MacKeyboardMapPanel: View {
                 Button("Settings…") {
                     presence.openSettings { openSettings() }
                 }
+                Button(model.hudPositioningMode ? "Done Moving HUD" : "Move HUD…") {
+                    model.toggleHUDPositioning()
+                }
+                .disabled(!model.hudEnabled)
                 Spacer(minLength: 0)
                 Button("Quit") { NSApp.terminate(nil) }
             }

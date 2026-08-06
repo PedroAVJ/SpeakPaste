@@ -149,9 +149,12 @@ private struct MacAudioHUDSettings: View {
                     Text("Bottom").tag(MacHUDPlacement.bottom)
                     Text("Left").tag(MacHUDPlacement.left)
                     Text("Right").tag(MacHUDPlacement.right)
+                    if model.hudCustomPosition != nil {
+                        Text("Custom").tag(MacHUDPlacement.custom)
+                    }
                 }
                 .disabled(!model.hudEnabled)
-                Text("A wordless, click-through Liquid Glass capsule spring-morphs between a connecting pulse, your live voice waveform, release, and estimated transcription progress, then disappears. A resting dictation holds a still, dim, sourceless card that never times out. Pressing the wrong source key while a microphone is hot gets a brief nudge instead of a handoff. A new hold gets one count-free tray acknowledgment for two seconds; recovery entries never replay here. A stalled transcription cannot keep it onscreen for more than 90 seconds. It has no buttons and never takes focus; the main window and menu bar remain authoritative for errors, offline status, and waiting text. Top keeps it clear of the text fields most apps put at the bottom of the window.")
+                Text("One wordless, click-through Liquid Glass capsule owns the whole dictation. A neutral source glyph becomes the real red voice waveform; pause freezes that waveform in gray; fn turns it directly into typing dots. Banked segments never become cards, rails, or counts. Verified delivery pops the capsule outward and Escape folds it inward to recovery. A new hold gets one count-free clipboard or document acknowledgment for two seconds; recovery entries never replay here. Use Move HUD in the menu-bar panel to drag it anywhere; choosing a Placement here resets that saved position. It has no controls during dictation and never takes focus; the main window and menu bar remain authoritative for errors, offline status, and waiting text.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -164,7 +167,7 @@ private struct MacAudioHUDSettings: View {
                         set: { model.sounds.isEnabled = $0 }
                     )
                 )
-                Text("Three single pings rise through capture, release, and verified delivery. Errors are the family's only phrase: low and falling.")
+                Text("iPhone wait gets a low tick, capture-live gets one rising ping, pause gets a low held tone, and Escape gets a muted fold tone. While fn drains the dictation, a quiet typing patter runs until verified delivery lands with a falling plop. Errors are the family's only phrase: low and falling.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

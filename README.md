@@ -59,30 +59,32 @@ The Xcode project contains four product targets:
 8. To change microphone mid-thought, pause with the key that is live and resume
    with the other one. While a microphone is hot the other source key only
    nudges: there is no mid-recording handover.
-9. The click-through Liquid Glass indicator is a depth stack with one stable
-   card per chunk. Live capture stays in front and spring-morphs from wake pulse
-   to real waveform to a collapsing release; each transcribing chunk recedes
-   behind it as a small typing pill — three hopping dots, the messaging sign
-   that a message is being written for you — while deeper work folds into a
-   numeric `+N`. Nothing estimates: Scribe answers one request with the whole
-   transcript, so the dots claim no progress and no time remaining, and
-   completion is the card leaving rather than any animation finishing. A stalled
-   card hides after 90 seconds; success, errors, model details, and offline
-   notices stay in the app instead of becoming floating notifications.
+9. The click-through Liquid Glass indicator is one stable capsule for the whole
+   open dictation. A Mac start briefly shows a neutral laptop glyph; an iPhone
+   start shows a neutral phone glyph with an amber breathing wait-dot until
+   capture is live. Both then spring-morph into the real red voice waveform.
+   Paused segments transcribe as invisible plumbing: there are no segment cards,
+   rails, slivers, counts, or `+N` badges. Pressing `fn` turns the same capsule
+   directly into a small typing pill with three hopping dots. The dots claim no
+   progress or time remaining; completion is the verified delivery event, not
+   an animation finishing. Success, errors, model details, and offline notices
+   stay in the app instead of becoming floating notifications.
    The two terminal exits happen in place and differ by shape: a delivered
    dictation **pops** (a bloom outward), a dismissed one **folds** (a squash to
-   nothing). Neither slides anywhere.
+   nothing). Neither slides anywhere. Choose **Move HUD…** from the menu-bar
+   panel to deliberately grab the capsule and save an exact position anywhere
+   on screen; outside that temporary mode it remains fully click-through.
 10. A resting dictation shows a **still, dim, sourceless** front card — no
    laptop or phone glyph, because no microphone is live and the next source key
-   decides. It never times out. The existing visibility caps apply to the rails
-   behind it, not to the dictation itself.
-11. Preloaded sounds: a single ping when capture goes live, and a low level cue
-   when the microphone is actually released by a pause or a cancel. Closing has
-   its own pair — a quiet typing patter that loops while the dots are up, then a
-   soft falling plop as the message lands. Nothing sounds at the `fn` press
-   itself; the patter is the acknowledgment. Errors are the family's only
-   phrase: low and falling. Every cue is synthesized deterministically by
-   `scripts/generate-macos-earcons.py`.
+   decides. It never times out; transient caps apply only to connecting,
+   releasing, draining, and held acknowledgments.
+11. Preloaded sounds: the iPhone wait begins with a low tick, capture-live gets
+   one rising ping, pause gets a low held tone, and Escape gets a muted fold
+   tone. Closing has its own pair — a quiet typing patter that loops while the
+   dots are up, then a soft falling plop as the message lands. Nothing sounds at
+   the `fn` press itself; the patter is the acknowledgment. Errors are the
+   family's only phrase: low and falling. Every cue is synthesized
+   deterministically by `scripts/generate-macos-earcons.py`.
 
 You do not have to wait at the keyboard. When a transcript reaches the delivery
 boundary, SpeakPaste uses the currently focused writable, non-secure editor —
@@ -371,20 +373,21 @@ sending sensitive audio.
 
 ## Development status
 
-The macOS target builds with local ad-hoc signing. Its floating indicator is a
-click-through Liquid Glass depth stack with stable per-dictation cards. Capture
-is always frontmost; listening uses a real voice waveform, while every
-transcription behind it owns a directional heuristic rail that remains below
-completion until that request actually finishes. The oldest card is rearmost,
-deeper work collapses into `+N`, and only a verified delivery slides out with its
-earcon; overflow and timeout changes simply fold or crossfade. A new hold appears
-only as one count-free clipboard-or-document glyph for two seconds. Recovered and
-possibly delivered text stays in the dashboard and is never replayed into the
-HUD on launch. The stack has no controls and never presents results, offline
-notices, or errors. Each continuously transcribing card is capped at 90 seconds
-so a stalled request cannot pin it onscreen; the dashboard and menu bar remain
-authoritative. A stuck connecting card is capped at 20 seconds and releasing at
-15 seconds. Connecting normally stays visible until
+The macOS target builds with local ad-hoc signing. Its floating indicator is one
+click-through Liquid Glass capsule with a stable identity for the entire open
+dictation. Source glyphs bloom at center, listening uses the real voice
+waveform, rest freezes that waveform in gray, and `fn` morphs directly to one
+typing-dots face while every banked segment remains invisible plumbing. Only
+verified delivery pops outward; Escape folds inward to recovery. A new hold
+appears only as one count-free clipboard-or-document glyph for two seconds.
+Recovered and possibly delivered text stays in the dashboard and is never
+replayed into the HUD on launch. The capsule has no controls and never presents
+results, offline notices, or errors. Draining is capped at 90 seconds so a
+stalled request cannot pin it onscreen; the dashboard and menu bar remain
+authoritative. Its persisted custom position is editable only through the
+menu-bar panel's deliberate move mode, so normal HUD use stays click-through.
+The Mac source courtesy beat is capped at 0.5 seconds, an iPhone
+wait at 20 seconds, and releasing at 15 seconds. The iPhone wait normally stays visible until
 the microphone proves it is delivering a steady sample stream, so
 file recording does not begin inside the Continuity wake-up gap; if macOS
 refuses the monitoring tap that proves liveness, the connection fails loudly
