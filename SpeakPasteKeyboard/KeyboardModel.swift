@@ -45,7 +45,6 @@ final class KeyboardModel: ObservableObject {
     private var pollTask: Task<Void, Never>?
     private var insertedConfirmationTask: Task<Void, Never>?
     private var startedSessionID: UUID?
-    private var pollingStartedAt: Date?
 
     init(
         store: SharedDictationStore = SharedDictationStore(),
@@ -81,6 +80,7 @@ final class KeyboardModel: ObservableObject {
             : "Starting microphone…"
     }
     var isRecording: Bool { snapshot.phase == .recording }
+    var isPaused: Bool { snapshot.phase == .paused }
     var isTranscribing: Bool { snapshot.phase == .transcribing }
     var didFail: Bool {
         [.failed, .deliveryBlocked, .inserting].contains(snapshot.phase)
@@ -114,7 +114,6 @@ final class KeyboardModel: ObservableObject {
 
     func startPolling() {
         pollTask?.cancel()
-        pollingStartedAt = Date()
         refresh()
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -127,7 +126,6 @@ final class KeyboardModel: ObservableObject {
     func stopPolling() {
         pollTask?.cancel()
         pollTask = nil
-        pollingStartedAt = nil
     }
 
     func setHostPreparationInProgress(_ isInProgress: Bool) {
@@ -199,8 +197,24 @@ final class KeyboardModel: ObservableObject {
         }
     }
 
-    func stopAndTranscribe() {
-        store.send(.stop, sessionID: snapshot.sessionID)
+    func stopAndTranscribe(expectedSessionID: UUID) {
+        let current = store.load()
+        guard
+            current.sessionID == expectedSessionID,
+            [.recording, .paused].contains(current.phase)
+        else {
+            refresh()
+            return
+        }
+        // Stop lives at the point of insertion. Persist this exact cursor while
+        // the keyboard is synchronously handling the tap, before the containing
+        // app can consume Stop and publish a completed transcript.
+        _ = store.claimInsertionContext(
+            sessionID: expectedSessionID,
+            fingerprint: currentInsertionContextFingerprint(),
+            replacingExistingClaim: true
+        )
+        store.send(.stop, sessionID: expectedSessionID)
         refresh()
     }
 
@@ -290,42 +304,11 @@ final class KeyboardModel: ObservableObject {
         refresh()
     }
 
-    /// The containing app heartbeats every few seconds while it owns a session.
-    /// Well past that interval means the app is gone and the session will never
-    /// finish on its own.
-    private static func abandonedSessionTimeout(
-        for phase: SharedDictationPhase
-    ) -> TimeInterval {
-        switch phase {
-        case .launching, .starting:
-            // Permission sheets and cold app launches are user-paced.
-            return 90
-        case .recording, .transcribing:
-            return 15
-        default:
-            return 0
-        }
-    }
-    private static func isOwnedByContainingApp(
-        _ phase: SharedDictationPhase
-    ) -> Bool {
-        switch phase {
-        case .launching, .starting, .recording, .transcribing:
-            return true
-        case .idle, .completed, .inserting, .deliveryBlocked, .failed,
-             .cancelled, .inserted, .handled:
-            return false
-        }
-    }
-
     private func refresh() {
         var latest = store.load()
         if
-            latest.phase == .starting,
-            latest.insertionContextFingerprint == nil,
-            Date().timeIntervalSince(latest.startedAt) < 2,
-            let pollingStartedAt,
-            pollingStartedAt <= latest.startedAt.addingTimeInterval(0.5)
+            latest.phase.allowsKeyboardInsertionContextClaim,
+            latest.insertionContextFingerprint == nil
         {
             _ = store.claimInsertionContext(
                 sessionID: latest.sessionID,
@@ -334,16 +317,20 @@ final class KeyboardModel: ObservableObject {
             latest = store.load()
         }
         if
-            Self.isOwnedByContainingApp(latest.phase),
+            latest.phase.isContainingAppOwned,
             Date().timeIntervalSince(latest.updatedAt)
-                > Self.abandonedSessionTimeout(for: latest.phase)
+                > latest.phase.containingAppAbandonmentTimeout
         {
             // Preserve the session ID so a journaled recording can be matched
             // after a force quit or background termination.
             let hasRecoverableAudio = latest.hasRecoverableAudio == true
-            store.setPhase(
-                .failed,
+            let cutoff = Date().addingTimeInterval(
+                -latest.phase.containingAppAbandonmentTimeout
+            )
+            _ = store.failAbandonedSession(
                 sessionID: latest.sessionID,
+                phases: [latest.phase],
+                updatedAtOrBefore: cutoff,
                 errorMessage: hasRecoverableAudio
                     ? "Dictation was interrupted. Open SpeakPaste to recover the recording."
                     : "Dictation was interrupted before audio was saved. Dismiss this message and try again.",
@@ -351,7 +338,9 @@ final class KeyboardModel: ObservableObject {
                 recoveryAction: .openContainingApp
             )
             latest = store.load()
-            localError = nil
+            if latest.phase == .failed {
+                localError = nil
+            }
         }
         snapshot = latest
 
@@ -384,10 +373,14 @@ final class KeyboardModel: ObservableObject {
         }
 
         if requireKeyboardInsertionClaim {
-            guard latest.insertionContextFingerprint != nil else {
+            let currentFingerprint = currentInsertionContextFingerprint()
+            guard InsertionContextDeliveryPolicy.allowsAutomaticInsertion(
+                claimedFingerprint: latest.insertionContextFingerprint,
+                currentFingerprint: currentFingerprint
+            ) else {
                 store.blockDelivery(
                     sessionID: latest.sessionID,
-                    message: "SpeakPaste couldn't confirm that this dictation started from the keyboard. Tap Insert Here to place the transcript at the current cursor."
+                    message: "The cursor changed while SpeakPaste was transcribing. Tap Insert Here to place the transcript at the current cursor."
                 )
                 snapshot = store.load()
                 return

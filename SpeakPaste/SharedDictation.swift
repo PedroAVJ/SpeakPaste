@@ -30,11 +30,11 @@ enum SharedDictationConstants {
     static let hostApplicationIdentityKey = "host-application-identity-v1"
 }
 
-/// Privacy-safe evidence that a keyboard field was active when dictation
-/// started. UIKit inconsistently reports absent context as `nil` or an empty
+/// Privacy-safe evidence that a keyboard field was active and available for
+/// delivery. UIKit inconsistently reports absent context as `nil` or an empty
 /// string while a keyboard is removed and restored, so those representations
-/// normalize to the same diagnostic identity. Delivery deliberately follows
-/// the active cursor where the user taps Stop instead of pinning this identity.
+/// normalize to the same identity. Stop & Insert pins this identity until
+/// delivery; a changed field or cursor requires an explicit Insert Here tap.
 enum InsertionContextFingerprint {
     static func make(
         documentIdentifier: UUID,
@@ -56,6 +56,25 @@ enum InsertionContextFingerprint {
         return SHA256.hash(data: Data(context.utf8))
             .map { String(format: "%02x", $0) }
             .joined()
+    }
+}
+
+/// Automatic insertion is safe only while the keyboard still exposes the
+/// exact document context claimed synchronously by Stop & Insert. A mismatch
+/// keeps the transcript durable and asks the user to aim it explicitly.
+enum InsertionContextDeliveryPolicy {
+    static func allowsAutomaticInsertion(
+        claimedFingerprint: String?,
+        currentFingerprint: String
+    ) -> Bool {
+        guard
+            let claimedFingerprint,
+            !claimedFingerprint.isEmpty,
+            !currentFingerprint.isEmpty
+        else {
+            return false
+        }
+        return claimedFingerprint == currentFingerprint
     }
 }
 
@@ -245,6 +264,7 @@ enum SharedDictationPhase: String, Codable {
     case launching
     case starting
     case recording
+    case paused
     case transcribing
     case completed
     /// The extension persisted its intent to insert before touching the host
@@ -257,6 +277,49 @@ enum SharedDictationPhase: String, Codable {
     case cancelled
     case inserted
     case handled
+
+    /// The containing app owns every phase that depends on its recorder or a
+    /// transcription task continuing to make progress. A paused dictation is
+    /// deliberately different: all hot audio is already journaled, so iOS may
+    /// suspend the process until the next intent without making the session
+    /// abandoned.
+    var isContainingAppOwned: Bool {
+        switch self {
+        case .launching, .starting, .recording, .transcribing:
+            true
+        case .idle, .paused, .completed, .inserting, .deliveryBlocked,
+             .failed, .cancelled, .inserted, .handled:
+            false
+        }
+    }
+
+    /// The keyboard uses the app's heartbeat to turn an abandoned active phase
+    /// into a recoverable failure instead of waiting forever.
+    var containingAppAbandonmentTimeout: TimeInterval {
+        switch self {
+        case .launching, .starting:
+            // Permission sheets and cold app launches are user-paced.
+            90
+        case .recording, .transcribing:
+            15
+        case .idle, .paused, .completed, .inserting, .deliveryBlocked,
+             .failed, .cancelled, .inserted, .handled:
+            0
+        }
+    }
+
+    /// A background session starts without a destination. While the extension
+    /// is resident, it may attach the currently focused insertion point at any
+    /// point before delivery, including after transcription already finished.
+    var allowsKeyboardInsertionContextClaim: Bool {
+        switch self {
+        case .starting, .recording, .paused, .transcribing, .completed:
+            true
+        case .idle, .launching, .inserting, .deliveryBlocked, .failed,
+             .cancelled, .inserted, .handled:
+            false
+        }
+    }
 }
 
 enum SharedDictationRecoveryAction: String, Codable {
@@ -268,15 +331,29 @@ enum SharedDictationRecoveryAction: String, Codable {
 
 enum SharedDictationCommand: String, Codable, Hashable {
     case none
+    case pause
+    case resume
     case stop
     case cancel
     case retry
+}
+
+enum SharedDictationSessionKind: String, Codable, Hashable {
+    /// The protected keyboard → containing app → host switchback lane, whose
+    /// recorder and command monitor live in AppModel.
+    case keyboardRoundTrip
+    /// The Back Tap/App Intent lane, whose ordered segment manifest is owned by
+    /// DictationEngine and whose controls live in the Live Activity.
+    case segmentedIntent
 }
 
 struct SharedDictationSnapshot: Codable, Equatable {
     var sessionID: UUID
     var phase: SharedDictationPhase
     var command: SharedDictationCommand
+    /// Optional so snapshots written before the two engines were distinguished
+    /// remain decodable. Every newly created session writes an explicit kind.
+    var sessionKind: SharedDictationSessionKind? = nil
     var transcript: String?
     var errorMessage: String?
     /// Whether a History row contains this transcript. `false` is expected
@@ -285,9 +362,9 @@ struct SharedDictationSnapshot: Codable, Equatable {
     /// True only when a private, journaled audio file can be retried after the
     /// process exits. Ordinary setup failures remain safely dismissible.
     var hasRecoverableAudio: Bool? = nil
-    /// Privacy-safe proof that the session began from an active keyboard text
-    /// field. Delivery targets the cursor visible when the user taps Stop;
-    /// background sessions without this claim require explicit insertion.
+    /// Privacy-safe proof that an active keyboard text field claimed delivery.
+    /// Stop & Insert refreshes it at the tap's cursor, and automatic insertion
+    /// requires that exact context to remain current through transcription.
     var insertionContextFingerprint: String? = nil
     var recoveryAction: SharedDictationRecoveryAction? = nil
     /// Monotonic counters make cross-process state changes diagnosable and let
@@ -311,6 +388,9 @@ struct SharedDictationSnapshot: Codable, Equatable {
     /// Historical diagnostic for the retired background-pasteboard experiment.
     /// Keep it optional so sessions written by older builds still decode.
     var clipboardLanded: Bool? = nil
+    /// Hot-microphone time already completed before the current segment.
+    /// Optional for snapshots written by older builds.
+    var elapsedDuration: TimeInterval? = nil
     var startedAt: Date
     var updatedAt: Date
 
@@ -319,6 +399,7 @@ struct SharedDictationSnapshot: Codable, Equatable {
             sessionID: UUID(),
             phase: .idle,
             command: .none,
+            sessionKind: nil,
             transcript: nil,
             errorMessage: nil,
             historyPersisted: nil,
@@ -338,6 +419,7 @@ struct SharedDictationSnapshot: Codable, Equatable {
             returnAttempts: nil,
             incomingURLDeliveryRoute: nil,
             incomingURLSourceApplication: nil,
+            elapsedDuration: nil,
             startedAt: Date(),
             updatedAt: Date()
         )
@@ -404,6 +486,7 @@ struct SharedDictationStore: @unchecked Sendable {
                 sessionID: sessionID,
                 phase: .launching,
                 command: .none,
+                sessionKind: .keyboardRoundTrip,
                 transcript: nil,
                 errorMessage: nil,
                 historyPersisted: nil,
@@ -423,6 +506,7 @@ struct SharedDictationStore: @unchecked Sendable {
                 returnAttempts: nil,
                 incomingURLDeliveryRoute: nil,
                 incomingURLSourceApplication: nil,
+                elapsedDuration: nil,
                 startedAt: Date(),
                 updatedAt: Date()
             )
@@ -506,6 +590,7 @@ struct SharedDictationStore: @unchecked Sendable {
 
             var snapshot = SharedDictationSnapshot.idle
             snapshot.phase = .starting
+            snapshot.sessionKind = .segmentedIntent
             snapshot.revision = (current.revision ?? 0) + 1
             snapshot.captureOwnerID = snapshot.sessionID
             snapshot.captureLeaseUpdatedAt = Date()
@@ -524,6 +609,7 @@ struct SharedDictationStore: @unchecked Sendable {
         hasRecoverableAudio: Bool? = nil,
         recoveryAction: SharedDictationRecoveryAction? = nil,
         clipboardLanded: Bool? = nil,
+        elapsedDuration: TimeInterval? = nil,
         startedAt: Date? = nil
     ) -> Bool {
         update(sessionID: sessionID) { snapshot in
@@ -541,6 +627,79 @@ struct SharedDictationStore: @unchecked Sendable {
             }
             snapshot.recoveryAction = recoveryAction
             snapshot.clipboardLanded = clipboardLanded
+            if let elapsedDuration {
+                snapshot.elapsedDuration = max(0, elapsedDuration)
+            }
+        }
+    }
+
+    /// Compare-and-swap phase transition for cross-process ownership changes.
+    /// Recovery can be offered by the foreground app at the same moment an App
+    /// Intent rehydrates the background engine; only the process that still
+    /// sees the expected phase may claim the parent session.
+    @discardableResult
+    func transitionPhase(
+        from expectedPhases: [SharedDictationPhase],
+        to phase: SharedDictationPhase,
+        sessionID: UUID,
+        transcript: String? = nil,
+        errorMessage: String? = nil,
+        historyPersisted: Bool? = nil,
+        hasRecoverableAudio: Bool? = nil,
+        recoveryAction: SharedDictationRecoveryAction? = nil,
+        elapsedDuration: TimeInterval? = nil,
+        startedAt: Date? = nil
+    ) -> Bool {
+        updateIf(sessionID: sessionID) { snapshot in
+            guard expectedPhases.contains(snapshot.phase) else { return false }
+            if let startedAt {
+                snapshot.startedAt = startedAt
+            } else if phase == .recording && snapshot.phase != .recording {
+                snapshot.startedAt = Date()
+            }
+            snapshot.phase = phase
+            snapshot.transcript = transcript
+            snapshot.errorMessage = errorMessage
+            snapshot.historyPersisted = historyPersisted
+            if let hasRecoverableAudio {
+                snapshot.hasRecoverableAudio = hasRecoverableAudio
+            }
+            snapshot.recoveryAction = recoveryAction
+            if let elapsedDuration {
+                snapshot.elapsedDuration = max(0, elapsedDuration)
+            }
+            return true
+        }
+    }
+
+    /// Atomically verifies both ownership and the heartbeat cutoff before a
+    /// keyboard declares a containing-app session abandoned. A heartbeat that
+    /// lands at the timeout boundary therefore wins instead of being replaced
+    /// by a stale read followed by an unconditional failure write.
+    @discardableResult
+    func failAbandonedSession(
+        sessionID: UUID,
+        phases: Set<SharedDictationPhase>,
+        updatedAtOrBefore cutoff: Date,
+        errorMessage: String,
+        hasRecoverableAudio: Bool,
+        recoveryAction: SharedDictationRecoveryAction?
+    ) -> Bool {
+        updateIf(sessionID: sessionID) { snapshot in
+            guard
+                phases.contains(snapshot.phase),
+                snapshot.updatedAt <= cutoff
+            else {
+                return false
+            }
+            snapshot.phase = .failed
+            snapshot.transcript = nil
+            snapshot.errorMessage = errorMessage
+            snapshot.hasRecoverableAudio = hasRecoverableAudio
+            snapshot.recoveryAction = recoveryAction
+            snapshot.captureOwnerID = nil
+            snapshot.captureLeaseUpdatedAt = nil
+            return true
         }
     }
 
@@ -652,19 +811,21 @@ struct SharedDictationStore: @unchecked Sendable {
         } ?? false
     }
 
-    /// An App Intent starts outside the keyboard process. If the keyboard is
-    /// already visible, let it claim keyboard-origin delivery during the active
-    /// session. A late keyboard with no claim must require explicit insertion.
+    /// An App Intent starts outside the keyboard process. A resident keyboard
+    /// can aim that session at its active cursor before, during, or immediately
+    /// after transcription. Stop & Insert replaces an earlier residency claim
+    /// synchronously so the tap's current cursor is the delivery target.
     @discardableResult
     func claimInsertionContext(
         sessionID: UUID,
-        fingerprint: String
+        fingerprint: String,
+        replacingExistingClaim: Bool = false
     ) -> Bool {
         updateIf(sessionID: sessionID) { snapshot in
             guard
-                [.launching, .starting, .recording, .transcribing]
-                    .contains(snapshot.phase),
+                snapshot.phase.allowsKeyboardInsertionContextClaim,
                 snapshot.insertionContextFingerprint == nil
+                    || replacingExistingClaim
             else {
                 return false
             }

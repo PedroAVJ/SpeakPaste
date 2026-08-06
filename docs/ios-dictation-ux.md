@@ -76,7 +76,9 @@ The Live Activity is the iOS HUD: a persistent control strip for the whole
 capture. Compact in the Dynamic Island; touch and hold to expand an authored
 SwiftUI card with working Pause and Cancel buttons (App Intent-backed,
 executed in place, no app launch); the same card sits on the Lock Screen with
-zero presses to reach it.
+zero presses to see it. Executing a control still follows iOS's current lock
+and authentication policy; visibility is not a promise that a locked phone
+will run the action without authentication.
 
 Dismissal keeps the macOS invariant: it destroys nothing. A canceled
 dictation folds into recovery, so a misfired Cancel costs a trip to recovery,
@@ -100,11 +102,13 @@ At-cursor insertion on iOS has exactly one door: a custom keyboard extension,
 while it is the active keyboard on the focused field. Nothing else can type
 into another app, and the clipboard is constitutionally manual. Inside that
 door, delivery is automatic: when a transcript completes and the SpeakPaste
-keyboard is up, the text lands at the cursor without a tap. Stop from the
-Live Activity and the words simply appear. Aiming is focusing — wherever the
-cursor sits when the keyboard is up is where the dictation was aimed. The
-keyboard's **Stop & Insert** button is the manual form of this automatic
-behavior, not a required step.
+keyboard is up, the text lands at the cursor without a second tap.
+**Stop & Insert** owns both halves of the final action: it ends capture and
+claims the cursor synchronously. If transcription finishes afterward, the
+words appear there automatically. Aiming is focusing — wherever the cursor
+sits when the keyboard is up is where the dictation was aimed.
+If the field or cursor changes before transcription finishes, SpeakPaste keeps
+the transcript and exposes **Insert Here** instead of guessing at a new target.
 
 Automatic delivery requires residency: SpeakPaste is the daily keyboard. The
 bet behind residency is explicit. SpeakPaste is a transcription application,
@@ -137,13 +141,40 @@ what feedback marks the start — is dictated by the platform. Those
 implications are recorded here from device evidence as they are discovered,
 not designed in advance.
 
-One implication is already on record from earlier device work: iOS forbids
-*activating* a recording session cold from the background — recording in the
-background is allowed, cold activation is not. A double tap starts capture
-invisibly only while SpeakPaste is resident; after a force quit or eviction,
-the first start has to surface the app once to re-establish residency.
-superwhisper behaves the same way — it dictates while backgrounded and only
-opens after a force quit — which is the existence proof for both halves.
+Apple's supported background entry point is the paired
+`AudioRecordingIntent` / `LiveActivityIntent` route: the intent may launch the
+app process without presenting its UI, and the Live Activity must span the
+recording. That is the implementation contract, not a guarantee about every
+process condition. A user force-quit normally suppresses later background
+launches until the app is opened again, while ordinary cold-launch, eviction,
+lock-state, and resume behavior remain physical-device acceptance cases.
+Superwhisper's signed iOS package is an existence proof for the architecture;
+its encrypted executable and Shortcut metadata do not prove those runtime
+boundaries on this phone.
+
+### Superwhisper iOS package evidence
+
+This comparison is against the downloaded **iPhone IPA**, not Superwhisper's
+macOS app:
+
+- Package: `Superwhisper-2.19-build3.ipa`
+- Version/build: 2.19 (3)
+- SHA-256: `97bf9b57b6f6bf574653d0eef57286493e2e014f459b4cca61c8835555b72e08`
+- Its signed Shortcut runs `ToggleRecordingIntent`. An empty result is the
+  start/no-result branch; a non-empty result is copied to the clipboard, joined
+  into the completion message, shown in a notification, and acknowledged with
+  vibration.
+- The containing-app intent is background-capable with
+  `openAppWhenRun = false`, accepts an optional mode name, and declares audio
+  recording/session protocols. The Live Activity extension exposes a separate
+  zero-parameter **Toggle Recording** intent with no output.
+
+That metadata validates the start/stop/clipboard architecture and the need for
+an intent-backed Live Activity control. It does not validate SpeakPaste's
+pause/resume segment model: Superwhisper's shipped flow is a toggle that ends
+and returns text, and its FairPlay-encrypted executable prevents method-body
+inspection. Cold launch, lock state, process eviction, and microphone release
+still require direct tests on this iPhone.
 
 ## Fallback interaction: keyboard round trip
 
@@ -281,6 +312,15 @@ keyboard insertion.
 Focused builds and tests can verify state transitions, exact-once insertion
 bookkeeping, hook linkage, catalog mappings, and bundle filtering. They cannot
 prove a visible iOS scene transition.
+
+The August 6 physical screen recording proves that iOS recognized Double Back
+Tap and ran the repaired one-action Shortcut. It does not prove microphone
+startup: a preceding Mac-tunnel invocation had left a failed parent marked as
+recoverable, so the intent rejected the physical tap before capture. The exact
+device journal contained zero finalized segments and one active bundle whose
+only file was `active-manifest.json`; there was no `audio.m4a`. The current
+source now retires only that provably empty shape and refuses cleanup when the
+capture contains any audio bytes. That repair still needs a fresh physical run.
 
 Before the primary interaction is called end-to-end verified, exercise directly
 on the physical iPhone:

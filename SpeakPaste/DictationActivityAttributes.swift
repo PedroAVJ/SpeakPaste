@@ -7,16 +7,26 @@ struct SpeakPasteActivityAttributes: ActivityAttributes, Hashable {
         /// Mutable because microphone activation happens after the Live
         /// Activity is created. The timer must begin only once capture is real.
         var recordingStartedAt: Date?
+        /// Total hot-microphone time already banked before the current segment.
+        /// Pauses freeze this value; resumes use it to anchor a continuous timer
+        /// without keeping the microphone alive.
+        var elapsedDuration: TimeInterval
 
-        init(phase: Phase, recordingStartedAt: Date? = nil) {
+        init(
+            phase: Phase,
+            recordingStartedAt: Date? = nil,
+            elapsedDuration: TimeInterval = 0
+        ) {
             self.phase = phase
             self.recordingStartedAt = recordingStartedAt
+            self.elapsedDuration = max(0, elapsedDuration)
         }
     }
 
     enum Phase: String, Codable, Hashable {
         case starting
         case recording
+        case paused
         case transcribing
         case completed
         case failed
@@ -26,6 +36,7 @@ struct SpeakPasteActivityAttributes: ActivityAttributes, Hashable {
             switch self {
             case .starting: "Starting"
             case .recording: "Recording"
+            case .paused: "Paused"
             case .transcribing: "Transcribing"
             case .completed: "Transcript ready"
             case .failed: "Dictation failed"
@@ -37,6 +48,7 @@ struct SpeakPasteActivityAttributes: ActivityAttributes, Hashable {
             switch self {
             case .starting: "ellipsis"
             case .recording: "waveform"
+            case .paused: "pause.fill"
             case .transcribing: "ellipsis"
             case .completed: "checkmark"
             case .failed: "exclamationmark"

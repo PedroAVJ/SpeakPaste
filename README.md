@@ -11,10 +11,11 @@ The Xcode project contains four product targets:
   paste.
 - **SpeakPaste** — an iPhone containing app with record, edit, copy, share, and
   local transcript history.
-- **SpeakPasteKeyboard** — a custom typing keyboard that starts a containing-app
-  recording, controls it after switchback, and inserts the result at the cursor.
+- **SpeakPasteKeyboard** — a resident typing and correction keyboard that ends
+  and inserts global dictation at the cursor, with a containing-app round trip
+  retained as its fallback start path.
 - **SpeakPasteLiveActivity** — the Lock Screen and Dynamic Island recording
-  indicator used by the optional Shortcut-driven background capture path.
+  status and control surface for the primary Back Tap/App Shortcut path.
 
 ## Requirements
 
@@ -245,25 +246,33 @@ For a repeatable physical-device install, put those values plus your team,
 signing identity, and device identifier in the ignored
 `scripts/local-identity.env`, then run `scripts/install-iphone.sh`. The installer
 builds directly against the device SDK, packages the checked-in icon PNGs using
-`CFBundleIcons`, signs the result, installs it, and launches it. It does not
+`CFBundleIcons`, signs the result, installs it, and launches it when the device
+is unlocked. It does not
 require an iOS Simulator runtime or modify tracked identifiers.
 
 Then:
 
 1. Select the same development team for **SpeakPaste** and
-   **SpeakPasteKeyboard**.
+   **SpeakPasteKeyboard**, and the Live Activity extension.
 2. Run **SpeakPaste** on your iPhone and save your ElevenLabs API key in
    Settings.
 3. In iOS Settings, open **General → Keyboard → Keyboards → Add New Keyboard**,
    add SpeakPaste, and enable **Allow Full Access**.
-4. Open Notes or another text field, switch to SpeakPaste with the globe key,
-   and tap **Start**.
-5. SpeakPaste briefly opens to own the microphone. Accept microphone permission
-   if needed. On the first keyboard dictation, tap **OK** on the one-time
-   switchback explanation.
-6. SpeakPaste returns to the previous app while recording continues. Tap
-   **Stop & Insert** in the keyboard to transcribe and insert the result at the
-   existing cursor.
+4. Open SpeakPaste's Shortcut setup, then assign **Toggle Dictation** under
+   **Settings → Accessibility → Touch → Back Tap → Double Tap**. iOS does not
+   expose an API that lets SpeakPaste make this assignment for you.
+5. Double-tap the back of the phone from any app to start. Later double taps
+   pause and resume the same thought; the Live Activity mirrors Pause/Resume
+   and offers non-destructive Cancel.
+6. Focus the destination field, select the resident SpeakPaste keyboard, and
+   tap **Stop & Insert**. The keyboard claims that cursor before stopping, then
+   inserts the completed transcript exactly once without a second tap.
+
+If Back Tap is unavailable, use the compatibility round trip: select the
+SpeakPaste keyboard and tap its fallback **Start** action. SpeakPaste briefly
+opens to own the microphone, explains the one-time switchback, and returns to
+the supported host while capture continues. A manual home-bar swipe remains the
+fallback when the exact cataloged return route is unavailable.
 
 While a keyboard dictation owns the app, SpeakPaste shows a single hand-off
 screen instead of its dashboard: the recording state, and how to get back where
@@ -275,10 +284,11 @@ visible for hosts that cannot be returned to automatically.
 
 The keyboard renders its own QWERTY, number, and symbol planes because iOS does
 not place Apple's keyboard beneath a third-party keyboard extension. Its idle
-layout has the **Start** action; active dictation replaces the keys with
-**Listening**, **Cancel**, and **Stop & Insert**, then shows **Transcribing**
-until the result is inserted exactly once. If automatic return is unavailable,
-recording continues and the app explains how to swipe back manually.
+layout retains the fallback **Start** action. During recording, pause, and
+transcription, the typing and correction keys stay resident; only the accessory
+bar changes status and exposes **Stop & Insert** while the session can be
+ended. Pause and Cancel deliberately live on the Live Activity instead of being
+duplicated on the keyboard.
 
 The reference recording, device evidence, and acceptance criteria live in
 [the iPhone keyboard round-trip specification](docs/ios-keyboard-roundtrip-spec.md).
@@ -322,12 +332,14 @@ The implementation was compared with
 [Apple's extension URL-opening contract](https://developer.apple.com/documentation/foundation/nsextensioncontext/open(_:completionhandler:)),
 and [Apple DTS's current public-API boundary](https://developer.apple.com/forums/thread/826851).
 
-### Optional Shortcut trigger
+### Primary Back Tap trigger
 
-SpeakPaste still includes a `Toggle Dictation` App Intent and Live Activity for
-people who prefer a global Shortcut or Back Tap trigger. That path records
-without the foreground bounce and queues its result for keyboard insertion, but
-it is an alternative automation surface rather than the primary keyboard UX.
+SpeakPaste exposes `Toggle Dictation` as an App Shortcut backed by
+`AudioRecordingIntent`, `LiveActivityIntent`, and a session-spanning Live
+Activity. Assigning it to Double Back Tap produces the primary no-bounce path:
+idle starts, recording pauses, and paused resumes. Delivery remains a separate
+**Stop & Insert** action because only the active keyboard can place text in
+another app.
 
 ## Privacy
 
@@ -420,29 +432,35 @@ For iPhone:
 
 - Both app and keyboard sources pass focused Swift 6 type-checking against the
   installed iOS SDK.
-- The optional Shortcut/Back Tap recording path uses the paired
+- The primary Shortcut/Back Tap recording path uses the paired
   `AudioRecordingIntent` and
   `LiveActivityIntent` contracts, with a WidgetKit Live Activity spanning the
-  full capture. Its finite post-stop background lane makes one bounded
-  25-second Scribe request; expiration cancels it, publishes failure, removes
-  the recording, and stops the heartbeat before iOS can suspend the process.
+  full capture. Each pause releases the microphone, durably banks and eagerly
+  transcribes one segment, and resume opens a new segment. Its finite
+  transcription lane publishes a recoverable failure on expiration; source
+  audio is retired only after the joined transcript is durably published.
 - Launch, host-resolution, audio-stage, shared-session, and return-route
   diagnostics are persisted in the App Group.
 - Recorded regressions cover a failed containing-app launch, the invalid
   `.record` / `.spokenAudio` / `.duckOthers` audio configuration, and a generic
   suspension that incorrectly returned to the Home Screen.
-- An earlier signed app and embedded-keyboard build was installed on a physical
-  iPhone with matching App Group entitlements. The API key survived replacement,
-  and microphone permission, keyboard installation, and Full Access were
-  exercised.
+- The pre-repair signed app, embedded keyboard, and Live Activity build was
+  installed on a physical iPhone with matching App Group entitlements. The
+  failed-start recovery repair in the current source has been type-checked but
+  has not been installed or rerun on the phone. Installation, an unlocked
+  launch, and the new interaction matrix remain separate acceptance steps.
 
-The primary Notes round trip is physically verified on the iPhone 15 running
+The compatibility Notes round trip is physically verified on the iPhone 15 running
 iOS 26.5.2. Two consecutive sessions captured `com.apple.mobilenotes` through
 the keyboard-arbiter hook, opened `mobilenotes://`, returned automatically, and
 ended in the keyboard's `inserted` phase; the second run did not repeat the
 first-use explanation. One third-party host, Full Access denial, failure
 recovery, and the manual-swipe fallback remain to be exercised before calling
-every iPhone path end-to-end verified.
+every iPhone path end-to-end verified. The new Back Tap start, segmented
+pause/resume, interactive Live Activity, and keyboard-resident Stop & Insert
+flow still require the direct physical-device matrix in
+`docs/ios-dictation-ux.md`; a signed install or compile does not establish that
+acceptance.
 
 ## License
 

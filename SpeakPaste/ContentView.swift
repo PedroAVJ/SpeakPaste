@@ -1,3 +1,4 @@
+import AppIntents
 import SwiftUI
 import UIKit
 
@@ -168,7 +169,7 @@ struct ContentView: View {
                 Text("SpeakPaste")
                     .font(.system(.title2, design: .rounded, weight: .bold))
                     .foregroundStyle(Theme.ink)
-                Text("Start from the keyboard. Return with your words.")
+                Text("Double-tap the back of your iPhone. Finish at the keyboard.")
                     .font(.footnote)
                     .foregroundStyle(Theme.inkMuted)
             }
@@ -475,6 +476,9 @@ private struct KeyboardSessionView: View {
     }
 }
 
+/// Back Tap-first onboarding. The primary loop never shows this screen —
+/// capture starts with a double tap wherever the user already is — so the
+/// dashboard's job is the one-time setup and the fallbacks.
 private struct IdleView: View {
     @ObservedObject var model: AppModel
 
@@ -483,57 +487,63 @@ private struct IdleView: View {
             VStack(alignment: .leading, spacing: 20) {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(spacing: 10) {
-                        Image(systemName: "waveform")
+                        Image(systemName: "hand.tap.fill")
                             .font(.system(size: 20, weight: .medium))
                             .foregroundStyle(Theme.accent)
                             .frame(width: 40, height: 40)
                             .background(Circle().fill(Theme.surface))
                             .overlay(Circle().stroke(Theme.stroke))
                             .accessibilityHidden(true)
-                        Text("Dictate from the keyboard")
+                        Text("Dictate from anywhere")
                             .font(.system(.title3, design: .rounded, weight: .semibold))
                             .foregroundStyle(Theme.ink)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                    Text("Tap Start, speak, then insert at the same cursor.")
+                    Text("Double-tap the back of your iPhone to start recording — no app switch, no waiting for a keyboard.")
                         .font(.subheadline)
                         .foregroundStyle(Theme.inkMuted)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 .accessibilityElement(children: .combine)
 
-                VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 18) {
                     FlowStep(
                         number: 1,
-                        title: "Choose the SpeakPaste keyboard",
-                        detail: "Open any text field, hold the globe key, and pick SpeakPaste."
+                        title: "Add the SpeakPaste keyboard",
+                        detail: "Settings › General › Keyboard › Keyboards. Turn on Allow Full Access so the transcript can land at your cursor."
                     )
                     FlowStep(
                         number: 2,
-                        title: "Tap Start",
-                        detail: "SpeakPaste briefly opens so the containing app can own the microphone."
-                    )
+                        title: "Point Back Tap at Toggle Dictation",
+                        detail: "Settings › Accessibility › Touch › Back Tap › Double Tap, then pick SpeakPaste's Toggle Dictation shortcut."
+                    ) {
+                        // iOS has no API that assigns Back Tap for the user;
+                        // the most this screen can honestly do is open the
+                        // shortcut that Back Tap will be pointed at.
+                        VStack(alignment: .leading, spacing: 6) {
+                            ShortcutsLink()
+                                .shortcutsLinkStyle(.dark)
+                            Text("Opens Toggle Dictation in the Shortcuts app — the same action Back Tap runs. Back Tap itself is assigned in Settings.")
+                                .font(.caption)
+                                .foregroundStyle(Theme.inkMuted)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
                     FlowStep(
                         number: 3,
-                        title: "Return and talk",
-                        detail: "After the one-time explanation, SpeakPaste switches back while recording continues."
+                        title: "Double-tap to start — and to pause",
+                        detail: "The first double-tap starts recording where you are; later taps pause and resume. The Live Activity shows the capture, with Pause and Cancel a touch-and-hold away."
                     )
                     FlowStep(
                         number: 4,
-                        title: "Tap Stop & Insert",
-                        detail: "The keyboard transcribes, inserts exactly once at your cursor, and returns to typing."
+                        title: "Finish with Stop & Insert",
+                        detail: "Focus the field, bring up the SpeakPaste keyboard, and tap Stop & Insert. If the keyboard is already up when the transcript lands, it inserts on its own — exactly once."
                     )
                 }
                 .padding(16)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(RoundedRectangle(cornerRadius: 20).fill(Theme.surface))
                 .overlay(RoundedRectangle(cornerRadius: 20).stroke(Theme.stroke))
-
-                Text(
-                    "One-time setup: add the SpeakPaste keyboard in Settings › General › Keyboard and turn on Allow Full Access. Open SpeakPaste once to save your ElevenLabs key; iOS asks for microphone permission on the first Start. If iOS cannot switch back automatically, swipe right along the bottom home bar; recording keeps going."
-                )
-                .font(.footnote)
-                .foregroundStyle(Theme.inkMuted)
-                .fixedSize(horizontal: false, vertical: true)
 
                 if !model.hasAPIKey {
                     Button {
@@ -542,28 +552,33 @@ private struct IdleView: View {
                         Label("Add ElevenLabs API key", systemImage: "key.fill")
                     }
                     .buttonStyle(QuietPillButtonStyle())
+                    .accessibilityHint(
+                        "Transcription needs a key before your first dictation."
+                    )
                 }
 
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Manual fallback")
-                        .font(.footnote.weight(.semibold))
-                        .textCase(.uppercase)
-                        .kerning(1)
-                        .foregroundStyle(Theme.inkMuted)
+                // Both fallbacks, kept plainly secondary to the double tap.
+                VStack(alignment: .leading, spacing: 16) {
+                    SectionHeading("Other ways in")
 
-                    Button {
-                        model.toggleRecording()
-                    } label: {
-                        Label("Record in the app", systemImage: "mic.fill")
+                    FallbackRow(
+                        title: "Start from the keyboard",
+                        detail: "Tap Start on the SpeakPaste keyboard. SpeakPaste opens for a moment to take the microphone, then switches back while recording continues. If iOS can't switch back automatically, swipe right along the bottom home bar — recording keeps going."
+                    )
+
+                    FallbackRow(
+                        title: "Record in the app",
+                        detail: "Records while SpeakPaste is open, with the transcript here to edit, copy, or share."
+                    ) {
+                        Button {
+                            model.toggleRecording()
+                        } label: {
+                            Label("Start Recording", systemImage: "mic.fill")
+                        }
+                        .buttonStyle(QuietPillButtonStyle())
+                        .disabled(!model.canStartRecording)
+                        .accessibilityHint("Starts a recording here in SpeakPaste.")
                     }
-                    .buttonStyle(QuietPillButtonStyle())
-                    .disabled(!model.canStartRecording)
-                    .accessibilityHint("Starts a recording here in SpeakPaste.")
-
-                    Text("Records while the app is open, with the transcript here to edit, copy, or share.")
-                        .font(.footnote)
-                        .foregroundStyle(Theme.inkMuted)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
                 .padding(.top, 4)
             }
@@ -575,21 +590,103 @@ private struct IdleView: View {
     }
 }
 
-private struct FlowStep: View {
-    let number: Int
-    let title: String
-    let detail: String
+/// One numbered setup step, with room for the single action that step needs.
+/// The action sits inside the step it serves rather than floating below the
+/// list, so the reader never has to map a loose button back onto a sentence.
+private struct FlowStep<Accessory: View>: View {
+    private let number: Int
+    private let title: String
+    private let detail: String
+    private let accessory: Accessory
+
+    init(
+        number: Int,
+        title: String,
+        detail: String,
+        @ViewBuilder accessory: () -> Accessory
+    ) {
+        self.number = number
+        self.title = title
+        self.detail = detail
+        self.accessory = accessory()
+    }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Text("\(number)")
-                .font(.subheadline.weight(.bold))
-                .monospacedDigit()
-                .foregroundStyle(Theme.accent)
-                .frame(width: 26, height: 26)
-                .background(Circle().fill(Theme.accent.opacity(0.14)))
-                .accessibilityHidden(true)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 12) {
+                Text("\(number)")
+                    .font(.subheadline.weight(.bold))
+                    .monospacedDigit()
+                    .foregroundStyle(Theme.accent)
+                    .frame(width: 26, height: 26)
+                    .background(Circle().fill(Theme.accent.opacity(0.14)))
+                    .accessibilityHidden(true)
 
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Theme.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(detail)
+                        .font(.footnote)
+                        .foregroundStyle(Theme.inkMuted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Step \(number): \(title). \(detail)")
+
+            accessory
+                .padding(.leading, 38)
+        }
+    }
+}
+
+extension FlowStep where Accessory == EmptyView {
+    init(number: Int, title: String, detail: String) {
+        self.init(number: number, title: title, detail: detail) {
+            EmptyView()
+        }
+    }
+}
+
+private struct SectionHeading: View {
+    private let text: String
+
+    init(_ text: String) {
+        self.text = text
+    }
+
+    var body: some View {
+        Text(text)
+            .font(.footnote.weight(.semibold))
+            .textCase(.uppercase)
+            .kerning(1)
+            .foregroundStyle(Theme.inkMuted)
+            .accessibilityAddTraits(.isHeader)
+    }
+}
+
+/// A fallback route: named, explained once, and given its button only when it
+/// has one. Nothing here is a card, so the fallbacks stay visibly below the
+/// one setup card that matters.
+private struct FallbackRow<Action: View>: View {
+    private let title: String
+    private let detail: String
+    private let action: Action
+
+    init(
+        title: String,
+        detail: String,
+        @ViewBuilder action: () -> Action
+    ) {
+        self.title = title
+        self.detail = detail
+        self.action = action()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
                     .font(.subheadline.weight(.semibold))
@@ -600,9 +697,17 @@ private struct FlowStep: View {
                     .foregroundStyle(Theme.inkMuted)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("\(title). \(detail)")
+
+            action
         }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Step \(number): \(title). \(detail)")
+    }
+}
+
+extension FallbackRow where Action == EmptyView {
+    init(title: String, detail: String) {
+        self.init(title: title, detail: detail) { EmptyView() }
     }
 }
 

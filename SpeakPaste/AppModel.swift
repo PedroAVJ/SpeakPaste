@@ -51,12 +51,14 @@ final class AppModel: ObservableObject {
     private let defaults: UserDefaults
     private let sharedStore: SharedDictationStore
     private let recordingJournal: RecordingJournal
+    private let segmentedSessionStore: SegmentedDictationSessionStore
     private var activeRecordingURL: URL?
     private var activeRecordingCapture: RecordingJournalCapture?
     private var activeRecordingJournalEntry: RecordingJournalEntry?
     private var activeRecordingDuration: TimeInterval = 0
     private var activeSharedSessionID: UUID?
     private var activeRecordingSessionID: UUID?
+    private var activeSegmentedSession: SegmentedDictationSessionManifest?
     private var captureLeaseHeldID: UUID?
     private var copiedTask: Task<Void, Never>?
     private var sharedMonitorTask: Task<Void, Never>?
@@ -66,7 +68,10 @@ final class AppModel: ObservableObject {
     private var recorderEventCancellable: AnyCancellable?
     private var recordingNoticeTask: Task<Void, Never>?
     private var captureLeaseHeartbeatTask: Task<Void, Never>?
+    private var recoveryRecheckTask: Task<Void, Never>?
     private var transcriptionTask: Task<TranscriptionResult, Error>?
+    private var segmentedTranscriptionTask:
+        Task<SegmentedTranscriptAssembly, Error>?
     private var transcriptionAttemptID: UUID?
 
     private enum Keys {
@@ -84,7 +89,9 @@ final class AppModel: ObservableObject {
         keychain: KeychainStore = KeychainStore(),
         defaults: UserDefaults = .standard,
         sharedStore: SharedDictationStore = SharedDictationStore(),
-        recordingJournal: RecordingJournal = RecordingJournal()
+        recordingJournal: RecordingJournal = RecordingJournal(),
+        segmentedSessionStore: SegmentedDictationSessionStore =
+            SegmentedDictationSessionStore()
     ) {
         self.client = client
         self.recorder = recorder ?? AudioRecorder()
@@ -93,6 +100,7 @@ final class AppModel: ObservableObject {
         self.defaults = defaults
         self.sharedStore = sharedStore
         self.recordingJournal = recordingJournal
+        self.segmentedSessionStore = segmentedSessionStore
 
         if
             let rawLanguage = defaults.string(forKey: Keys.language),
@@ -126,9 +134,13 @@ final class AppModel: ObservableObject {
     var isKeyboardDictation: Bool { activeSharedSessionID != nil }
     var canStartRecording: Bool {
         isRecording
-            || (!isTranscribing && activeRecordingURL == nil)
+            || (!isTranscribing
+                && activeRecordingURL == nil
+                && activeSegmentedSession == nil)
     }
-    var hasRecoverableRecording: Bool { activeRecordingURL != nil }
+    var hasRecoverableRecording: Bool {
+        activeRecordingURL != nil || activeSegmentedSession != nil
+    }
     var canAutomaticallyReturnToKeyboardHost: Bool {
         HostAppSwitcher.supportsAutomaticReturn(
             to: keyboardReturnPrompt?.bundleIdentifier
@@ -311,7 +323,7 @@ final class AppModel: ObservableObject {
             isStartingRecording = false
             isPreparingKeyboardSession = false
         }
-        guard activeRecordingURL == nil else {
+        guard activeRecordingURL == nil, activeSegmentedSession == nil else {
             let message = "An unfinished recording is ready to retry. Transcribe or discard it before starting another dictation."
             phase = .failed(message)
             if let incomingSharedSnapshot {
@@ -631,16 +643,20 @@ final class AppModel: ObservableObject {
     }
 
     func retry() {
-        guard activeRecordingURL != nil else { return }
+        guard hasRecoverableRecording else { return }
         guard beginBackgroundExecution() else {
             surfaceBackgroundTranscriptionUnavailable()
             return
         }
-        transcribeActiveRecording()
+        if activeSegmentedSession != nil {
+            transcribeActiveSegmentedSession()
+        } else {
+            transcribeActiveRecording()
+        }
     }
 
     func retryAfterError() {
-        if activeRecordingURL != nil {
+        if hasRecoverableRecording {
             retry()
         } else {
             resetNonrecoverableSharedFailureIfNeeded()
@@ -650,9 +666,13 @@ final class AppModel: ObservableObject {
     }
 
     func discardRecoverableRecording() {
-        guard activeRecordingURL != nil else { return }
+        guard hasRecoverableRecording else { return }
         let sharedSessionID = activeSharedSessionID
-        guard discardActiveRecording() else { return }
+        if activeSegmentedSession != nil {
+            guard discardActiveSegmentedSession() else { return }
+        } else {
+            guard discardActiveRecording() else { return }
+        }
         if let sharedSessionID {
             sharedStore.markHandled(sessionID: sharedSessionID)
         }
@@ -752,7 +772,7 @@ final class AppModel: ObservableObject {
     }
 
     func dismissError() {
-        guard activeRecordingURL == nil else { return }
+        guard !hasRecoverableRecording else { return }
         if case .failed = phase {
             resetNonrecoverableSharedFailureIfNeeded()
             phase = .idle
@@ -877,6 +897,158 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func transcribeActiveSegmentedSession() {
+        guard
+            let manifest = activeSegmentedSession,
+            let apiKey = keychain.load(),
+            !apiKey.isEmpty
+        else {
+            phase = .failed(
+                "The segmented recording or ElevenLabs API key is missing."
+            )
+            endBackgroundExecution()
+            return
+        }
+        guard transcriptionAttemptID == nil else { return }
+
+        let group: SegmentedDictationRecoveryGroup
+        do {
+            group = try segmentedSessionStore.recoveryGroup(
+                for: manifest,
+                journalEntries: recordingJournal.recoverableEntries()
+            )
+        } catch {
+            phase = .failed(error.localizedDescription)
+            endBackgroundExecution()
+            return
+        }
+
+        let attemptID = UUID()
+        transcriptionAttemptID = attemptID
+        phase = .transcribing
+        if activeSharedSessionID == manifest.id {
+            sharedStore.setPhase(.transcribing, sessionID: manifest.id)
+        }
+        if let updatedManifest = try? segmentedSessionStore.setLifecycle(
+            .transcribing,
+            sessionID: manifest.id
+        ) {
+            activeSegmentedSession = updatedManifest
+        }
+        let selectedLanguage = language
+        let shouldCleanSpeech = cleanSpeech
+        let client = self.client
+        let recordingJournal = self.recordingJournal
+        let request = Task {
+            var pieces: [SegmentedTranscriptPiece] = []
+            for (segment, entry) in zip(
+                manifest.orderedSegments,
+                group.entries
+            ) {
+                let result = try await client.transcribe(
+                    audioURL: try recordingJournal.audioURL(for: entry),
+                    apiKey: apiKey,
+                    language: selectedLanguage,
+                    cleanSpeech: shouldCleanSpeech
+                )
+                pieces.append(
+                    SegmentedTranscriptPiece(
+                        ordinal: segment.ordinal,
+                        text: result.text,
+                        languageCode: result.languageCode
+                    )
+                )
+            }
+            guard let assembly = SegmentedTranscriptAssembler.assemble(pieces) else {
+                throw ElevenLabsClientError.emptyTranscript
+            }
+            return assembly
+        }
+        segmentedTranscriptionTask = request
+
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let assembly = try await request.value
+                guard
+                    self.transcriptionAttemptID == attemptID,
+                    self.activeSegmentedSession?.id == manifest.id
+                else {
+                    return
+                }
+                self.segmentedTranscriptionTask = nil
+                self.transcriptText = assembly.text
+                let historyPersisted = self.history.add(
+                    TranscriptItem(
+                        text: assembly.text,
+                        languageCode: assembly.languageCode,
+                        duration: manifest.totalDuration,
+                        sourceSessionID: manifest.id
+                    )
+                )
+
+                var sharedPersisted = false
+                if self.activeSharedSessionID == manifest.id {
+                    sharedPersisted = self.sharedStore.setPhase(
+                        .completed,
+                        sessionID: manifest.id,
+                        transcript: assembly.text,
+                        historyPersisted: historyPersisted,
+                        hasRecoverableAudio: false
+                    )
+                    guard sharedPersisted else {
+                        throw DictationEngine.EngineError.sharedStateUnavailable
+                    }
+                }
+                self.transcriptionAttemptID = nil
+                self.phase = .idle
+                _ = try? self.segmentedSessionStore.setLifecycle(
+                    .completed,
+                    sessionID: manifest.id
+                )
+                try? self.retireSegmentedSession(
+                    manifest,
+                    entries: group.entries,
+                    discarding: false
+                )
+                // A durable completion can outlive a transient cleanup error.
+                // Drop the in-memory recovery selection so the next restore
+                // pass can retry any completed manifest that remains on disk.
+                self.activeSegmentedSession = nil
+                if self.autoCopy && self.activeSharedSessionID == nil {
+                    self.copyTranscript()
+                } else {
+                    UINotificationFeedbackGenerator().notificationOccurred(
+                        .success
+                    )
+                }
+                self.finishSharedSession(keepSharedResult: true)
+            } catch {
+                guard self.transcriptionAttemptID == attemptID else { return }
+                self.segmentedTranscriptionTask = nil
+                self.transcriptionAttemptID = nil
+                if let updatedManifest = try? self.segmentedSessionStore.setLifecycle(
+                    .failed,
+                    sessionID: manifest.id
+                ) {
+                    self.activeSegmentedSession = updatedManifest
+                }
+                self.phase = .failed(error.localizedDescription)
+                if self.activeSharedSessionID == manifest.id {
+                    self.sharedStore.setPhase(
+                        .failed,
+                        sessionID: manifest.id,
+                        errorMessage: error.localizedDescription,
+                        hasRecoverableAudio: true,
+                        recoveryAction: self.sharedRecoveryAction(for: error)
+                    )
+                }
+                self.endBackgroundExecution()
+                UINotificationFeedbackGenerator().notificationOccurred(.error)
+            }
+        }
+    }
+
     private func startSharedCommandMonitor(sessionID: UUID) {
         sharedMonitorTask?.cancel()
         sharedMonitorTask = Task { [weak self] in
@@ -901,7 +1073,7 @@ final class AppModel: ObservableObject {
                 if self.isRecording {
                     acceptedCommands = [.stop, .cancel]
                 } else if case .failed = self.phase,
-                          self.activeRecordingURL != nil {
+                          self.hasRecoverableRecording {
                     acceptedCommands = [.retry]
                 } else {
                     acceptedCommands = []
@@ -916,7 +1088,7 @@ final class AppModel: ObservableObject {
                 case .cancel where self.isRecording:
                     self.cancelRecording()
                     return
-                case .retry where self.activeRecordingURL != nil
+                case .retry where self.hasRecoverableRecording
                     && !self.isTranscribing:
                     self.sharedStore.setPhase(.transcribing, sessionID: sessionID)
                     self.retry()
@@ -977,6 +1149,8 @@ final class AppModel: ObservableObject {
         keyboardHostAppName = nil
         transcriptionTask?.cancel()
         transcriptionTask = nil
+        segmentedTranscriptionTask?.cancel()
+        segmentedTranscriptionTask = nil
         transcriptionAttemptID = nil
         releaseCaptureLease()
         pendingAutomaticReturnSessionID = nil
@@ -1024,9 +1198,19 @@ final class AppModel: ObservableObject {
         let expiringTaskID = backgroundTaskID
         transcriptionTask?.cancel()
         transcriptionTask = nil
+        segmentedTranscriptionTask?.cancel()
+        segmentedTranscriptionTask = nil
         transcriptionAttemptID = nil
         let message = "iOS ended the background transcription window. The recording is saved; retry in SpeakPaste."
         phase = .failed(message)
+        if let activeSegmentedSession,
+           let failedManifest = try? segmentedSessionStore.setLifecycle(
+               .failed,
+               sessionID: activeSegmentedSession.id
+           )
+        {
+            self.activeSegmentedSession = failedManifest
+        }
         if let activeSharedSessionID {
             _ = sharedStore.setPhase(
                 .failed,
@@ -1139,6 +1323,57 @@ final class AppModel: ObservableObject {
         return true
     }
 
+    @discardableResult
+    private func discardActiveSegmentedSession() -> Bool {
+        guard let manifest = activeSegmentedSession else { return false }
+        do {
+            try retireSegmentedSession(
+                manifest,
+                entries: recordingJournal.recoverableEntries(),
+                discarding: true
+            )
+            return true
+        } catch {
+            phase = .failed(
+                "SpeakPaste couldn't discard the segmented recovery recording: \(error.localizedDescription)"
+            )
+            return false
+        }
+    }
+
+    private func retireSegmentedSession(
+        _ manifest: SegmentedDictationSessionManifest,
+        entries: [RecordingJournalEntry],
+        discarding: Bool
+    ) throws {
+        let entriesByID = Dictionary(uniqueKeysWithValues: entries.map {
+            ($0.id, $0)
+        })
+        var firstError: (any Error)?
+        for segment in manifest.orderedSegments {
+            guard let entry = entriesByID[segment.id] else {
+                // A prior cleanup pass already retired this child.
+                continue
+            }
+            do {
+                if discarding {
+                    try recordingJournal.discard(entry)
+                } else {
+                    try recordingJournal.consume(entry)
+                }
+            } catch RecordingJournalError.recordMissing {
+                continue
+            } catch {
+                if firstError == nil { firstError = error }
+            }
+        }
+        if let firstError { throw firstError }
+        try segmentedSessionStore.delete(sessionID: manifest.id)
+        if activeSegmentedSession?.id == manifest.id {
+            activeSegmentedSession = nil
+        }
+    }
+
     private func clearActiveRecordingReference() {
         activeRecordingURL = nil
         activeRecordingCapture = nil
@@ -1149,10 +1384,13 @@ final class AppModel: ObservableObject {
     private func restoreOldestRecoverableRecording(
         preferredSessionID: UUID? = nil
     ) {
+        recoveryRecheckTask?.cancel()
+        recoveryRecheckTask = nil
         if
             let preferredSessionID,
-            activeRecordingURL != nil,
-            activeRecordingSessionID != preferredSessionID,
+            hasRecoverableRecording,
+            activeRecordingSessionID != preferredSessionID
+                && activeSegmentedSession?.id != preferredSessionID,
             activeSharedSessionID == nil,
             !isRecording,
             !isTranscribing
@@ -1161,10 +1399,12 @@ final class AppModel: ObservableObject {
             // keyboard Retry may safely put its own session in front without
             // deleting or consuming the older standalone recording.
             clearActiveRecordingReference()
+            activeSegmentedSession = nil
             activeRecordingSessionID = nil
         }
         guard
             activeRecordingURL == nil,
+            activeSegmentedSession == nil,
             !isRecording,
             !isTranscribing
         else {
@@ -1174,19 +1414,189 @@ final class AppModel: ObservableObject {
         // the final Active -> Entries rename. Adoption is safe to repeat: it
         // refuses live writers and makes an existing scene recover immediately.
         _ = try? recordingJournal.adoptCrashLeftCaptures()
-        guard let entries = try? recordingJournal.recoverableEntries() else {
+        guard var entries = try? recordingJournal.recoverableEntries() else {
             return
         }
 
         let shared = sharedStore.load()
+        if shared.phase == .paused {
+            // Pause is a durable, microphone-free resting state. It does not
+            // become a foreground recovery merely because iOS suspended the
+            // background intent process; the next Resume/Stop intent rehydrates
+            // the exact parent.
+            return
+        }
         if
-            [.starting, .recording, .transcribing].contains(shared.phase),
+            [.starting, .recording, .transcribing]
+                .contains(shared.phase),
             Date().timeIntervalSince(shared.updatedAt) < 15
         {
             // A background engine currently owns recording/transcription. Do
             // not surface any journal entry beneath its live work.
+            let age = max(0, Date().timeIntervalSince(shared.updatedAt))
+            recoveryRecheckTask = Task { [weak self] in
+                try? await Task.sleep(
+                    for: .seconds(max(0.5, 15.1 - age))
+                )
+                guard !Task.isCancelled, let self else { return }
+                self.restoreOldestRecoverableRecording(
+                    preferredSessionID: shared.sessionID
+                )
+            }
             return
         }
+
+        var manifests = (try? segmentedSessionStore.allManifests()) ?? []
+        for manifest in manifests where manifest.activeCapture != nil {
+            _ = try? segmentedSessionStore.adoptFinalizedActiveCapture(
+                sessionID: manifest.id,
+                from: entries
+            )
+            if
+                let refreshed = try? segmentedSessionStore.load(
+                    sessionID: manifest.id
+                ),
+                let activeCapture = refreshed.activeCapture,
+                (try? recordingJournal.abandonCrashLeftEmptyCapture(
+                    id: activeCapture.id
+                )) == true
+            {
+                _ = try? segmentedSessionStore.clearEmptyActiveCapture(
+                    sessionID: manifest.id,
+                    captureID: activeCapture.id,
+                    ordinal: activeCapture.ordinal,
+                    lifecycle: refreshed.segments.isEmpty
+                        ? .failed
+                        : .paused
+                )
+            }
+        }
+        manifests = (try? segmentedSessionStore.allManifests()) ?? manifests
+        if let preferredSessionID,
+           let preferredIndex = manifests.firstIndex(where: {
+               $0.id == preferredSessionID
+           })
+        {
+            let preferred = manifests.remove(at: preferredIndex)
+            manifests.insert(preferred, at: 0)
+        }
+
+        for manifest in manifests {
+            let committed = history.items.first {
+                $0.sourceSessionID == manifest.id
+            }
+            let sharedOwnsParent = shared.sessionID == manifest.id
+            let sharedCompleted = sharedOwnsParent
+                && [.completed, .inserting, .deliveryBlocked, .inserted, .handled]
+                    .contains(shared.phase)
+            if manifest.lifecycle == .completed {
+                try? retireSegmentedSession(
+                    manifest,
+                    entries: entries,
+                    discarding: false
+                )
+                continue
+            }
+            if let committed {
+                if sharedOwnsParent,
+                   [.recording, .paused, .transcribing, .failed, .cancelled]
+                    .contains(shared.phase)
+                {
+                    sharedStore.setPhase(
+                        .completed,
+                        sessionID: manifest.id,
+                        transcript: committed.text,
+                        historyPersisted: true,
+                        hasRecoverableAudio: false
+                    )
+                }
+                try? retireSegmentedSession(
+                    manifest,
+                    entries: entries,
+                    discarding: false
+                )
+                continue
+            }
+            if sharedCompleted {
+                try? retireSegmentedSession(
+                    manifest,
+                    entries: entries,
+                    discarding: false
+                )
+                continue
+            }
+            if manifest.activeCapture == nil, manifest.segments.isEmpty {
+                if sharedOwnsParent {
+                    if [.starting, .recording, .transcribing]
+                        .contains(shared.phase)
+                    {
+                        _ = sharedStore.transitionPhase(
+                            from: [shared.phase],
+                            to: .failed,
+                            sessionID: manifest.id,
+                            errorMessage: "Dictation stopped before any audio was captured. Try again.",
+                            hasRecoverableAudio: false
+                        )
+                    } else {
+                        sharedStore.setPhase(
+                            .failed,
+                            sessionID: manifest.id,
+                            errorMessage: "Dictation stopped before any audio was captured. Try again.",
+                            hasRecoverableAudio: false
+                        )
+                    }
+                }
+                try? segmentedSessionStore.delete(sessionID: manifest.id)
+                continue
+            }
+            guard manifest.activeCapture == nil, !manifest.segments.isEmpty else {
+                continue
+            }
+
+            if sharedOwnsParent,
+               [.starting, .recording, .transcribing].contains(shared.phase)
+            {
+                guard sharedStore.transitionPhase(
+                    from: [shared.phase],
+                    to: .failed,
+                    sessionID: manifest.id,
+                    errorMessage: "A segmented dictation was recovered. Retry transcription or discard all of its audio.",
+                    hasRecoverableAudio: true,
+                    recoveryAction: .retryTranscription
+                ) else {
+                    // A background App Intent won the same recovery race and
+                    // now owns this parent. Do not expose stale Retry/Discard.
+                    return
+                }
+            }
+
+            activeSegmentedSession = manifest
+            activeRecordingSessionID = manifest.id
+            if sharedOwnsParent {
+                activeSharedSessionID = manifest.id
+                sharedStore.setPhase(
+                    .failed,
+                    sessionID: manifest.id,
+                    errorMessage: "A segmented dictation was recovered. Retry transcription or discard all of its audio.",
+                    hasRecoverableAudio: true,
+                    recoveryAction: .retryTranscription
+                )
+                startSharedCommandMonitor(sessionID: manifest.id)
+            }
+            phase = .failed(
+                "A segmented dictation was recovered. Retry transcription or discard all of its audio."
+            )
+            return
+        }
+
+        let groupedChildIDs = Set(
+            ((try? segmentedSessionStore.allManifests()) ?? [])
+                .flatMap { manifest in
+                    manifest.segments.map(\.id)
+                        + [manifest.activeCapture?.id].compactMap { $0 }
+                }
+        )
+        entries.removeAll { groupedChildIDs.contains($0.id) }
         let orderedEntries: [RecordingJournalEntry]
         if let preferredSessionID,
            let preferred = entries.first(where: { $0.id == preferredSessionID })
@@ -1202,7 +1612,8 @@ final class AppModel: ObservableObject {
                 $0.sourceSessionID == entry.id
             }) {
                 if shared.sessionID == entry.id,
-                   [.recording, .transcribing, .failed].contains(shared.phase)
+                   [.recording, .paused, .transcribing, .failed]
+                    .contains(shared.phase)
                 {
                     sharedStore.setPhase(
                         .completed,

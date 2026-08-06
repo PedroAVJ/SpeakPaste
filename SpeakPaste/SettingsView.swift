@@ -1,8 +1,11 @@
+import AppIntents
 import SwiftUI
+import UIKit
 
 struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
 
     @State private var apiKeyInput = ""
     @State private var apiKeyErrorMessage: String?
@@ -16,6 +19,7 @@ struct SettingsView: View {
         NavigationStack {
             Form {
                 apiKeySection
+                triggerSection
                 transcriptionSection
                 clipboardSection
                 HistoryRetentionSection(history: model.history)
@@ -109,6 +113,34 @@ struct SettingsView: View {
         } footer: {
             Text(
                 "Transcription runs on your ElevenLabs account and spends your Speech-to-Text credits. The key is stored only in this device's Keychain and is never displayed after saving."
+            )
+        }
+        .listRowBackground(Theme.surface)
+    }
+
+    /// The everyday trigger lives entirely in iOS Settings, so this section
+    /// can only name the path and open the two places the user has to visit.
+    /// Nothing here claims to assign Back Tap — no API does.
+    private var triggerSection: some View {
+        Section {
+            ShortcutsLink()
+                .shortcutsLinkStyle(.dark)
+
+            Button {
+                if let url = URL(string: UIApplication.openSettingsURLString) {
+                    openURL(url)
+                }
+            } label: {
+                Label("Open iOS Settings", systemImage: "arrow.up.forward.app")
+            }
+            .accessibilityHint(
+                "Opens SpeakPaste's page in Settings, where Live Activities are turned on."
+            )
+        } header: {
+            Text("Dictation Trigger")
+        } footer: {
+            Text(
+                "Back Tap runs the Toggle Dictation shortcut: the first double tap starts recording where you are, and later taps pause and resume. Assign it in Settings › Accessibility › Touch › Back Tap › Double Tap. Background capture also needs Live Activities turned on for SpeakPaste."
             )
         }
         .listRowBackground(Theme.surface)

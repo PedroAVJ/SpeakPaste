@@ -17,9 +17,10 @@ import AppIntents
 struct ToggleDictationIntent: AppIntent, AudioRecordingIntent, LiveActivityIntent {
     static let title: LocalizedStringResource = "Toggle Dictation"
     static let description = IntentDescription(
-        "Start dictating, or stop and hand the transcript to the SpeakPaste keyboard, without leaving the app you are in."
+        "Start, pause, or resume dictation without leaving the app you are in. Finish and insert from the SpeakPaste keyboard."
     )
     static let openAppWhenRun = false
+    static let authenticationPolicy: IntentAuthenticationPolicy = .alwaysAllowed
 
     @available(iOS 26.0, *)
     static var supportedModes: IntentModes {
@@ -39,6 +40,7 @@ struct StartDictationIntent: AppIntent, AudioRecordingIntent, LiveActivityIntent
         "Begin recording in the background without switching apps."
     )
     static let openAppWhenRun = false
+    static let authenticationPolicy: IntentAuthenticationPolicy = .alwaysAllowed
 
     @available(iOS 26.0, *)
     static var supportedModes: IntentModes {
@@ -58,6 +60,8 @@ struct StopDictationIntent: AppIntent, AudioRecordingIntent, LiveActivityIntent 
         "Finish recording, transcribe, and hand the text to the SpeakPaste keyboard."
     )
     static let openAppWhenRun = false
+    static let authenticationPolicy: IntentAuthenticationPolicy = .alwaysAllowed
+    static let isDiscoverable = false
 
     @available(iOS 26.0, *)
     static var supportedModes: IntentModes { .background }
@@ -65,21 +69,6 @@ struct StopDictationIntent: AppIntent, AudioRecordingIntent, LiveActivityIntent 
     @MainActor
     func perform() async throws -> some IntentResult {
         try await DictationEngine.shared.stop()
-        return .result()
-    }
-}
-
-struct CancelDictationIntent: AppIntent, LiveActivityIntent {
-    static let title: LocalizedStringResource = "Cancel Dictation"
-    static let description = IntentDescription("Discard the dictation in progress.")
-    static let openAppWhenRun = false
-
-    @available(iOS 26.0, *)
-    static var supportedModes: IntentModes { .background }
-
-    @MainActor
-    func perform() async throws -> some IntentResult {
-        await DictationEngine.shared.cancel()
         return .result()
     }
 }

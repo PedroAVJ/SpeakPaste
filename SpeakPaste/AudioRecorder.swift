@@ -1147,6 +1147,39 @@ final class RecordingJournal {
         }
     }
 
+    /// Retires an empty reservation whose writer process is gone. Segmented
+    /// sessions persist the child ID before AVFoundation starts, so a kill in
+    /// that narrow window can leave a manifest pointing at a zero-byte Active
+    /// bundle. This method proves both facts before using the same conservative
+    /// abandon path as an ordinary start failure.
+    @discardableResult
+    func abandonCrashLeftEmptyCapture(id: UUID) throws -> Bool {
+        try prepareStorage()
+        let activeURL = activeCaptureDirectory(for: id)
+        guard RecordingJournalPrivateIO.entryExists(at: activeURL) else {
+            return false
+        }
+        let activeManifest = try loadActiveManifest(
+            at: activeURL,
+            expectedID: id
+        )
+        guard writerWasReleased(
+            activeManifest.capture,
+            in: activeURL
+        ) else {
+            return false
+        }
+        let audioURL = activeURL.appendingPathComponent(
+            activeManifest.audioFileName
+        )
+        if try RecordingJournalPrivateIO.regularFileExists(at: audioURL),
+           try RecordingJournalPrivateIO.regularFileByteCount(at: audioURL) > 0 {
+            return false
+        }
+        try abandonCapture(activeManifest.capture)
+        return true
+    }
+
     /// Explicitly retires a reservation that never became useful audio. This
     /// is the only automatic-start failure cleanup API; ordinary launch
     /// recovery never guesses that a short active file is disposable.

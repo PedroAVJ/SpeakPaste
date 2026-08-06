@@ -1,3 +1,4 @@
+import AppIntents
 import SwiftUI
 import UIKit
 
@@ -52,6 +53,10 @@ private enum KBTheme {
     static let danger = adaptive(
         light: (0.85, 0.18, 0.16),
         dark: (1.0, 0.42, 0.40)
+    )
+    static let paused = adaptive(
+        light: (0.78, 0.50, 0.08),
+        dark: (0.94, 0.63, 0.23)
     )
 
     static func timeString(_ interval: TimeInterval) -> String {
@@ -255,6 +260,28 @@ private struct KBStatusButtonStyle: ButtonStyle {
             .frame(minHeight: 40)
             .background(Capsule().fill(fill))
             .opacity(configuration.isPressed ? 0.72 : 1)
+    }
+}
+
+/// Runs a synchronous keyboard-side preparation before SwiftUI hands an
+/// intent-backed button to the system. For Stop & Insert that ordering is the
+/// exactly-once contract: bank the current cursor first, then wake the app-side
+/// intent process to finish transcription.
+private struct KBPreparedIntentButtonStyle: PrimitiveButtonStyle {
+    var fill: Color
+    var foreground: Color
+    let prepare: () -> Void
+
+    func makeBody(configuration: Configuration) -> some View {
+        Button {
+            prepare()
+            configuration.trigger()
+        } label: {
+            configuration.label
+        }
+        .buttonStyle(
+            KBStatusButtonStyle(fill: fill, foreground: foreground)
+        )
     }
 }
 
@@ -590,17 +617,14 @@ struct KeyboardView: View {
     }
 
     var body: some View {
+        // Recording, paused, and transcribing keep the full keyboard on
+        // screen. The accessory bar is the whole status surface, so the user
+        // can keep typing — and aim the insertion cursor — mid-dictation.
         Group {
             if !model.hasFullAccess {
                 fullAccessPanel
             } else if let errorMessage {
                 errorPanel(errorMessage)
-            } else if model.isStarting {
-                startingPanel
-            } else if model.isRecording {
-                recordingPanel
-            } else if model.isTranscribing {
-                processingPanel
             } else {
                 typingKeyboard
             }
@@ -636,53 +660,183 @@ struct KeyboardView: View {
         .padding(.bottom, 4)
     }
 
+    /// The one status surface during a dictation. Recording and paused get a
+    /// single prominent Stop & Insert — pause and cancel live on the Live
+    /// Activity, never here — and idle keeps Start as the fallback trigger.
     private var accessoryBar: some View {
         HStack(spacing: 8) {
+            accessoryStatus
+
+            Spacer(minLength: 8)
+
+            if model.isRecording || model.isPaused {
+                let sessionID = model.snapshot.sessionID
+                Button(
+                    intent: StopAndInsertDictationIntent(
+                        sessionID: sessionID
+                    )
+                ) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "stop.fill")
+                        Text("Stop & Insert")
+                            .lineLimit(1)
+                            .fixedSize()
+                    }
+                }
+                .buttonStyle(
+                    KBPreparedIntentButtonStyle(
+                        fill: KBTheme.accent,
+                        foreground: .white,
+                        prepare: {
+                            model.stopAndTranscribe(
+                                expectedSessionID: sessionID
+                            )
+                        }
+                    )
+                )
+                .frame(height: 32)
+                .accessibilityLabel("Stop and insert")
+                .accessibilityHint(
+                    model.isPaused
+                        ? "Ends the paused dictation and types everything captured so far at this cursor."
+                        : "Ends the dictation and types the transcript at this cursor."
+                )
+            } else if model.isIdle {
+                Button(action: model.startDictation) {
+                    HStack(spacing: 5) {
+                        Text(model.isPreparingHost ? "Preparing" : "Start")
+                        if model.isPreparingHost {
+                            ProgressView()
+                                .controlSize(.mini)
+                                .tint(.white)
+                        } else {
+                            Image(systemName: "waveform")
+                        }
+                    }
+                }
+                .buttonStyle(
+                    KBStatusButtonStyle(
+                        fill: KBTheme.accent,
+                        foreground: .white
+                    )
+                )
+                .frame(height: 32)
+                .disabled(model.isPreparingHost)
+                .accessibilityLabel(
+                    model.isPreparingHost
+                        ? "Preparing dictation"
+                        : "Start dictation"
+                )
+                .accessibilityHint(
+                    "Briefly opens SpeakPaste, starts recording, and returns here."
+                )
+            }
+        }
+        .frame(height: 34)
+        .padding(.horizontal, 5)
+    }
+
+    @ViewBuilder
+    private var accessoryStatus: some View {
+        if model.isRecording {
+            TimelineView(
+                .periodic(from: model.snapshot.startedAt, by: 1)
+            ) { context in
+                let elapsed = (model.snapshot.elapsedDuration ?? 0) + max(
+                    0,
+                    context.date.timeIntervalSince(model.snapshot.startedAt)
+                )
+                HStack(spacing: 6) {
+                    // Orange, matching the Live Activity's recording hue: the
+                    // same capture seen from two surfaces reads as one state.
+                    Image(systemName: "circle.fill")
+                        .font(.system(size: 8))
+                        .foregroundStyle(KBTheme.accent)
+                        .symbolEffect(
+                            .pulse,
+                            options: .repeating,
+                            isActive: !reduceMotion
+                        )
+                        .accessibilityHidden(true)
+
+                    // Stop & Insert never gives up room: on a narrow keyboard
+                    // the label sheds words before the timer.
+                    ViewThatFits(in: .horizontal) {
+                        statusText("Listening · \(KBTheme.timeString(elapsed))")
+                        statusText(KBTheme.timeString(elapsed))
+                    }
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(
+                    "Recording, \(KBTheme.timeString(elapsed)) elapsed"
+                )
+            }
+        } else if model.isPaused {
             HStack(spacing: 6) {
-                Image(systemName: model.recentlyInserted ? "checkmark" : "waveform")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(KBTheme.accent)
-                    .frame(width: 25, height: 25)
-                    .background(Circle().fill(KBTheme.accentSoft))
+                Image(systemName: "pause.fill")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(KBTheme.paused)
+                    .accessibilityHidden(true)
+                ViewThatFits(in: .horizontal) {
+                    statusText(
+                        "Paused · \(KBTheme.timeString(model.snapshot.elapsedDuration ?? 0))"
+                    )
+                    statusText("Paused")
+                }
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(
+                "Dictation paused at \(KBTheme.timeString(model.snapshot.elapsedDuration ?? 0))"
+            )
+            .accessibilityHint(
+                "Double-tap the back of your iPhone to resume, or use Stop and Insert."
+            )
+        } else if model.isStarting {
+            HStack(spacing: 6) {
+                ProgressView()
+                    .controlSize(.mini)
+                    .tint(KBTheme.accent)
+                Text(model.startingStatusText)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(KBTheme.inkMuted)
+            }
+            .accessibilityElement(children: .combine)
+        } else if model.isTranscribing {
+            HStack(spacing: 6) {
+                ProgressView()
+                    .controlSize(.mini)
+                    .tint(KBTheme.accent)
+                Text("Transcribing…")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(KBTheme.inkMuted)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Transcribing. The transcript will type here.")
+        } else {
+            HStack(spacing: 6) {
+                Image(
+                    systemName: model.recentlyInserted ? "checkmark" : "waveform"
+                )
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(KBTheme.accent)
+                .frame(width: 25, height: 25)
+                .background(Circle().fill(KBTheme.accentSoft))
 
                 Text(model.recentlyInserted ? "Inserted" : "SpeakPaste")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(KBTheme.inkMuted)
             }
-
-            Spacer(minLength: 8)
-
-            Button(action: model.startDictation) {
-                HStack(spacing: 5) {
-                    Text(model.isPreparingHost ? "Preparing" : "Start")
-                    if model.isPreparingHost {
-                        ProgressView()
-                            .controlSize(.mini)
-                            .tint(.white)
-                    } else {
-                        Image(systemName: "waveform")
-                    }
-                }
-            }
-            .buttonStyle(
-                KBStatusButtonStyle(
-                    fill: KBTheme.accent,
-                    foreground: .white
-                )
-            )
-            .frame(height: 32)
-            .disabled(model.isPreparingHost)
-            .accessibilityLabel(
-                model.isPreparingHost
-                    ? "Preparing dictation"
-                    : "Start dictation"
-            )
-            .accessibilityHint(
-                "Briefly opens SpeakPaste, starts recording, and returns here."
-            )
+            .accessibilityElement(children: .combine)
         }
-        .frame(height: 34)
-        .padding(.horizontal, 5)
+    }
+
+    private func statusText(_ text: String) -> some View {
+        Text(text)
+            .font(.caption.weight(.semibold))
+            .monospacedDigit()
+            .foregroundStyle(KBTheme.ink)
+            .lineLimit(1)
+            .fixedSize()
     }
 
     private var letterKeyboard: some View {
@@ -909,112 +1063,6 @@ struct KeyboardView: View {
         typingState.deleteBackward()
     }
 
-    private var startingPanel: some View {
-        statusShell {
-            ProgressView()
-                .tint(KBTheme.accent)
-                .controlSize(.large)
-            Text(model.startingStatusText)
-            .font(.headline)
-            .foregroundStyle(KBTheme.ink)
-            Text("This should only take a moment.")
-                .font(.caption)
-                .foregroundStyle(KBTheme.inkMuted)
-        }
-    }
-
-    private var recordingPanel: some View {
-        VStack(spacing: 0) {
-            Spacer(minLength: 4)
-
-            TimelineView(.periodic(from: model.snapshot.startedAt, by: 1)) { context in
-                let elapsed = max(
-                    0,
-                    context.date.timeIntervalSince(model.snapshot.startedAt)
-                )
-                VStack(spacing: 10) {
-                    HStack(alignment: .center, spacing: 3) {
-                        ForEach(0..<13, id: \.self) { index in
-                            Capsule()
-                                .fill(KBTheme.ink)
-                                .frame(
-                                    width: 3,
-                                    height: CGFloat(8 + ((index * 7) % 23))
-                                )
-                        }
-                    }
-                    .accessibilityHidden(true)
-
-                    HStack(spacing: 6) {
-                        Image(systemName: "circle.fill")
-                            .font(.system(size: 7))
-                            .foregroundStyle(KBTheme.danger)
-                            .symbolEffect(
-                                .pulse,
-                                options: .repeating,
-                                isActive: !reduceMotion
-                            )
-                            .accessibilityHidden(true)
-                        Text("Listening · \(KBTheme.timeString(elapsed))")
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(KBTheme.inkMuted)
-                            .monospacedDigit()
-                    }
-                    .accessibilityLabel(
-                        "Recording, \(KBTheme.timeString(elapsed)) elapsed"
-                    )
-                }
-            }
-
-            Spacer(minLength: 8)
-
-            HStack(spacing: 8) {
-                Button(action: model.cancel) {
-                    Label("Cancel", systemImage: "xmark")
-                }
-                .buttonStyle(
-                    KBStatusButtonStyle(
-                        fill: KBTheme.key,
-                        foreground: KBTheme.inkMuted
-                    )
-                )
-                .accessibilityHint("Discards the recording without typing anything.")
-
-                Button(action: model.stopAndTranscribe) {
-                    Label("Stop & Insert", systemImage: "stop.fill")
-                }
-                .buttonStyle(
-                    KBStatusButtonStyle(
-                        fill: KBTheme.accent,
-                        foreground: .white
-                    )
-                )
-                .accessibilityHint("Stops recording and types the transcript here.")
-            }
-
-            Spacer(minLength: 8)
-
-            utilityFooter
-        }
-        .padding(.horizontal, 14)
-        .padding(.top, 8)
-        .padding(.bottom, 5)
-    }
-
-    private var processingPanel: some View {
-        statusShell {
-            ProgressView()
-                .tint(KBTheme.accent)
-                .controlSize(.large)
-            Text("Transcribing…")
-                .font(.headline)
-                .foregroundStyle(KBTheme.ink)
-            Text("Your words will appear at the cursor.")
-                .font(.caption)
-                .foregroundStyle(KBTheme.inkMuted)
-        }
-    }
-
     private var fullAccessPanel: some View {
         statusShell {
             Image(systemName: "lock.shield.fill")
@@ -1119,27 +1167,41 @@ struct KeyboardView: View {
         }
     }
 
-    private func phaseAnnouncement(for phase: SharedDictationPhase) -> String {
+    /// Pause is the one state whose surface is elsewhere: it is entered from
+    /// the Live Activity or a double tap, so the announcement has to carry
+    /// both what happened and both ways out of it.
+    private static let pausedAnnouncement =
+        "Dictation paused. Double-tap the back of your iPhone to resume, or Stop and Insert to deliver what you have."
+
+    private func phaseAnnouncement(for phase: SharedDictationPhase) -> String? {
         switch phase {
-        case .launching: "Opening SpeakPaste"
-        case .starting: "Starting microphone"
-        case .recording: "Listening"
-        case .transcribing: "Transcribing"
-        case .completed: "Inserting at the cursor"
-        case .inserting: "Confirm whether the transcript was inserted"
-        case .deliveryBlocked: "Transcript ready for explicit insertion"
-        case .inserted: "Inserted at the cursor"
-        case .failed: errorMessage ?? "Dictation failed"
-        case .cancelled: "Dictation cancelled"
-        case .idle, .handled: "Ready"
+        case .launching: return "Opening SpeakPaste"
+        case .starting: return "Starting microphone"
+        case .recording: return "Listening"
+        case .paused: return Self.pausedAnnouncement
+        case .transcribing: return "Transcribing"
+        // The insertion sequence is one user-visible event. Announcing each
+        // bookkeeping phase talks over the text actually landing in the field.
+        case .completed, .inserting: return nil
+        case .deliveryBlocked: return "Transcript ready for explicit insertion"
+        case .inserted: return "Inserted at the cursor"
+        case .failed: return errorMessage ?? "Dictation failed"
+        case .cancelled: return "Dictation cancelled"
+        case .idle, .handled: return nil
         }
     }
 
-    private func announceStatusChange(_ status: String) {
-        guard UIAccessibility.isVoiceOverRunning else { return }
+    /// A keyboard extension redraws its whole layout on every phase change,
+    /// and the resulting screen-change announcement preempts a default-priority
+    /// one. Status changes here are the point of the surface, so they are
+    /// posted at high priority instead of being dropped.
+    private func announceStatusChange(_ status: String?) {
+        guard let status, UIAccessibility.isVoiceOverRunning else { return }
+        var announcement = AttributedString(status)
+        announcement.accessibilitySpeechAnnouncementPriority = .high
         UIAccessibility.post(
             notification: .announcement,
-            argument: status
+            argument: NSAttributedString(announcement)
         )
     }
 }

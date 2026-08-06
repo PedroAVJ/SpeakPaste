@@ -2,6 +2,33 @@ import XCTest
 @testable import SpeakPaste
 
 final class SharedDictationStoreTests: XCTestCase {
+    private func withIsolatedSharedStores(
+        _ body: (
+            SharedDictationStore,
+            SharedDictationStore
+        ) throws -> Void
+    ) throws {
+        let suiteName = "SharedDictationStoreTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        try body(
+            SharedDictationStore(
+                suiteName: suiteName,
+                storageDirectory: directory
+            ),
+            SharedDictationStore(
+                suiteName: suiteName,
+                storageDirectory: directory
+            )
+        )
+    }
+
     func testHostCaptureBaselinePreservesCallbacksAfterCleanHandoff() {
         XCTAssertEqual(
             HostApplicationCapturePolicy.baselineGeneration(
@@ -448,10 +475,326 @@ final class SharedDictationStoreTests: XCTestCase {
 
         let session = try XCTUnwrap(store.beginBackgroundSession())
         XCTAssertEqual(store.load().phase, .starting)
+        XCTAssertEqual(store.load().sessionKind, .segmentedIntent)
 
         store.setPhase(.recording, sessionID: session.sessionID)
         XCTAssertEqual(store.load().phase, .recording)
         XCTAssertGreaterThanOrEqual(store.load().startedAt, session.startedAt)
+    }
+
+    func testKeyboardAndIntentSessionsCarryDistinctOwners() throws {
+        try withIsolatedSharedStores { containingApp, keyboard in
+            let keyboardSession = try XCTUnwrap(
+                keyboard.begin(returnBundleIdentifier: "com.apple.mobilenotes")
+            )
+            XCTAssertEqual(
+                containingApp.load().sessionKind,
+                .keyboardRoundTrip
+            )
+
+            containingApp.setPhase(
+                .cancelled,
+                sessionID: keyboardSession.sessionID
+            )
+            let intentSession = try XCTUnwrap(
+                containingApp.beginBackgroundSession()
+            )
+            XCTAssertEqual(intentSession.sessionKind, .segmentedIntent)
+        }
+    }
+
+    func testPausedSessionRemainsDurableWithoutAHeartbeat() throws {
+        try withIsolatedSharedStores { containingApp, keyboard in
+            let session = try XCTUnwrap(
+                containingApp.beginBackgroundSession()
+            )
+            containingApp.setPhase(
+                .paused,
+                sessionID: session.sessionID
+            )
+
+            let paused = keyboard.load()
+            XCTAssertEqual(paused.phase, .paused)
+            XCTAssertEqual(paused.captureOwnerID, session.sessionID)
+            XCTAssertFalse(paused.phase.isContainingAppOwned)
+            XCTAssertEqual(
+                paused.phase.containingAppAbandonmentTimeout,
+                0
+            )
+            XCTAssertTrue(keyboard.isCaptureLeaseActive)
+            XCTAssertNil(keyboard.beginBackgroundSession())
+
+            let beforeRevision = paused.revision ?? 0
+            containingApp.touch(sessionID: session.sessionID)
+            XCTAssertGreaterThan(
+                keyboard.load().revision ?? 0,
+                beforeRevision
+            )
+        }
+    }
+
+    func testPauseAndResumeCommandsCrossProcessesExactlyOnce() throws {
+        try withIsolatedSharedStores { containingApp, keyboard in
+            let session = try XCTUnwrap(
+                containingApp.beginBackgroundSession()
+            )
+            containingApp.setPhase(
+                .recording,
+                sessionID: session.sessionID
+            )
+
+            keyboard.send(.pause, sessionID: session.sessionID)
+            XCTAssertEqual(
+                containingApp.takePendingCommand(
+                    sessionID: session.sessionID,
+                    accepting: [.pause]
+                ),
+                .pause
+            )
+            XCTAssertEqual(
+                containingApp.takePendingCommand(
+                    sessionID: session.sessionID,
+                    accepting: [.pause]
+                ),
+                .none
+            )
+
+            containingApp.setPhase(
+                .paused,
+                sessionID: session.sessionID
+            )
+            keyboard.send(.resume, sessionID: session.sessionID)
+            XCTAssertEqual(
+                containingApp.takePendingCommand(
+                    sessionID: session.sessionID,
+                    accepting: [.resume]
+                ),
+                .resume
+            )
+            XCTAssertEqual(
+                containingApp.takePendingCommand(
+                    sessionID: session.sessionID,
+                    accepting: [.resume]
+                ),
+                .none
+            )
+
+            let consumed = keyboard.load()
+            XCTAssertEqual(consumed.command, .none)
+            XCTAssertEqual(
+                consumed.acknowledgedCommandSequence,
+                consumed.commandSequence
+            )
+        }
+    }
+
+    func testOnlyOneProcessCanClaimAStaleRecordingForRecovery() throws {
+        try withIsolatedSharedStores { foregroundApp, backgroundIntent in
+            let session = try XCTUnwrap(
+                foregroundApp.beginBackgroundSession()
+            )
+            foregroundApp.setPhase(
+                .recording,
+                sessionID: session.sessionID,
+                hasRecoverableAudio: true
+            )
+
+            XCTAssertTrue(
+                backgroundIntent.transitionPhase(
+                    from: [.recording],
+                    to: .paused,
+                    sessionID: session.sessionID,
+                    hasRecoverableAudio: true
+                )
+            )
+            XCTAssertFalse(
+                foregroundApp.transitionPhase(
+                    from: [.recording],
+                    to: .failed,
+                    sessionID: session.sessionID,
+                    errorMessage: "Recovered in the app",
+                    hasRecoverableAudio: true,
+                    recoveryAction: .retryTranscription
+                )
+            )
+            XCTAssertEqual(foregroundApp.load().phase, .paused)
+        }
+    }
+
+    func testAbandonmentFailureCannotOverwriteAFreshHeartbeat() throws {
+        try withIsolatedSharedStores { containingApp, keyboard in
+            let session = try XCTUnwrap(
+                containingApp.beginBackgroundSession()
+            )
+            containingApp.setPhase(
+                .recording,
+                sessionID: session.sessionID,
+                hasRecoverableAudio: true
+            )
+            let beforeHeartbeat = keyboard.load()
+            containingApp.touch(sessionID: session.sessionID)
+
+            XCTAssertFalse(
+                keyboard.failAbandonedSession(
+                    sessionID: session.sessionID,
+                    phases: [.recording],
+                    updatedAtOrBefore: beforeHeartbeat.updatedAt,
+                    errorMessage: "Interrupted",
+                    hasRecoverableAudio: true,
+                    recoveryAction: .openContainingApp
+                )
+            )
+            XCTAssertEqual(keyboard.load().phase, .recording)
+
+            XCTAssertTrue(
+                keyboard.failAbandonedSession(
+                    sessionID: session.sessionID,
+                    phases: [.recording],
+                    updatedAtOrBefore: .distantFuture,
+                    errorMessage: "Interrupted",
+                    hasRecoverableAudio: true,
+                    recoveryAction: .openContainingApp
+                )
+            )
+            XCTAssertEqual(keyboard.load().phase, .failed)
+            XCTAssertNil(keyboard.load().captureOwnerID)
+            XCTAssertFalse(keyboard.isCaptureLeaseActive)
+        }
+    }
+
+    func testElapsedDurationSurvivesPauseAndResume() throws {
+        try withIsolatedSharedStores { containingApp, keyboard in
+            let session = try XCTUnwrap(
+                containingApp.beginBackgroundSession()
+            )
+            containingApp.setPhase(
+                .recording,
+                sessionID: session.sessionID,
+                elapsedDuration: 0,
+                startedAt: Date().addingTimeInterval(-5)
+            )
+            containingApp.setPhase(
+                .paused,
+                sessionID: session.sessionID,
+                elapsedDuration: 5
+            )
+            containingApp.setPhase(
+                .recording,
+                sessionID: session.sessionID,
+                elapsedDuration: 5,
+                startedAt: Date()
+            )
+
+            XCTAssertEqual(keyboard.load().elapsedDuration, 5)
+        }
+    }
+
+    func testResidentKeyboardCanAimEveryBackgroundDeliveryPhase() throws {
+        let claimablePhases: [SharedDictationPhase] = [
+            .starting,
+            .recording,
+            .paused,
+            .transcribing,
+            .completed,
+        ]
+
+        for phase in claimablePhases {
+            try withIsolatedSharedStores { containingApp, keyboard in
+                let session = try XCTUnwrap(
+                    containingApp.beginBackgroundSession()
+                )
+                if phase != .starting {
+                    containingApp.setPhase(
+                        phase,
+                        sessionID: session.sessionID,
+                        transcript: phase == .completed ? "Ready" : nil
+                    )
+                }
+
+                XCTAssertTrue(
+                    keyboard.claimInsertionContext(
+                        sessionID: session.sessionID,
+                        fingerprint: "cursor-\(phase.rawValue)"
+                    ),
+                    "The keyboard should be able to aim a \(phase.rawValue) session"
+                )
+                XCTAssertEqual(
+                    containingApp.load().insertionContextFingerprint,
+                    "cursor-\(phase.rawValue)"
+                )
+            }
+        }
+    }
+
+    func testStopAndInsertReclaimsCurrentCursorBeforeStop() throws {
+        try withIsolatedSharedStores { containingApp, keyboard in
+            let session = try XCTUnwrap(
+                containingApp.beginBackgroundSession()
+            )
+            XCTAssertTrue(
+                keyboard.claimInsertionContext(
+                    sessionID: session.sessionID,
+                    fingerprint: "resident-cursor"
+                )
+            )
+            containingApp.setPhase(
+                .recording,
+                sessionID: session.sessionID
+            )
+
+            XCTAssertTrue(
+                keyboard.claimInsertionContext(
+                    sessionID: session.sessionID,
+                    fingerprint: "stop-tap-cursor",
+                    replacingExistingClaim: true
+                )
+            )
+            keyboard.send(.stop, sessionID: session.sessionID)
+
+            let stop = containingApp.load()
+            XCTAssertEqual(
+                stop.insertionContextFingerprint,
+                "stop-tap-cursor"
+            )
+            XCTAssertEqual(stop.command, .stop)
+        }
+    }
+
+    func testCompletedBackgroundTranscriptKeepsExactOnceBoundary() throws {
+        try withIsolatedSharedStores { containingApp, keyboard in
+            let session = try XCTUnwrap(
+                containingApp.beginBackgroundSession()
+            )
+            containingApp.setPhase(
+                .completed,
+                sessionID: session.sessionID,
+                transcript: "Insert exactly once"
+            )
+
+            XCTAssertTrue(
+                keyboard.claimInsertionContext(
+                    sessionID: session.sessionID,
+                    fingerprint: "late-visible-cursor"
+                )
+            )
+            XCTAssertTrue(
+                keyboard.markInsertionStarted(sessionID: session.sessionID)
+            )
+            XCTAssertFalse(
+                keyboard.markInsertionStarted(sessionID: session.sessionID)
+            )
+            XCTAssertEqual(
+                containingApp.load().transcript,
+                "Insert exactly once"
+            )
+
+            keyboard.markInserted(sessionID: session.sessionID)
+            XCTAssertEqual(containingApp.load().phase, .inserted)
+            XCTAssertNil(containingApp.load().transcript)
+            XCTAssertFalse(
+                keyboard.markInsertionStarted(sessionID: session.sessionID)
+            )
+        }
     }
 
     func testBackgroundSessionCannotReplaceKeyboardOwnedSession() throws {
@@ -957,6 +1300,27 @@ final class SharedDictationStoreTests: XCTestCase {
         store.allowExplicitInsertion(sessionID: session.sessionID)
         XCTAssertEqual(store.load().phase, .completed)
         XCTAssertEqual(store.load().transcript, "Keep this")
+    }
+
+    func testAutomaticInsertionRequiresExactStopCursorFingerprint() {
+        XCTAssertTrue(
+            InsertionContextDeliveryPolicy.allowsAutomaticInsertion(
+                claimedFingerprint: "stop-cursor",
+                currentFingerprint: "stop-cursor"
+            )
+        )
+        XCTAssertFalse(
+            InsertionContextDeliveryPolicy.allowsAutomaticInsertion(
+                claimedFingerprint: "stop-cursor",
+                currentFingerprint: "different-cursor"
+            )
+        )
+        XCTAssertFalse(
+            InsertionContextDeliveryPolicy.allowsAutomaticInsertion(
+                claimedFingerprint: nil,
+                currentFingerprint: "current-cursor"
+            )
+        )
     }
 
     func testInsertionContextCanOnlyBeClaimedDuringAnActiveSessionOnce() throws {
