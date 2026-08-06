@@ -602,3 +602,57 @@ struct MacHUDStack: Equatable, Sendable {
             : nil
     }
 }
+
+/// Presentation state for the one persistent HUD face.
+///
+/// This is deliberately resolved outside `TimelineView`. Timeline schedules
+/// redraw time-driven details; they are not the owner of structural view state.
+/// Keeping this value stable lets SwiftUI interpolate one transition across the
+/// capsule bounds, its mask, and every content layer in the same transaction.
+enum MacHUDVisualState: Equatable, Sendable {
+    case nudge
+    case source(MacInputMode, waiting: Bool)
+    case waveform(frozen: Bool)
+    case typing
+    case held
+    case positioning
+
+    static let voiceCutoffLevel = 0.006
+
+    static func resolve(
+        content: MacHUDStack.CardContent,
+        inputLevel: Double,
+        at date: Date
+    ) -> MacHUDVisualState {
+        switch content {
+        case .sourceNudge:
+            return .nudge
+        case let .capture(source, activity, stageStartedAt):
+            switch activity {
+            case .connecting, .inactive:
+                return .source(source, waiting: source == .iPhone)
+            case .listening:
+                // Mac capture is already live during this courtesy beat. The
+                // first real voice sample cuts it short; otherwise it lasts no
+                // more than half a second. Continuity's glyph/dot disappear on
+                // capture-live, so its waveform starts immediately here.
+                if source == .mac,
+                   date.timeIntervalSince(stageStartedAt) < MacHUDStack.macStartVisibilityCap,
+                   inputLevel < voiceCutoffLevel {
+                    return .source(.mac, waiting: false)
+                }
+                return .waveform(frozen: false)
+            case .releasing:
+                return .waveform(frozen: false)
+            }
+        case .resting:
+            return .waveform(frozen: true)
+        case .draining:
+            return .typing
+        case .held:
+            return .held
+        case .positioning:
+            return .positioning
+        }
+    }
+}

@@ -41,6 +41,78 @@ final class MacHUDHeldSymbolTests: XCTestCase {
     }
 }
 
+final class MacHUDVisualStateTests: XCTestCase {
+    private let base = Date(timeIntervalSince1970: 10_000)
+
+    func testMacCourtesyBeatEndsOnVoiceOrHalfSecondCap() {
+        let content = MacHUDStack.CardContent.capture(
+            source: .mac,
+            activity: .listening,
+            stageStartedAt: base
+        )
+
+        XCTAssertEqual(
+            MacHUDVisualState.resolve(
+                content: content,
+                inputLevel: 0,
+                at: base.addingTimeInterval(0.49)
+            ),
+            .source(.mac, waiting: false)
+        )
+        XCTAssertEqual(
+            MacHUDVisualState.resolve(
+                content: content,
+                inputLevel: MacHUDVisualState.voiceCutoffLevel,
+                at: base.addingTimeInterval(0.2)
+            ),
+            .waveform(frozen: false)
+        )
+        XCTAssertEqual(
+            MacHUDVisualState.resolve(
+                content: content,
+                inputLevel: 0,
+                at: base.addingTimeInterval(MacHUDStack.macStartVisibilityCap)
+            ),
+            .waveform(frozen: false)
+        )
+    }
+
+    func testPhoneAndNonCaptureFacesResolveWithoutCourtesyTiming() {
+        XCTAssertEqual(
+            MacHUDVisualState.resolve(
+                content: .capture(
+                    source: .iPhone,
+                    activity: .connecting,
+                    stageStartedAt: base
+                ),
+                inputLevel: 0,
+                at: base
+            ),
+            .source(.iPhone, waiting: true)
+        )
+        XCTAssertEqual(
+            MacHUDVisualState.resolve(
+                content: .capture(
+                    source: .iPhone,
+                    activity: .listening,
+                    stageStartedAt: base
+                ),
+                inputLevel: 0,
+                at: base
+            ),
+            .waveform(frozen: false)
+        )
+        XCTAssertEqual(
+            MacHUDVisualState.resolve(content: .resting, inputLevel: 0, at: base),
+            .waveform(frozen: true)
+        )
+        XCTAssertEqual(
+            MacHUDVisualState.resolve(content: .draining, inputLevel: 0, at: base),
+            .typing
+        )
+    }
+}
+
 final class MacOrderedDictationBatchTests: XCTestCase {
     func testClosedDictationWaitsForEveryPausedSegment() {
         let batch = MacOrderedDictationBatch(sequences: [4, 5, 6])
