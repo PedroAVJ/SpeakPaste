@@ -318,15 +318,6 @@ private final class MacStatusPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
-enum MacHUDVisualState: Equatable {
-    case nudge
-    case source(MacInputMode, waiting: Bool)
-    case waveform(frozen: Bool)
-    case typing
-    case held
-    case positioning
-}
-
 private enum MacHUDMetrics {
     static let panelSize = NSSize(width: 190, height: 66)
     static let capsuleHeight: CGFloat = 36
@@ -419,76 +410,133 @@ private struct MacHUDCapsuleView: View {
     let heldClipboardBacked: Bool
     let reduceMotion: Bool
 
+    @State private var visual: MacHUDVisualState
     @State private var envelope = MacHUDLevelEnvelope()
     @State private var frozenAt = Date()
+    @State private var hasEntered = false
+
+    init(
+        card: MacHUDStack.Card,
+        inputLevel: Double,
+        heldClipboardBacked: Bool,
+        reduceMotion: Bool
+    ) {
+        self.card = card
+        self.inputLevel = inputLevel
+        self.heldClipboardBacked = heldClipboardBacked
+        self.reduceMotion = reduceMotion
+        _visual = State(
+            initialValue: MacHUDVisualState.resolve(
+                content: card.content,
+                inputLevel: inputLevel,
+                at: Date()
+            )
+        )
+    }
 
     var body: some View {
-        TimelineView(
-            .animation(minimumInterval: reduceMotion ? 1.0 / 15 : 1.0 / 60)
-        ) { context in
-            let visual = visualState(at: context.date)
-            let nudge = nudgeValues
-            let source = sourceValues(for: visual)
-            let waveform = waveformValues(for: visual)
-            ZStack {
-                MacHUDSourceNudge(attempted: nudge.attempted, live: nudge.live)
-                    .opacity(visual == .nudge ? 1 : 0)
-                    .scaleEffect(visual == .nudge ? 1 : 0.82)
+        let nudge = nudgeValues
+        let source = sourceValues(for: visual)
+        let waveform = waveformValues(for: visual)
+        ZStack {
+            MacHUDSourceNudge(attempted: nudge.attempted, live: nudge.live)
+                .opacity(visual == .nudge ? 1 : 0)
+                .scaleEffect(visual == .nudge ? 1 : 0.82)
 
-                MacHUDSourceIdentity(
-                    source: source.mode,
-                    showsWaitDot: source.waiting,
-                    pulseDate: context.date,
-                    reduceMotion: reduceMotion
-                )
-                .opacity(source.visible ? 1 : 0)
-                .scaleEffect(source.visible ? 1 : 0.7)
-
-                MacHUDWaveform(
-                    level: inputLevel,
-                    date: waveform.frozen ? frozenAt : context.date,
-                    frozen: waveform.frozen,
-                    isActive: waveform.visible,
-                    reduceMotion: reduceMotion,
-                    envelope: envelope
-                )
-                .opacity(waveform.visible ? 1 : 0)
-                .scaleEffect(x: 1, y: waveform.visible ? 1 : 0.08)
-
-                MacHUDTypingDots(date: context.date, reduceMotion: reduceMotion)
-                    .opacity(visual == .typing ? 1 : 0)
-                    .scaleEffect(visual == .typing ? 1 : 0.72)
-
-                MacHUDHeldBadge(clipboardBacked: heldClipboardBacked)
-                    .opacity(visual == .held ? 1 : 0)
-                    .scaleEffect(visual == .held ? 1 : 0.72)
-
-                Image(systemName: "arrow.up.and.down.and.arrow.left.and.right")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(Color(nsColor: .secondaryLabelColor))
-                    .accessibilityHidden(true)
-                    .opacity(visual == .positioning ? 1 : 0)
-                    .scaleEffect(visual == .positioning ? 1 : 0.72)
-            }
-            .frame(height: MacHUDMetrics.capsuleHeight)
-            .frame(
-                width: MacHUDMetrics.capsuleWidth(
-                    for: visual,
-                    reduceMotion: reduceMotion
-                )
+            MacHUDSourceIdentity(
+                source: source.mode,
+                showsWaitDot: source.waiting,
+                reduceMotion: reduceMotion
             )
-            .modifier(MacHUDSurface())
-            .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
-            .opacity(card.content == .resting ? 0.78 : 1)
-            // The courtesy beat changes `visual` without changing the model's
-            // listening state. Keying choreography to the visual state makes
-            // the pill expansion, icon fade, and bar rise one continuous
-            // morph instead of two unrelated updates.
-            .animation(stateAnimation, value: visual)
+            .opacity(source.visible ? 1 : 0)
+            .scaleEffect(source.visible ? 1 : 0.7)
+
+            MacHUDWaveform(
+                level: inputLevel,
+                frozenAt: frozenAt,
+                frozen: waveform.frozen,
+                isActive: waveform.visible,
+                reduceMotion: reduceMotion,
+                envelope: envelope
+            )
+            .opacity(waveform.visible ? 1 : 0)
+            .scaleEffect(x: 1, y: waveform.visible ? 1 : 0.08)
+
+            MacHUDTypingDots(
+                isActive: visual == .typing,
+                reduceMotion: reduceMotion
+            )
+            .opacity(visual == .typing ? 1 : 0)
+            .scaleEffect(visual == .typing ? 1 : 0.72)
+
+            MacHUDHeldBadge(clipboardBacked: heldClipboardBacked)
+                .opacity(visual == .held ? 1 : 0)
+                .scaleEffect(visual == .held ? 1 : 0.72)
+
+            Image(systemName: "arrow.up.and.down.and.arrow.left.and.right")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Color(nsColor: .secondaryLabelColor))
+                .accessibilityHidden(true)
+                .opacity(visual == .positioning ? 1 : 0)
+                .scaleEffect(visual == .positioning ? 1 : 0.72)
         }
+        .frame(height: MacHUDMetrics.capsuleHeight)
+        .frame(
+            width: MacHUDMetrics.capsuleWidth(
+                for: visual,
+                reduceMotion: reduceMotion
+            )
+        )
+        // Every content layer is mounted at its final intrinsic size. Masking
+        // with the shell keeps an incoming waveform inside the same expanding
+        // piece of glass instead of letting its outer bars flash beyond it.
+        .mask(Capsule())
+        .modifier(MacHUDSurface())
+        .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
+        .scaleEffect(
+            hasEntered || reduceMotion ? 1 : 0.86,
+            anchor: .center
+        )
+        .opacity(
+            (card.content == .resting ? 0.78 : 1)
+                * (hasEntered ? 1 : 0)
+        )
         .help(card.content == .positioning ? "Drag to move the SpeakPaste HUD" : "")
         .onChange(of: card.content) { _, content in
             if content == .resting { frozenAt = Date() }
+            reconcileVisual(at: Date())
+        }
+        .onChange(of: inputLevel) {
+            reconcileVisual(at: Date())
+        }
+        .task(id: macCourtesyDeadline) {
+            guard let deadline = macCourtesyDeadline else { return }
+            let remaining = deadline.timeIntervalSinceNow
+            if remaining > 0 {
+                do {
+                    try await Task.sleep(for: .seconds(remaining))
+                } catch {
+                    return
+                }
+            }
+            guard !Task.isCancelled else { return }
+            reconcileVisual(at: Date())
+        }
+        .task(id: card.id) {
+            hasEntered = false
+            // `presentation.show` and `orderFrontRegardless` happen in the
+            // same AppKit turn. Hold the initial value for one display beat so
+            // SwiftUI has a real start frame instead of first drawing the HUD
+            // fully opaque and making the entry animation a no-op.
+            do {
+                try await Task.sleep(for: .milliseconds(16))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            withAnimation(entryAnimation) {
+                hasEntered = true
+            }
         }
     }
 
@@ -527,53 +575,56 @@ private struct MacHUDCapsuleView: View {
         return (frozen, true)
     }
 
-    private func visualState(at date: Date) -> MacHUDVisualState {
-        switch card.content {
-        case .sourceNudge:
-            return .nudge
-        case let .capture(source, activity, stageStartedAt):
-            switch activity {
-            case .connecting, .inactive:
-                return .source(source, waiting: source == .iPhone)
-            case .listening:
-                // Mac capture is already live during this courtesy beat. The
-                // first real voice sample cuts it short; otherwise it lasts no
-                // more than half a second. Continuity's glyph/dot disappear on
-                // capture-live, so its waveform starts immediately here.
-                if source == .mac,
-                   date.timeIntervalSince(stageStartedAt) < 0.5,
-                   inputLevel < 0.006 {
-                    return .source(.mac, waiting: false)
-                }
-                return .waveform(frozen: false)
-            case .releasing:
-                return .waveform(frozen: false)
-            }
-        case .resting:
-            return .waveform(frozen: true)
-        case .draining:
-            return .typing
-        case .held:
-            return .held
-        case .positioning:
-            return .positioning
+    private var macCourtesyDeadline: Date? {
+        guard case let .capture(.mac, .listening, stageStartedAt) = card.content,
+              inputLevel < MacHUDVisualState.voiceCutoffLevel else {
+            return nil
+        }
+        return stageStartedAt.addingTimeInterval(MacHUDStack.macStartVisibilityCap)
+    }
+
+    private func reconcileVisual(at date: Date) {
+        let next = MacHUDVisualState.resolve(
+            content: card.content,
+            inputLevel: inputLevel,
+            at: date
+        )
+        guard next != visual else { return }
+        withAnimation(stateAnimation) {
+            visual = next
         }
     }
 
     private var stateAnimation: Animation {
         reduceMotion
             ? .easeInOut(duration: 0.22)
-            : .spring(response: 0.35, dampingFraction: 0.8)
+            : .timingCurve(0.45, 0, 0.55, 1, duration: 0.38)
+    }
+
+    private var entryAnimation: Animation {
+        reduceMotion
+            ? .easeOut(duration: 0.14)
+            : .timingCurve(0.2, 0.8, 0.2, 1, duration: 0.24)
     }
 }
 
 private struct MacHUDSourceIdentity: View {
     let source: MacInputMode
     let showsWaitDot: Bool
-    let pulseDate: Date
     let reduceMotion: Bool
 
     var body: some View {
+        TimelineView(
+            .animation(
+                minimumInterval: 1.0 / 30,
+                paused: reduceMotion || !showsWaitDot
+            )
+        ) { context in
+            identity(at: context.date)
+        }
+    }
+
+    private func identity(at pulseDate: Date) -> some View {
         HStack(spacing: 8) {
             Image(systemName: source == .mac ? "laptopcomputer" : "iphone")
                 .font(.system(size: 15, weight: .regular))
@@ -632,7 +683,7 @@ private struct MacHUDSourceNudge: View {
 
 private struct MacHUDWaveform: View {
     let level: Double
-    let date: Date
+    let frozenAt: Date
     let frozen: Bool
     let isActive: Bool
     let reduceMotion: Bool
@@ -645,7 +696,26 @@ private struct MacHUDWaveform: View {
     private static let maxBarHeight: CGFloat = 22
 
     var body: some View {
-        HStack(spacing: Self.barSpacing) {
+        TimelineView(
+            .animation(
+                minimumInterval: 1.0 / 60,
+                paused: reduceMotion || frozen || !isActive
+            )
+        ) { context in
+            bars(at: frozen ? frozenAt : context.date)
+        }
+        .accessibilityHidden(true)
+    }
+
+    private func bars(at date: Date) -> some View {
+        let display = reduceMotion && !frozen
+            ? min(max(level, 0), 1)
+            : envelope.step(
+                toward: min(max(level, 0), 1),
+                at: date,
+                frozen: frozen || !isActive
+            )
+        return HStack(spacing: Self.barSpacing) {
             ForEach(0..<Self.barCount, id: \.self) { index in
                 Capsule()
                     .fill(
@@ -653,19 +723,20 @@ private struct MacHUDWaveform: View {
                             ? Color(nsColor: .secondaryLabelColor)
                             : Color(nsColor: .systemRed)
                     )
-                    .frame(width: Self.barWidth, height: height(for: index))
+                    .frame(
+                        width: Self.barWidth,
+                        height: height(for: index, display: display, at: date)
+                    )
             }
         }
         .opacity(frozen ? 0.72 : 1)
-        .accessibilityHidden(true)
     }
 
-    private func height(for index: Int) -> CGFloat {
-        let display = envelope.step(
-            toward: min(max(level, 0), 1),
-            at: date,
-            frozen: frozen || !isActive
-        )
+    private func height(
+        for index: Int,
+        display: Double,
+        at date: Date
+    ) -> CGFloat {
         let perceptualInput = min(max((display - 0.004) * 10, 0), 1)
         let shaped = pow(perceptualInput, 0.60)
         let fraction = Double(index) / Double(Self.barCount - 1)
@@ -675,7 +746,8 @@ private struct MacHUDWaveform: View {
             // A deterministic non-flat silhouette stays frozen across every
             // frame, preserving the impression of the voice that just stopped.
             wobble = 0.78 + 0.22 * sin(
-                frozenAtPhase * (6.5 + Double(index % 4) * 1.4)
+                date.timeIntervalSinceReferenceDate
+                    * (6.5 + Double(index % 4) * 1.4)
                     + Double(index) * 1.7
             )
         } else {
@@ -690,9 +762,6 @@ private struct MacHUDWaveform: View {
                 * CGFloat(arch * wobble * shaped)
     }
 
-    private var frozenAtPhase: TimeInterval {
-        date.timeIntervalSinceReferenceDate
-    }
 }
 
 private final class MacHUDLevelEnvelope {
@@ -718,7 +787,7 @@ private final class MacHUDLevelEnvelope {
 }
 
 private struct MacHUDTypingDots: View {
-    let date: Date
+    let isActive: Bool
     let reduceMotion: Bool
 
     private static let period: TimeInterval = 1.25
@@ -726,6 +795,18 @@ private struct MacHUDTypingDots: View {
     private static let hopShare = 0.4
 
     var body: some View {
+        TimelineView(
+            .animation(
+                minimumInterval: 1.0 / 60,
+                paused: reduceMotion || !isActive
+            )
+        ) { context in
+            dots(at: context.date)
+        }
+        .accessibilityHidden(true)
+    }
+
+    private func dots(at date: Date) -> some View {
         HStack(spacing: 5) {
             ForEach(0..<3, id: \.self) { index in
                 let hop = reduceMotion ? 0 : Self.hop(at: date, index: index)
@@ -736,7 +817,6 @@ private struct MacHUDTypingDots: View {
                     .offset(y: -5 * hop)
             }
         }
-        .accessibilityHidden(true)
     }
 
     private static func hop(at date: Date, index: Int) -> Double {
