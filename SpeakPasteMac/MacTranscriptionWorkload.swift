@@ -32,13 +32,6 @@ struct MacTranscriptionWorkload: Equatable, Sendable {
         case becameIdle
     }
 
-    private static let minimumExpectedDuration: TimeInterval = 2
-    private static let durationRatio = 0.20
-    private static let initialFraction = 0.08
-    private static let estimatedRange = 0.84
-    private static let curveRate = 2.2
-    private static let activeCeiling = 0.92
-
     private var jobs: [Job] = []
 
     var activeCount: Int { jobs.count }
@@ -83,32 +76,6 @@ struct MacTranscriptionWorkload: Equatable, Sendable {
             }
             return lhs.element.enqueuedAt < rhs.element.enqueuedAt
         }.map(\.element)
-    }
-
-    static func expectedDuration(
-        for recordingDuration: TimeInterval
-    ) -> TimeInterval {
-        let sanitizedDuration: TimeInterval
-        if recordingDuration.isFinite {
-            sanitizedDuration = max(0, recordingDuration)
-        } else {
-            sanitizedDuration = 0
-        }
-        return max(
-            minimumExpectedDuration,
-            durationRatio * sanitizedDuration
-        )
-    }
-
-    static func estimatedFraction(
-        recordingDuration: TimeInterval,
-        elapsed: TimeInterval
-    ) -> Double {
-        let sanitizedElapsed = elapsed.isFinite ? max(0, elapsed) : 0
-        let expected = expectedDuration(for: recordingDuration)
-        let fraction = initialFraction
-            + estimatedRange * (1 - exp(-curveRate * sanitizedElapsed / expected))
-        return min(activeCeiling, max(initialFraction, fraction))
     }
 
     private var headJob: Job? { orderedJobs.first }

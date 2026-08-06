@@ -13,11 +13,12 @@ cannot drift from what the keys do.
 | right ⌘ | Mac mic: start / pause / resume |
 | right ⌥ | iPhone mic: start / pause / resume |
 | fn | End: close the dictation, deliver everything banked |
-| Esc | Cancel: close toward discard; reversible during the closing window |
+| Esc | Dismiss: close the dictation away from the cursor, into recovery |
 
 - A source key can never deliver text and never destroy it. `fn` always
-  delivers. `Esc` always discards. No key changes consequence class with
-  state.
+  delivers. `Esc` always dismisses — and dismissal destroys nothing:
+  the dictation becomes a recovery entry. No key changes consequence
+  class with state.
 - Bare taps, acting immediately — no double-taps, no chords, no timing
   windows. Modifier double-press belongs to the OS.
 - There is no stored Mac/iPhone mode. The key pressed is the microphone
@@ -36,16 +37,18 @@ pending capture. **There is only ever one dictation.** States: **Idle**,
 | Idle | start Mac | start iPhone | inert | inert |
 | Connecting Mac | inert | inert + HUD nudge | deliver banked, abort¹ | abort → safe floor |
 | Connecting iPhone | inert + HUD nudge | inert | deliver banked, abort¹ | abort → safe floor |
-| Recording Mac | **pause** | inert + HUD nudge | end | discard² |
-| Recording iPhone | inert + HUD nudge | **pause** | end | discard² |
-| Paused | resume Mac | resume iPhone | end | discard all² |
-| Draining | **reopen** on Mac | **reopen** on iPhone | inert | abort → recovery² |
+| Recording Mac | **pause** | inert + HUD nudge | end | dismiss² |
+| Recording iPhone | inert + HUD nudge | **pause** | end | dismiss² |
+| Paused | resume Mac | resume iPhone | end | dismiss² |
+| Draining | **reopen** on Mac | **reopen** on iPhone | inert | dismiss² |
 
 ¹ Inert when nothing is banked.
-² Esc opens a short cancel window rather than discarding instantly.
-During it every key keeps its meaning: a source key reopens, fn
-delivers after all. When it lapses, the dictation is discarded for
-real. No confirmation prompt anywhere — reversal replaces confirmation.
+² Dismissal is instant and destroys nothing: the whole dictation — hot
+capture included — folds into recovery, off screen and away from the
+cursor. Getting the text back is a recovery action, not a keyboard one,
+and deleting it for real is a deliberate act there, under the retention
+setting. No confirmation prompt and no grace window — recovery replaces
+both.
 
 - **While any capture exists — connecting or recording — the other
   source key does nothing** beyond a HUD nudge. Switching sources =
@@ -53,8 +56,9 @@ real. No confirmation prompt anywhere — reversal replaces confirmation.
   with Esc, then the right key.
 - **Safe floor:** any failed or aborted transition (Esc during connect,
   iPhone unreachable) lands in Paused if audio is banked, Idle otherwise.
-  Never a silent fallback to the other microphone. Destroying banked work
-  always takes a deliberate Esc from Paused.
+  Never a silent fallback to the other microphone, and never a dismissed
+  dictation by accident: Esc during connect closes only the pending
+  capture.
 
 ## Delivery
 
@@ -62,18 +66,19 @@ While a dictation is open, nothing reaches the cursor. **Delivery is
 atomic**: End closes the dictation, and when every segment's transcript
 is in, the whole message lands at the cursor as one delivery. The first
 landed character **seals** the dictation — until then a source key
-**reopens** it (back to recording; delivery called off) and Esc aborts
-it to recovery. After the seal it is immutable and leaves the HUD.
+**reopens** it (back to recording; delivery called off) and Esc
+dismisses it (delivery called off; everything to recovery). After the
+seal it is immutable and leaves the HUD.
 There is no queue of concurrent dictations: starting during Draining is
 a reopen, not a second message. Pause finalizes eagerly — the
 microphone is released first, then the segment transcribes immediately —
 so End after a pause is typically near-instant, and the reopen window
 correspondingly short.
 
-Esc never delivers. Its cancel window applies to every dictation, short
-or long; when it lapses, the dictation is gone. Already-transcribed
-segments remain recovery entries; the fn path takes no artificial delay
-— delivery is only ever as slow as transcription itself.
+Esc never delivers. It dismisses instantly, and a dismissed dictation
+is a recovery entry, not a loss — slower to get back than text at the
+cursor, and that is the whole cost. The fn path takes no artificial
+delay — delivery is only ever as slow as transcription itself.
 
 ## Menu bar keyboard sheet
 
@@ -81,7 +86,7 @@ Clicking the menu bar icon opens a small anchored panel that is a live
 keyboard map, replacing menu items.
 
 - A rendered keyboard, all keys blank except the four bound ones,
-  glyphed: laptop (right ⌘), phone (right ⌥), deliver (fn), discard
+  glyphed: laptop (right ⌘), phone (right ⌥), deliver (fn), dismiss
   (Esc).
 - Live: keys re-glyph from the current state per the matrix — while
   Recording on Mac, right ⌘ shows pause and right ⌥ is dark. The panel

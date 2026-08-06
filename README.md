@@ -43,13 +43,15 @@ The Xcode project contains four product targets:
    | right ⌘ | Mac microphone: start / pause / resume |
    | right ⌥ | iPhone microphone: start / pause / resume |
    | fn | End: close the dictation and deliver everything banked |
-   | Esc | Discard |
+   | Esc | Dismiss |
 
    The left ⌘ and ⌥ are deliberately untouched, and every chord — including
    ⌘C, ⌘V, and ⌘Tab — keeps its normal behavior. Only a bare press-and-release
    with no other key or modifier is read as dictation.
 7. A source key can never deliver text and never destroy it; `fn` always
-   delivers; `Esc` always discards. Pausing releases the microphone (handing
+   delivers; `Esc` always dismisses — instantly, with nothing destroyed: the
+   dictation leaves the screen and stays recoverable in the waiting-text
+   list. Pausing releases the microphone (handing
    your iPhone straight back) and banks the segment, which starts transcribing
    immediately — so the End after a pause is usually instant. Nothing reaches
    your cursor until you press `fn`, and then everything banked is delivered in
@@ -59,19 +61,28 @@ The Xcode project contains four product targets:
    nudges: there is no mid-recording handover.
 9. The click-through Liquid Glass indicator is a depth stack with one stable
    card per chunk. Live capture stays in front and spring-morphs from wake pulse
-   to real waveform to release glint; each transcribing chunk recedes behind it
-   with its own directional progress rail. The oldest card is rearmost and pops
-   out when delivered, while deeper work folds into a numeric `+N`. Progress is
-   only an estimate and stops short of claiming completion. A stalled rail hides
-   after 90 seconds; success, errors, model details, and offline notices stay in
-   the app instead of becoming floating notifications.
+   to real waveform to a collapsing release; each transcribing chunk recedes
+   behind it as a small typing pill — three hopping dots, the messaging sign
+   that a message is being written for you — while deeper work folds into a
+   numeric `+N`. Nothing estimates: Scribe answers one request with the whole
+   transcript, so the dots claim no progress and no time remaining, and
+   completion is the card leaving rather than any animation finishing. A stalled
+   card hides after 90 seconds; success, errors, model details, and offline
+   notices stay in the app instead of becoming floating notifications.
+   The two terminal exits happen in place and differ by shape: a delivered
+   dictation **pops** (a bloom outward), a dismissed one **folds** (a squash to
+   nothing). Neither slides anywhere.
 10. A resting dictation shows a **still, dim, sourceless** front card — no
    laptop or phone glyph, because no microphone is live and the next source key
    decides. It never times out. The existing visibility caps apply to the rails
    behind it, not to the dictation itself.
-11. Preloaded sounds use three single pings that rise through capture, release,
-   and verified delivery, while errors are the family's only phrase: low and
-   falling.
+11. Preloaded sounds: a single ping when capture goes live, and a low level cue
+   when the microphone is actually released by a pause or a cancel. Closing has
+   its own pair — a quiet typing patter that loops while the dots are up, then a
+   soft falling plop as the message lands. Nothing sounds at the `fn` press
+   itself; the patter is the acknowledgment. Errors are the family's only
+   phrase: low and falling. Every cue is synthesized deterministically by
+   `scripts/generate-macos-earcons.py`.
 
 You do not have to wait at the keyboard. When a transcript reaches the delivery
 boundary, SpeakPaste uses the currently focused writable, non-secure editor —
@@ -93,7 +104,7 @@ have landed, SpeakPaste marks it as possibly delivered and never retries it
 automatically. Delayed same-session and recovered entries can be placed
 explicitly with **⌥⌘V** at the current writable cursor; possibly delivered
 entries require the separate reviewed one-shot authorization. Pressing `Esc`
-from a resting dictation discards it in the same sense: the banked text never
+from a resting dictation dismisses it in the same sense: the banked text never
 reaches the cursor, but it stays recoverable in the waiting-text list until you
 paste or delete it.
 
@@ -383,13 +394,14 @@ salvages its finalized partial file, and recording startup, WAV finalization,
 network requests, retry concurrency, and long-session limits are bounded.
 
 The indicator can be anchored at any screen edge without becoming a second
-control surface. One bare right-Command tap starts or stops; two taps switch the
-persistent Mac/iPhone input mode. A switch during live capture safely finalizes
-the current segment, releases its hardware, then resumes as the next ordered
-segment on the target source. One Escape cancels connecting or recording
-immediately. Its preloaded sound family uses three single pings that rise
-through capture, release, and verified delivery, while errors are the family's
-only phrase: low and falling. All normal builds that own SpeakPaste's
+control surface. Each dictation verb has its own bare key: right ⌘ and right ⌥
+start, pause, and resume on the Mac and iPhone microphones, `fn` ends and
+delivers, and `Esc` dismisses. Changing microphone mid-thought is pause then
+resume on the other key, which finalizes the current segment and releases its
+hardware before the next one starts. One Escape dismisses connecting or
+recording immediately, without destroying anything. Its preloaded sound family
+is documented in [the HUD specification](docs/macos-dictation-hud.md); errors
+are the family's only phrase: low and falling. All normal builds that own SpeakPaste's
 shared local stores use one product-wide process lease,
 independent of bundle identifier; a secondary launch exits without initializing
 app data. While the microphone is recording, SpeakPaste prevents idle display

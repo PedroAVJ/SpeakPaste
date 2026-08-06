@@ -19,7 +19,8 @@ Companion to `macos-dictation-controls.md`; the HUD renders that machine.
 ## States
 
 States are distinguished by motion. The grammar: **pop = delivered,
-fold = discarded to recovery, still = waiting on you, rail = working.**
+fold = dismissed to recovery, still = waiting on you, breath = waiting
+on the world, dots = being typed, rail = working.**
 
 - **Hot** — the live capture: source glyph at the bloom, then the red
   waveform. Banked segments are invisible plumbing; the capsule is the
@@ -32,10 +33,11 @@ fold = discarded to recovery, still = waiting on you, rail = working.**
   different job: separate dictations' work folded behind the stack.)
   Sourceless: no source glyph — there is no current source; the next
   source key decides. Never times out.
-- **Draining** — End was pressed. The capsule shows the message
-  becoming text (see *Closing on deliver*), then the whole message
+- **Draining** — End was pressed. The capsule shrinks to the typing
+  pill — dots jumping — if delivery cannot land at once (see *Closing
+  on deliver*), then the whole message
   lands as one pop and the dictation seals into Away. Until the seal, a
-  source key **reopens** it (back to Hot) and Esc aborts it to
+  source key **reopens** it (back to Hot) and Esc dismisses it to
   recovery — Draining is a Resting that leaves on its own.
 - **Away** — clean screen, nothing owed.
 
@@ -44,46 +46,81 @@ Invariants:
 - **Presence means owed text.** The HUD may not disappear while a
   dictation is open (Hot or Resting). Timeouts apply to transcription
   rails only, never to a resting dictation.
-- Esc's exit (fold inward) is visibly distinct from End's (pop outward).
+- Esc's exit (the fold, a squash to nothing) is visibly distinct from
+  End's (the pop, a bloom) — distinct shapes, both in place. Nothing
+  travels.
 - A state gets a face only if the user can act differently during it.
 
-## Closing on cancel — machine settled, face OPEN
+## Closing on dismiss — the fold is the face
 
-Esc freezes the bars (mic truthfully off) and opens a ~4 s cancel
-window. Every key keeps its meaning throughout: a source key reopens
-the dictation, fn delivers it after all, and the window lapsing folds
-it away with the vanish tone. The fn path never gets an artificial
-delay.
+Esc closes the dictation in one gesture: the bars freeze (mic
+truthfully off) and the capsule folds inward to recovery, instantly.
+No window, no countdown, no pending state — everything banked is
+already a recovery entry, so nothing on screen needs guarding, and Esc
+destroys nothing. There is no face to design because there is no state
+to show: a source key afterwards starts a fresh dictation, and getting
+the dismissed text back is a recovery action, not a keyboard one.
 
-**The face of this window is an unresolved design.** The current
-prototype (a pending ✕ with a small radial countdown, capsule
-otherwise still) is a placeholder, not an approval — treatments tried
-and rejected: capsule-scale coral ring, two-press arming, countdown
-rail, slow deflate, instant-fold ghost. Revisit rested.
+## Closing on deliver — the typing dots
 
-## Closing on deliver — the wave becomes words (CANDIDATE)
+**The face is a loading state, not progress.** Decided: Scribe reports
+no progress and no ETA — one request, then the whole transcript at
+once — so the machine has no divisible quantity to draw; and a
+progress face invites supervising, when the product wants the user
+comfortable looking away. Kept principles: never a meter; the face
+draws only real signals; the animation alone never claims completion —
+the pop rides delivery-verified, and delivery never waits for
+animation.
 
-Principles for this face, settled: the capsule shows the user's
-message, never an abstract process (no meters); it shows material, not
-time — a long dictation is visibly more to transcribe; the capsule is a
-window, not a container — the full recorded envelope is clipped and
-scrolls through it; while recording the wave streams in, while
-transcribing it streams back out; the animation alone never claims
-completion.
+**The typing indicator**, as shipped. At fn the
+capsule shrinks straight from the live red wave into the small typing
+pill — three jumping dots, no gray intermediate: a frozen beat would
+wear Paused's body, so the voice hands off to the dots directly. The
+dots are the messaging idiom for a message being composed for you,
+the one loading state the world is already trained on, and the
+training is exactly right: the message arrives whole, as one bubble,
+with a sound; there is no progress and no ETA; staring at the dots
+does not help. The idiom is output-side — your text being written —
+where the wave treatments were input-side, the machine consuming
+audio. On delivery-verified the pill pops in place — a bubble
+bursting at center, no travel; a bubble pops where it stands — and
+the arrival sound calls back a user who looked away. Dots exist
+only while delivery is owed; a near-instant delivery shows a blink of
+them at most, and delivery never waits for the animation. A long wait
+gets the same dots, never an escalation. Reopen stands the capsule
+back up into the live wave; Esc folds the pill to recovery.
 
-Leading treatment, not yet final: on End the wave freezes, flattens,
-and fuses into word-shaped dashes — a skeleton of the text it is
-becoming, never readable (privacy: the HUD carries no words). Pending
-words shimmer; they confirm solid green left to right as the row
-scrolls through the window, so the green fraction is the progress and
-the scroll is the material. The last word shimmers until the real text
-lands; then the line settles, delivery-verified fires, and the capsule
-pops toward the cursor. Reopen mid-read stands the words back up into
-the live wave. In the realtime lane, dash widths can come from actual
-partial transcripts. Considered and rejected: caret with a progress
-rail (discards the message's identity), fixed-frontier wave read (flow
-without progress), bare shimmer (says nothing about material or
-progress).
+The face's sound, settled with it. **No cue fires at the fn press**: the
+patter starts a moment later and is itself the acknowledgment, so a
+release chime there announced one act twice. (Pause and cancel keep
+`capture-released` — there the release is the whole event, and on
+iPhone it is the receipt that the phone is free again.) While the dots
+are up, the **typing patter** loops: the family's own struck tone
+played as keystrokes — short, dry, low, in irregular bursts across the
+low E-major degrees, well under every other cue so it can sit behind
+whatever the user went back to doing. It is the one continuous sound
+in the product, and it is what makes leaving the HUD safe. The arrival
+is the **delivery plop**, a struck tone falling E5→E4: a message
+landing, not a rising ping claiming a milestone. Both are synthesized
+by `scripts/generate-macos-earcons.py` — deterministic, no samples —
+and the patter loop is verified to begin and end in silence so the
+wrap cannot click.
+
+Considered and rejected: word-shaped dashes confirming word by word
+(invents per-word progress, pace, and widths no signal provides; the
+words are born at the cursor, not in the capsule), wave greening span
+by span as segment transcripts land (honest edges, but progress
+machinery over an almost-always-binary signal, and it rewards
+watching), estimate-driven progress from audio length (an estimate is
+a promise, and it breaks on camera — early snap or the 90% stall),
+frozen wave with the amber wait-dot beside it (the capsule's body
+reads as Paused — departure dressed as parking; a seven-pixel
+accessory cannot overrule the body), the read glint over the frozen
+wave (honest and calm, but input-side — the machine reading — and the
+frozen wave still wears Paused's body), caret with a progress rail
+(discards the message's identity), fixed-frontier wave read (flow
+without progress), bare shimmer on an empty capsule (says nothing at
+all).
 
 ## Starts
 
@@ -122,23 +159,27 @@ status are separate channels.
 ## Sound
 
 Earcons fire on real edges of the machine, never on cosmetic animation.
-The shipped family holds: three pings rising through capture, release,
-and verified delivery; errors remain the family's only phrase.
+The one carve-out is the typing patter, which is not an edge but a
+state: it is continuous because the state it reports is, and because it
+is the thing that lets the user look away.
 
-Two sound families with fixed meanings. **Pings rise and mean forward
-progress**: capture-live at capture-live, capture-released at End,
-delivery-verified exactly on the delivery pop. **The wait family is low,
-soft, and level**: the tick (tap acknowledged, go-signal pending) and
-the hold tone (paused — held, owed). Pause never plays a rising ping;
-suspension is not progress.
+Three families with fixed meanings. **Pings rise and mean forward
+progress**: capture-live at capture-live. **The wait family is low,
+soft, and level**: the tick (tap acknowledged, go-signal pending), the
+hold tone (paused — held, owed), and capture-released, which reports
+that the microphone is actually free after a pause or a cancel. Pause
+never plays a rising ping; suspension is not progress. **The closing
+family is the message being written and landing**: the typing patter
+while the dots are up, then the delivery plop on the pop. Closing
+carries no rising ping at either end — see *Closing on deliver*.
 
 - **The capture ping fires at capture-live. The tick is the wait**, like
   the dot: it exists only when the go-signal cannot come immediately. The
   iPhone tap gets a tick, then the wait, then the ping on the dissolve.
   The Mac has no wait, so no tick — one ping, effectively at the
   keypress.
-- End needs no tick: capture-released fires at the fn press (release is
-  immediate) and delivery-verified lands on the pop.
+- End needs no tick and no chime: the patter starts as the dots appear,
+  and the plop lands on the pop.
 - The tick and the hold tone are assets still to be authored in the
   family's voice. The Esc sound is open: a muted low tick, or silence
   with the fold carrying it alone.
@@ -155,9 +196,12 @@ placeholder below.
 
 - `hud-starts.html` — both starts, sounds and timing. Settled.
 - `hud-pause.html` — pause and resume on either source. Settled.
-- `hud-transcribe.html` — the wave-becomes-words deliver face.
-  Candidate, under review.
-- `hud-closing.html` — the cancel window. Machine settled; the face is
-  a placeholder.
+- `hud-transcribe.html` — the typing-dots deliver face, with the
+  patter and the plop. Settled and shipped.
+- `hud-closing.html` — the instant dismiss. Settled.
 - `hud-dictation.html` — the whole machine in one capsule, every key
-  in every state. Its deliver face predates `hud-transcribe.html`.
+  in every state, speaking the shipped closing face.
+
+The Mac implementation follows: `MacStatusHUD.swift` draws the dots and
+both exits, `MacSoundEffects.swift` owns the patter and plop, and
+`scripts/generate-macos-earcons.py` synthesizes and verifies every cue.

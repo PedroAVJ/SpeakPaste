@@ -69,6 +69,74 @@ CUES = (
     ),
 )
 
+# The closing face's two sounds. While the typing dots are up, the patter is
+# the only voice: no cue fires at the fn press, because a chime immediately
+# followed by the patter reads as two announcements for one act. The patter
+# loops until the transcript lands, and the plop is the arrival — the message
+# bubble landing, not a rising ping claiming a milestone.
+GSHARP4 = 415.305
+TOCK_ATTACK_SECONDS = 0.002
+TOCK_TAU_SECONDS = 0.011
+# Every tock is one of the low E-major degrees, struck far shorter than a note
+# in the family: the same instrument, played as keystrokes rather than pitches.
+TOCK_PITCHES = (E4, B3, GSHARP4)
+
+
+@dataclass(frozen=True)
+class Tock:
+    onset_seconds: float
+    frequency_hz: float
+
+
+@dataclass(frozen=True)
+class PatterCue:
+    """A seamless loop of typing. It begins and ends in silence so the wrap is
+    inaudible, and its bursts are irregular so a long wait never develops an
+    obvious beat."""
+
+    filename: str
+    tocks: tuple[Tock, ...]
+    loop_seconds: float
+    peak_dbfs: float
+
+
+@dataclass(frozen=True)
+class GlideCue:
+    filename: str
+    start_hz: float
+    end_hz: float
+    glide_seconds: float
+    peak_dbfs: float
+    approximate_duration_seconds: float
+
+
+def _burst_tocks() -> tuple[Tock, ...]:
+    """The loop's rhythm, written out rather than sampled or randomized: bursts
+    of two or three keystrokes separated by the small pauses of someone
+    thinking. Onsets and pitches are literal so the render stays deterministic
+    and the rhythm stays reviewable."""
+    bursts = (
+        (0.000, (0, 1, 2)),
+        (0.760, (1, 0)),
+        (1.310, (2, 1, 0)),
+        (2.180, (0, 2)),
+        (2.690, (1, 2, 0)),
+        (3.520, (2, 0)),
+        (4.010, (1, 0, 2)),
+    )
+    gaps = (0.104, 0.131, 0.118, 0.096, 0.142, 0.109, 0.127)
+    tocks: list[Tock] = []
+    for burst_index, (start, pitch_indices) in enumerate(bursts):
+        onset = start
+        for step, pitch_index in enumerate(pitch_indices):
+            tocks.append(Tock(onset, TOCK_PITCHES[pitch_index]))
+            onset += gaps[(burst_index + step) % len(gaps)]
+    return tuple(tocks)
+
+
+PATTER = PatterCue("typing-patter.caf", _burst_tocks(), 4.800, -26.0)
+DELIVERY_PLOP = GlideCue("delivery-plop.caf", E5, E4, 0.055, -19.0, 0.320)
+
 
 def amplitude_for_dbfs(dbfs: float) -> float:
     return 10.0 ** (dbfs / 20.0)
@@ -143,6 +211,83 @@ def render_cue(cue: Cue) -> np.ndarray:
     return np.clip(quantized, -32_768, 32_767).astype("<i2")
 
 
+def render_tock(frame_count: int, frequency_hz: float) -> np.ndarray:
+    """One keystroke: the family's struck tone with a very short decay and only
+    a trace of the second partial, so it reads as a tap rather than a note."""
+    local_time = np.arange(frame_count, dtype=np.float64) / SAMPLE_RATE
+    attack_progress = np.clip(local_time / TOCK_ATTACK_SECONDS, 0.0, 1.0)
+    attack = 0.5 - 0.5 * np.cos(np.pi * attack_progress)
+    decay_time = np.maximum(local_time - TOCK_ATTACK_SECONDS, 0.0)
+    decay = np.exp(-decay_time / TOCK_TAU_SECONDS)
+    fundamental = np.sin(2.0 * np.pi * frequency_hz * local_time)
+    partial = 0.08 * np.sin(2.0 * np.pi * frequency_hz * 2.0 * local_time)
+    return (fundamental + partial) * attack * decay
+
+
+def render_patter(cue: PatterCue) -> np.ndarray:
+    frame_count = round(cue.loop_seconds * SAMPLE_RATE)
+    signal = np.zeros(frame_count, dtype=np.float64)
+    # 120 ms is far past the tock's decay, so no keystroke is ever clipped by
+    # the loop boundary and the wrap stays silent.
+    tock_frames = round(0.120 * SAMPLE_RATE)
+
+    for tock in cue.tocks:
+        onset_frame = round(tock.onset_seconds * SAMPLE_RATE)
+        end_frame = min(frame_count, onset_frame + tock_frames)
+        if end_frame <= onset_frame:
+            continue
+        signal[onset_frame:end_frame] += render_tock(
+            end_frame - onset_frame,
+            tock.frequency_hz,
+        )
+
+    raw_peak = float(np.max(np.abs(signal)))
+    if raw_peak == 0:
+        raise RuntimeError(f"{cue.filename}: synthesis produced silence")
+    signal *= amplitude_for_dbfs(cue.peak_dbfs) / raw_peak
+    signal[0] = 0.0
+    signal[-1] = 0.0
+
+    quantized = np.rint(signal * 32_767.0)
+    return np.clip(quantized, -32_768, 32_767).astype("<i2")
+
+
+def render_glide(cue: GlideCue) -> np.ndarray:
+    """The arrival: one struck tone falling through the family's own interval.
+    A drop, not a rise — nothing is being claimed, something has landed."""
+    frame_count = math.ceil(0.500 * SAMPLE_RATE)
+    local_time = np.arange(frame_count, dtype=np.float64) / SAMPLE_RATE
+    glide_progress = np.clip(local_time / cue.glide_seconds, 0.0, 1.0)
+    frequency = cue.start_hz * (cue.end_hz / cue.start_hz) ** glide_progress
+    phase = 2.0 * np.pi * np.cumsum(frequency) / SAMPLE_RATE
+
+    attack_progress = np.clip(local_time / ATTACK_SECONDS, 0.0, 1.0)
+    attack = 0.5 - 0.5 * np.cos(np.pi * attack_progress)
+    decay_time = np.maximum(local_time - ATTACK_SECONDS, 0.0)
+    decay = np.exp(-decay_time / 0.055)
+    signal = np.sin(phase) * attack * decay
+
+    raw_peak = float(np.max(np.abs(signal)))
+    if raw_peak == 0:
+        raise RuntimeError(f"{cue.filename}: synthesis produced silence")
+    signal *= amplitude_for_dbfs(cue.peak_dbfs) / raw_peak
+
+    threshold = amplitude_for_dbfs(TRIM_THRESHOLD_DBFS)
+    above_threshold = np.flatnonzero(np.abs(signal) >= threshold)
+    fade_start = int(above_threshold[-1])
+    fade_frames = round(FINAL_FADE_SECONDS * SAMPLE_RATE)
+    end_frame = min(signal.size, fade_start + fade_frames)
+    signal = signal[:end_frame].copy()
+    fade_length = signal.size - fade_start
+    if fade_length > 1:
+        fade = 0.5 + 0.5 * np.cos(np.linspace(0.0, np.pi, fade_length))
+        signal[fade_start:] *= fade
+    signal[-1] = 0.0
+
+    quantized = np.rint(signal * 32_767.0)
+    return np.clip(quantized, -32_768, 32_767).astype("<i2")
+
+
 def write_wav(path: Path, samples: np.ndarray) -> None:
     with wave.open(str(path), "wb") as output:
         output.setnchannels(1)
@@ -164,12 +309,18 @@ def run(command: list[str]) -> str:
 
 def generate(output_directory: Path) -> None:
     output_directory.mkdir(parents=True, exist_ok=True)
+    rendered: list[tuple[str, np.ndarray]] = [
+        (cue.filename, render_cue(cue)) for cue in CUES
+    ]
+    rendered.append((PATTER.filename, render_patter(PATTER)))
+    rendered.append((DELIVERY_PLOP.filename, render_glide(DELIVERY_PLOP)))
+
     with tempfile.TemporaryDirectory(prefix="speakpaste-earcons-") as raw_temp:
         temp_directory = Path(raw_temp)
-        for cue in CUES:
-            wav_path = temp_directory / cue.filename.replace(".caf", ".wav")
-            caf_path = temp_directory / cue.filename
-            write_wav(wav_path, render_cue(cue))
+        for filename, samples in rendered:
+            wav_path = temp_directory / filename.replace(".caf", ".wav")
+            caf_path = temp_directory / filename
+            write_wav(wav_path, samples)
             run(
                 [
                     "afconvert",
@@ -185,7 +336,7 @@ def generate(output_directory: Path) -> None:
                     "--no-filler",
                 ]
             )
-            caf_path.replace(output_directory / cue.filename)
+            caf_path.replace(output_directory / filename)
 
 
 def read_caf_samples(path: Path, temp_directory: Path) -> np.ndarray:
@@ -317,6 +468,8 @@ def verify(output_directory: Path) -> None:
             + ", ".join(f"{value:.2f}" for value in crest_factors)
         )
 
+    closing_results = verify_closing_face(output_directory)
+
     print("Verified SpeakPaste earcon family:")
     for cue in CUES:
         duration, peak_dbfs, rms_dbfs = results[cue.filename]
@@ -324,8 +477,79 @@ def verify(output_directory: Path) -> None:
             f"  {cue.filename}: {duration:.3f}s, "
             f"peak {peak_dbfs:.2f} dBFS, RMS {rms_dbfs:.2f} dBFS"
         )
+    for filename, (duration, peak_dbfs, rms_dbfs) in closing_results.items():
+        print(
+            f"  {filename}: {duration:.3f}s, "
+            f"peak {peak_dbfs:.2f} dBFS, RMS {rms_dbfs:.2f} dBFS"
+        )
     print("Measured fundamentals:")
     print("\n".join(pitch_lines))
+
+
+def verify_closing_face(output_directory: Path) -> dict[str, tuple[float, float, float]]:
+    """The looping patter and the arrival plop. Neither is pitch-verified: the
+    patter is a rhythm across three degrees, and the plop is a glide rather
+    than a single fundamental. What must hold is that the patter can loop
+    without a seam and stays well under the struck-note family, so it can play
+    continuously behind whatever the user has gone back to doing."""
+    results: dict[str, tuple[float, float, float]] = {}
+    expectations = (
+        (PATTER.filename, PATTER.loop_seconds, PATTER.peak_dbfs),
+        (
+            DELIVERY_PLOP.filename,
+            DELIVERY_PLOP.approximate_duration_seconds,
+            DELIVERY_PLOP.peak_dbfs,
+        ),
+    )
+
+    with tempfile.TemporaryDirectory(prefix="speakpaste-closing-check-") as raw_temp:
+        temp_directory = Path(raw_temp)
+        for filename, expected_duration, expected_peak in expectations:
+            path = output_directory / filename
+            if not path.is_file():
+                raise AssertionError(f"missing cue: {path}")
+
+            afinfo = run(["afinfo", str(path)])
+            if "File type ID:   caff" not in afinfo:
+                raise AssertionError(f"{filename}: expected CAF container")
+            if not re.search(r"Data format:\s+1 ch,\s+44100 Hz, Int16", afinfo):
+                raise AssertionError(f"{filename}: expected mono 44.1 kHz Int16 LPCM")
+            duration_match = re.search(r"estimated duration:\s+([0-9.]+) sec", afinfo)
+            if duration_match is None:
+                raise AssertionError(f"{filename}: afinfo did not report duration")
+            duration = float(duration_match.group(1))
+            if abs(duration - expected_duration) > 0.100:
+                raise AssertionError(
+                    f"{filename}: duration {duration:.3f}s is not approximately "
+                    f"{expected_duration:.3f}s"
+                )
+
+            samples = read_caf_samples(path, temp_directory)
+            if samples[0] != 0.0 or samples[-1] != 0.0:
+                raise AssertionError(f"{filename}: first and last samples must be zero")
+            peak_dbfs = dbfs_for_amplitude(float(np.max(np.abs(samples))))
+            if abs(peak_dbfs - expected_peak) > 0.12:
+                raise AssertionError(
+                    f"{filename}: peak {peak_dbfs:.2f} dBFS, expected {expected_peak:.2f} dBFS"
+                )
+            rms_dbfs = dbfs_for_amplitude(float(np.sqrt(np.mean(np.square(samples)))))
+            results[filename] = (duration, peak_dbfs, rms_dbfs)
+
+    patter_samples_head = round(0.010 * SAMPLE_RATE)
+    patter_path = output_directory / PATTER.filename
+    with tempfile.TemporaryDirectory(prefix="speakpaste-loop-check-") as raw_temp:
+        patter = read_caf_samples(patter_path, Path(raw_temp))
+    seam = amplitude_for_dbfs(-70.0)
+    if float(np.max(np.abs(patter[-patter_samples_head:]))) > seam:
+        raise AssertionError(
+            f"{PATTER.filename}: loop tail is not silent, so the wrap would click"
+        )
+
+    if results[PATTER.filename][1] >= min(cue.peak_dbfs for cue in CUES):
+        raise AssertionError(
+            f"{PATTER.filename}: the patter must sit below every struck cue"
+        )
+    return results
 
 
 def verify_deterministic_pcm(output_directory: Path) -> None:
@@ -336,17 +560,19 @@ def verify_deterministic_pcm(output_directory: Path) -> None:
         original_decode_directory.mkdir()
         repeated_decode_directory.mkdir()
         generate(repeat_directory)
-        for cue in CUES:
+        filenames = [cue.filename for cue in CUES]
+        filenames += [PATTER.filename, DELIVERY_PLOP.filename]
+        for filename in filenames:
             installed_pcm = read_caf_samples(
-                output_directory / cue.filename,
+                output_directory / filename,
                 original_decode_directory,
             )
             repeated_pcm = read_caf_samples(
-                repeat_directory / cue.filename,
+                repeat_directory / filename,
                 repeated_decode_directory,
             )
             if not np.array_equal(installed_pcm, repeated_pcm):
-                raise AssertionError(f"{cue.filename}: repeated synthesis changed decoded PCM")
+                raise AssertionError(f"{filename}: repeated synthesis changed decoded PCM")
     print("Repeated synthesis produced byte-identical decoded PCM.")
 
 

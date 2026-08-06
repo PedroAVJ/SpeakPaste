@@ -10,35 +10,6 @@ final class MacTranscriptionWorkloadTests: XCTestCase {
         XCTAssertTrue(workload.isEmpty)
     }
 
-    func testEstimateUsesRecordingDurationButNeverPretendsToBeComplete() {
-        let expected = MacTranscriptionWorkload.expectedDuration(for: 20)
-
-        XCTAssertEqual(expected, 4, accuracy: 0.000_001)
-        XCTAssertEqual(
-            MacTranscriptionWorkload.estimatedFraction(
-                recordingDuration: 20,
-                elapsed: 0
-            ),
-            0.08,
-            accuracy: 0.000_001
-        )
-        XCTAssertEqual(
-            MacTranscriptionWorkload.estimatedFraction(
-                recordingDuration: 20,
-                elapsed: expected
-            ),
-            0.826_925,
-            accuracy: 0.000_001
-        )
-        XCTAssertLessThan(
-            MacTranscriptionWorkload.estimatedFraction(
-                recordingDuration: 20,
-                elapsed: 60
-            ),
-            1
-        )
-    }
-
     func testOrderedJobsAreOldestFirstWithStableIdentity() {
         let firstID = UUID()
         let secondID = UUID()
@@ -119,21 +90,8 @@ final class MacTranscriptionWorkloadTests: XCTestCase {
         var workload = MacTranscriptionWorkload()
         workload.start(id: id, duration: .infinity, at: start)
 
-        // The job sanitizes a nonsensical duration on admission, so every
-        // per-card estimate downstream starts from a real number.
+        // The job sanitizes a nonsensical duration on admission, so nothing
+        // downstream — History, diagnostics, or the HUD — ever reads one.
         XCTAssertEqual(workload.orderedJobs.first?.recordingDuration, 0)
-        XCTAssertEqual(
-            MacTranscriptionWorkload.expectedDuration(for: -.infinity),
-            2,
-            accuracy: 0.000_001
-        )
-        XCTAssertEqual(
-            MacTranscriptionWorkload.estimatedFraction(
-                recordingDuration: 0,
-                elapsed: -5
-            ),
-            0.08,
-            accuracy: 0.000_001
-        )
     }
 }

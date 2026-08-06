@@ -284,11 +284,17 @@ final class MacAppModel: ObservableObject {
     /// Presentation lifecycle for capture, transcription, and one short-lived
     /// held event. Durable recovery and queue depth belong to the dashboard,
     /// never to the floating HUD.
-    @Published private(set) var hudPipeline = MacHUDPipeline()
-    /// A short-lived terminal receipt lets SwiftUI reserve the trailing slide
-    /// for verified delivery. Projection changes such as overflow, timeout, or
+    @Published private(set) var hudPipeline = MacHUDPipeline() {
+        didSet { syncTypingPatter() }
+    }
+    /// A short-lived terminal receipt lets SwiftUI reserve the delivery pop for
+    /// verified delivery. Projection changes such as overflow, timeout, or
     /// held-card aggregation must not impersonate completion.
     @Published private(set) var recentlyDeliveredHUDCardIDs = Set<UUID>()
+    /// The same receipt for the other terminal exit: cards the user dismissed
+    /// with Escape, which fold away rather than popping. Only a real dismissal
+    /// may claim the fold, for the same reason only a real delivery may pop.
+    @Published private(set) var recentlyDismissedHUDCardIDs = Set<UUID>()
     /// Failed dictations whose audio is still on disk and can be resent.
     @Published private(set) var retryableFailures: [MacRetryableDictation] = []
     @Published private(set) var networkIsAvailable = true
@@ -1195,6 +1201,26 @@ final class MacAppModel: ObservableObject {
         hudPipeline = pipeline
     }
 
+    /// The patter is tied to the typing dots and nothing else: it runs while a
+    /// dictation is being transcribed or is waiting its turn to deliver, and
+    /// stops the moment that state ends — delivered, dismissed, reopened, or
+    /// failed. A held card gets no patter; nothing is being typed for it.
+    private func syncTypingPatter() {
+        let isTyping = hudPipeline.dictations.contains { dictation in
+            switch dictation.stage {
+            case .transcribing, .awaitingDelivery:
+                true
+            case .held:
+                false
+            }
+        }
+        if isTyping {
+            sounds.startTypingPatter()
+        } else {
+            sounds.stopTypingPatter()
+        }
+    }
+
     private func markHUDCardsDelivered(_ ids: Set<UUID>) {
         guard !ids.isEmpty else { return }
         recentlyDeliveredHUDCardIDs.formUnion(ids)
@@ -1202,6 +1228,19 @@ final class MacAppModel: ObservableObject {
             try? await Task.sleep(for: .seconds(1))
             guard let self else { return }
             self.recentlyDeliveredHUDCardIDs.subtract(ids)
+        }
+    }
+
+    /// Marks cards as dismissed just before they leave, so SwiftUI folds them
+    /// instead of fading. The receipt is dropped a beat later: it exists only
+    /// to label the removal that is already under way.
+    private func markHUDCardsDismissed(_ ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+        recentlyDismissedHUDCardIDs.formUnion(ids)
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard let self else { return }
+            self.recentlyDismissedHUDCardIDs.subtract(ids)
         }
     }
 
@@ -2538,7 +2577,15 @@ final class MacAppModel: ObservableObject {
         // `stop()` returns only after AVFoundation has released the capture
         // session. Pair the opening cue with that actual lifecycle receipt,
         // not with the user's request to stop.
-        sounds.playRecordingStopped()
+        //
+        // Closing is the exception: the typing patter starts a moment later and
+        // is itself the acknowledgment, so a release chime here would announce
+        // one act twice. Pause and cancel keep the cue — there the release is
+        // the whole event, and on iPhone it is the receipt that the phone is
+        // free again.
+        if finalizationOutcome != .close {
+            sounds.playRecordingStopped()
+        }
         isMicrophoneConnected = false
         connectedDeviceID = nil
         connectionLatency = nil
@@ -3200,6 +3247,11 @@ final class MacAppModel: ObservableObject {
         case .connecting, .recording:
             cancelRecording()
         case .paused:
+            // The resting card is about to leave because the user dismissed
+            // it, so it folds; ending the phase is what actually removes it.
+            if let restingID = hudPipeline.resting?.id {
+                markHUDCardsDismissed([restingID])
+            }
             discardBankedSegments()
             closeDictation()
         case .finalizing, .ready, .succeeded, .failed:
@@ -3238,6 +3290,7 @@ final class MacAppModel: ObservableObject {
             self.connectedDeviceID = nil
             self.connectionLatency = nil
             if let cancelledHUDCardID {
+                self.markHUDCardsDismissed([cancelledHUDCardID])
                 var pipeline = self.hudPipeline
                 pipeline.finish(id: cancelledHUDCardID)
                 self.hudPipeline = pipeline

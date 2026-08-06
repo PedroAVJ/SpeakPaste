@@ -345,8 +345,10 @@ private enum MacHUDMetrics {
             return reduceMotion ? 150 : 176
         case .capture(.releasing):
             return reduceMotion ? 150 : 120
+        // The typing pill: the capsule shrinks past every other width as the
+        // wave hands off to the dots.
         case .transcription:
-            return reduceMotion ? 150 : 120
+            return reduceMotion ? 150 : 64
         }
     }
 }
@@ -439,31 +441,26 @@ private struct MacStatusHUDView: View {
             : .spring(response: 0.35, dampingFraction: 0.8)
     }
 
-    /// Entry is brisk (a small scale-up with the surface spring). A capture
-    /// card exits with a plain fade into its transcription card; a dictation
-    /// or held card uses the delivery slide only when the model published a
-    /// verified terminal receipt. Overflow folding, timeout, and the held
-    /// marker's two-second expiry are presentation changes and therefore
-    /// crossfade.
+    /// Entry is brisk (a small scale-up with the surface spring). The two
+    /// terminal exits are shapes, never travel: **pop** — a bloom outward —
+    /// when the model published a verified delivery receipt, and **fold** — a
+    /// squash to nothing — when the user dismissed the dictation with Escape.
+    /// A bubble pops where it stands, so neither exit slides anywhere. Every
+    /// other removal (a capture morphing into its typing pill, overflow
+    /// folding, a timeout, the held marker's two-second expiry) is a
+    /// presentation change and therefore a plain crossfade.
     private func transition(for card: MacHUDStack.Card) -> AnyTransition {
         if reduceMotion { return .opacity }
+        let insertion = AnyTransition.scale(scale: 0.86).combined(with: .opacity)
+        if model.recentlyDismissedHUDCardIDs.contains(card.id) {
+            return .asymmetric(insertion: insertion, removal: .macHUDFold)
+        }
         switch card.content {
-        case .sourceNudge, .resting:
-            return .asymmetric(
-                insertion: .scale(scale: 0.86).combined(with: .opacity),
-                removal: .opacity
-            )
-        case .capture:
-            return .asymmetric(
-                insertion: .scale(scale: 0.86).combined(with: .opacity),
-                removal: .opacity
-            )
+        case .sourceNudge, .resting, .capture:
+            return .asymmetric(insertion: insertion, removal: .opacity)
         case .transcription, .held:
             if model.recentlyDeliveredHUDCardIDs.contains(card.id) {
-                return .asymmetric(
-                    insertion: .scale(scale: 0.86).combined(with: .opacity),
-                    removal: .move(edge: .trailing).combined(with: .opacity)
-                )
+                return .asymmetric(insertion: insertion, removal: .macHUDPop)
             }
             return .opacity
         }
@@ -479,6 +476,38 @@ private struct MacStatusHUDView: View {
     /// no source, so it must not inherit the last one's name.
     private var sourceName: String? {
         model.activeSource?.title
+    }
+}
+
+/// The two terminal exits. Both happen in place — the capsule never travels,
+/// because a bubble pops where it stands — and they are told apart by shape
+/// alone: the pop blooms outward as the message lands, the fold squashes flat
+/// as a dismissed dictation drops away to recovery.
+private struct MacHUDCapsuleScale: ViewModifier {
+    let width: CGFloat
+    let height: CGFloat
+    let opacity: Double
+
+    func body(content: Content) -> some View {
+        content
+            .scaleEffect(x: width, y: height)
+            .opacity(opacity)
+    }
+}
+
+private extension AnyTransition {
+    static var macHUDPop: AnyTransition {
+        .modifier(
+            active: MacHUDCapsuleScale(width: 1.12, height: 1.12, opacity: 0),
+            identity: MacHUDCapsuleScale(width: 1, height: 1, opacity: 1)
+        )
+    }
+
+    static var macHUDFold: AnyTransition {
+        .modifier(
+            active: MacHUDCapsuleScale(width: 0.5, height: 0.16, opacity: 0),
+            identity: MacHUDCapsuleScale(width: 1, height: 1, opacity: 1)
+        )
     }
 }
 
@@ -536,13 +565,8 @@ private struct MacHUDStackCardView: View {
                 isCollapsing: true,
                 reduceMotion: reduceMotion
             )
-        case .transcription(let stage, let enqueuedAt, let recordingDuration):
-            MacHUDDictationProgress(
-                stage: stage,
-                enqueuedAt: enqueuedAt,
-                recordingDuration: recordingDuration,
-                reduceMotion: reduceMotion
-            )
+        case .transcription:
+            MacHUDTypingDots(reduceMotion: reduceMotion)
         case .held:
             MacHUDHeldBadge(clipboardBacked: heldClipboardBacked)
         }
@@ -662,8 +686,9 @@ private struct MacHUDWakeSignal: View {
 /// Listening and releasing: a compact center-symmetric waveform driven by the
 /// real captured input level, answering the one question the HUD exists for —
 /// "is my voice reaching this microphone". During release the target level
-/// drops to zero so the same bars visibly collapse, and a single glint hands
-/// the energy forward toward the transcription card behind.
+/// drops to zero so the same bars visibly collapse: the voice handing off
+/// directly to the typing dots, with no still gray beat in between — a frozen
+/// wave would wear Resting's body at the one moment the dictation is leaving.
 private struct MacHUDWaveform: View {
     let level: Double
     let isCollapsing: Bool
@@ -682,20 +707,14 @@ private struct MacHUDWaveform: View {
     }
 
     var body: some View {
-        ZStack {
-            TimelineView(
-                .animation(minimumInterval: reduceMotion ? 1.0 / 15 : 1.0 / 60)
-            ) { context in
-                Canvas { graphics, size in
-                    drawBars(in: graphics, size: size, at: context.date)
-                }
-            }
-            .frame(width: Self.canvasWidth, height: Self.maxBarHeight + 2)
-
-            if isCollapsing, !reduceMotion {
-                MacHUDReleaseGlint()
+        TimelineView(
+            .animation(minimumInterval: reduceMotion ? 1.0 / 15 : 1.0 / 60)
+        ) { context in
+            Canvas { graphics, size in
+                drawBars(in: graphics, size: size, at: context.date)
             }
         }
+        .frame(width: Self.canvasWidth, height: Self.maxBarHeight + 2)
         .accessibilityHidden(true)
     }
 
@@ -777,122 +796,62 @@ private final class MacHUDLevelEnvelope {
     }
 }
 
-/// The release hand-off: one bright fleck leaves the collapsing waveform's
-/// center and exits toward the leading edge of the upcoming progress fill.
-private struct MacHUDReleaseGlint: View {
-    @State private var progress: CGFloat = 0
-
-    var body: some View {
-        GeometryReader { proxy in
-            let travel = proxy.size.width / 2 - 10
-            Capsule()
-                .fill(
-                    LinearGradient(
-                        colors: [
-                            Color.white.opacity(0.88),
-                            Color(nsColor: .systemCyan).opacity(0.82),
-                        ],
-                        startPoint: .leading,
-                        endPoint: .trailing
-                    )
-                )
-                .frame(width: 12, height: 4)
-                .blur(radius: 0.5)
-                .position(
-                    x: proxy.size.width / 2 + travel * progress,
-                    y: proxy.size.height / 2
-                )
-                .opacity(1 - Double(progress))
-        }
-        .onAppear {
-            withAnimation(.easeOut(duration: 0.35)) { progress = 1 }
-        }
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
-    }
-}
-
-/// One dictation's transcription rail: a luminous line that advances from the
-/// left, plus a restrained shimmer. Each card owns its own rail, so no rail
-/// ever inherits another request's estimate. Progress is an honest asymptotic
-/// estimate — it climbs quickly through the expected turnaround window, keeps
-/// creeping forward afterwards, and never reaches the end on its own.
-/// Completion is signaled by the card leaving, not by the bar filling; no
-/// percentage is ever shown. The enqueue metadata is copied onto the card, so
-/// the rail keeps estimating through its removal transition after the
-/// workload has forgotten the attempt.
-private struct MacHUDDictationProgress: View {
-    let stage: MacHUDPipeline.DictationStage
-    let enqueuedAt: Date
-    let recordingDuration: TimeInterval
+/// Transcribing: the typing indicator. Three dots hopping in sequence — the
+/// messaging idiom for a message being composed for you, which is exactly what
+/// SpeakPaste is doing, and which carries exactly the expectation this state
+/// needs: the text arrives whole, there is nothing to supervise, and looking
+/// away costs nothing.
+///
+/// Deliberately not progress. Scribe answers one request with the whole
+/// transcript — no progress events, no ETA — so there is no divisible quantity
+/// to draw, and an estimate drawn as a bar is a promise that breaks in public
+/// (an early snap or a stall near the end). The dots claim nothing, so they can
+/// loop for as long as the network takes without ever lying. Completion is the
+/// card leaving, never the animation.
+private struct MacHUDTypingDots: View {
     let reduceMotion: Bool
 
-    private static let trackWidth: CGFloat = 84
-    private static let trackHeight: CGFloat = 4
-    private static let shimmerWidth: CGFloat = 26
-    private static let shimmerPeriod: TimeInterval = 1.5
+    private static let dotDiameter: CGFloat = 7
+    private static let dotSpacing: CGFloat = 5
+    private static let period: TimeInterval = 1.25
+    private static let stagger: TimeInterval = 0.15
+    private static let hopHeight: CGFloat = 5
+    /// The share of each dot's cycle spent hopping. The rest is rest: without
+    /// it the row throbs continuously instead of reading as a passing wave.
+    private static let hopShare = 0.4
 
     var body: some View {
         TimelineView(
-            .animation(minimumInterval: reduceMotion ? 0.5 : 1.0 / 30)
-        ) { context in
-            let fraction = switch stage {
-            case .transcribing:
-                MacTranscriptionWorkload.estimatedFraction(
-                    recordingDuration: recordingDuration,
-                    elapsed: context.date.timeIntervalSince(enqueuedAt)
-                )
-            case .awaitingDelivery:
-                0.96
-            case .held:
-                1.0
-            }
-            let fill = max(
-                Self.trackHeight,
-                Self.trackWidth * CGFloat(fraction)
+            .animation(
+                minimumInterval: reduceMotion ? 1 : 1.0 / 60,
+                paused: reduceMotion
             )
-            ZStack(alignment: .leading) {
-                Capsule()
-                    .fill(Color.primary.opacity(0.14))
-                    .frame(width: Self.trackWidth, height: Self.trackHeight)
-                Capsule()
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                Color(nsColor: .systemBlue),
-                                Color(nsColor: .systemCyan),
-                            ],
-                            startPoint: .leading,
-                            endPoint: .trailing
+        ) { context in
+            let time = context.date.timeIntervalSinceReferenceDate
+            HStack(spacing: Self.dotSpacing) {
+                ForEach(0..<3, id: \.self) { index in
+                    let hop = reduceMotion ? 0 : Self.hop(at: time, index: index)
+                    Circle()
+                        .fill(Color(nsColor: .secondaryLabelColor))
+                        .frame(
+                            width: Self.dotDiameter,
+                            height: Self.dotDiameter
                         )
-                    )
-                    .frame(width: fill, height: Self.trackHeight)
-                    .overlay(alignment: .leading) {
-                        if !reduceMotion {
-                            shimmer(at: context.date, fillWidth: fill)
-                        }
-                    }
-                    .clipShape(Capsule())
-                    .shadow(
-                        color: Color(nsColor: .systemCyan).opacity(0.42),
-                        radius: 3
-                    )
+                        .opacity(0.45 + 0.55 * hop)
+                        .offset(y: -Self.hopHeight * hop)
+                }
             }
         }
         .accessibilityHidden(true)
     }
 
-    private func shimmer(at date: Date, fillWidth: CGFloat) -> some View {
-        let phase = date.timeIntervalSinceReferenceDate
-            .truncatingRemainder(dividingBy: Self.shimmerPeriod) / Self.shimmerPeriod
-        let x = -Self.shimmerWidth + (fillWidth + 2 * Self.shimmerWidth) * CGFloat(phase)
-        return LinearGradient(
-            colors: [.clear, Color.white.opacity(0.65), .clear],
-            startPoint: .leading,
-            endPoint: .trailing
-        )
-        .frame(width: Self.shimmerWidth, height: Self.trackHeight)
-        .offset(x: x)
+    /// One dot's hop as 0…1, offset per dot so the lift travels left to right.
+    private static func hop(at time: TimeInterval, index: Int) -> Double {
+        let shifted = time - Double(index) * stagger
+        let phase = shifted.truncatingRemainder(dividingBy: period)
+        let normalized = (phase < 0 ? phase + period : phase) / period
+        guard normalized < hopShare else { return 0 }
+        return sin(normalized / hopShare * .pi)
     }
 }
 
