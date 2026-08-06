@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SpeakPaste — Live Activity anatomy (the iOS HUD)</title>
+<style>
+  body { margin: 0; padding: 40px; background: #1c1e22; color: #c8c8cc; font-family: -apple-system, system-ui, sans-serif; }
+  h1 { font-size: 16px; font-weight: 500; color: #e8e8ec; margin: 0 0 6px; }
+  h2 { font-size: 14px; font-weight: 500; color: #e8e8ec; margin: 40px 0 4px; }
+  p.sub { font-size: 13px; color: #8f8f96; margin: 0 0 24px; max-width: 640px; line-height: 1.5; }
+  .controls { display: flex; align-items: center; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+  button { font: inherit; font-size: 13px; color: #c8c8cc; background: #2a2d33; border: 1px solid #3d4048; border-radius: 8px; padding: 7px 14px; cursor: pointer; }
+  button:hover { background: #33363d; }
+  button:disabled { opacity: 0.35; cursor: default; }
+  button:disabled:hover { background: #2a2d33; }
+  .cta { font-size: 13px; color: #8f8f96; }
+
+  /* ---------- anatomy row ---------- */
+  .anatomy { display: flex; gap: 18px; flex-wrap: wrap; }
+  .exhibit { background: #2a2d33; border-radius: 14px; padding: 18px 16px 14px; width: 200px; display: flex; flex-direction: column; align-items: center; gap: 14px; }
+  .exhibit .stage { height: 110px; display: flex; align-items: center; justify-content: center; }
+  .exhibit .cap-label { font-size: 12px; color: #e8e8ec; font-weight: 500; }
+  .exhibit .cap-when { font-size: 11.5px; color: #8f8f96; line-height: 1.45; text-align: center; margin: 0; }
+
+  @keyframes wob { 0%,100% { transform: scaleY(0.4); } 50% { transform: scaleY(1); } }
+  .bars { display: flex; align-items: center; gap: 2.5px; height: 16px; }
+  .bars span { width: 3px; border-radius: 2px; background: #e2483d; animation: wob 0.9s ease-in-out infinite; }
+  .bars span:nth-child(2) { animation-delay: 0.15s; } .bars span:nth-child(3) { animation-delay: 0.3s; }
+  .bars span:nth-child(4) { animation-delay: 0.45s; } .bars span:nth-child(5) { animation-delay: 0.1s; }
+  .paused .bars span { animation-play-state: paused; }
+
+  .pill { background: #000; border-radius: 20px; display: flex; align-items: center; }
+  .pill.compact { height: 34px; padding: 0 14px; gap: 10px; }
+  .pill .camera { width: 12px; height: 12px; border-radius: 50%; background: #14161a; flex: none; }
+  .timer { font-variant-numeric: tabular-nums; font-size: 13px; color: #e2483d; }
+  .mini-circle { width: 34px; height: 34px; border-radius: 50%; background: #000; display: flex; align-items: center; justify-content: center; }
+  .mini-circle .bars { height: 12px; } .mini-circle .bars span { width: 2.5px; }
+
+  .exp-card { background: #000; border-radius: 24px; padding: 16px 18px 14px; width: 190px; }
+  .exp-head { display: flex; align-items: center; justify-content: space-between; }
+  .exp-title { font-size: 12px; color: #9a9aa2; }
+  .exp-timer { font-size: 24px; color: #fff; font-variant-numeric: tabular-nums; margin: 8px 0 10px; }
+  .exp-buttons { display: flex; gap: 8px; }
+  .exp-buttons .b { flex: 1; text-align: center; font-size: 12px; border-radius: 10px; padding: 7px 0; cursor: pointer; user-select: none; }
+  .b.pause { background: rgba(240,160,58,0.18); color: #f0a03a; }
+  .b.cancel { background: rgba(255,255,255,0.1); color: #c8c8cc; }
+  .b.resume { background: rgba(90,200,90,0.18); color: #6ecb6e; }
+
+  /* ---------- simulator ---------- */
+  .sim-wrap { display: flex; gap: 28px; align-items: flex-start; flex-wrap: wrap; }
+  .phone { width: 320px; height: 480px; background: linear-gradient(160deg, #5a4a7a 0%, #7a5a8a 45%, #3a3a5e 100%); border-radius: 36px; border: 6px solid #0a0a0c; position: relative; overflow: hidden; flex: none; }
+  .statusbar { position: absolute; top: 10px; left: 0; right: 0; display: flex; justify-content: space-between; padding: 0 26px; font-size: 12px; color: #fff; font-weight: 600; }
+  .mic-ind { position: absolute; top: 12px; right: 88px; width: 7px; height: 7px; border-radius: 50%; background: #f0a03a; opacity: 0; transition: opacity 0.25s; }
+  .mic-ind.on { opacity: 1; }
+
+  .island-area { position: absolute; top: 8px; left: 0; right: 0; display: flex; justify-content: center; align-items: center; gap: 7px; }
+  .island { background: #000; border-radius: 20px; height: 30px; display: flex; align-items: center; justify-content: center; gap: 9px; padding: 0 11px; min-width: 78px; box-sizing: border-box; transition: min-width 0.4s cubic-bezier(0.3,1.15,0.5,1), padding 0.4s; cursor: pointer; }
+  .island .camera { width: 11px; height: 11px; border-radius: 50%; background: #14161a; flex: none; }
+  .island .slot { display: flex; align-items: center; gap: 8px; opacity: 0; transform: scale(0.6); transition: opacity 0.25s 0.1s, transform 0.3s 0.1s; }
+  .island.has-content .slot { opacity: 1; transform: scale(1); }
+  .island.has-content { min-width: 168px; }
+  .music-dot { width: 15px; height: 15px; border-radius: 4px; background: linear-gradient(135deg, #3a86c8, #e07040); flex: none; }
+  .eq { display: flex; align-items: center; gap: 2px; height: 12px; }
+  .eq span { width: 2.5px; border-radius: 2px; background: #4aa3df; animation: wob 0.8s ease-in-out infinite; }
+  .eq span:nth-child(2) { animation-delay: 0.2s; } .eq span:nth-child(3) { animation-delay: 0.35s; }
+  .detached { width: 30px; height: 30px; border-radius: 50%; background: #000; display: flex; align-items: center; justify-content: center; opacity: 0; transform: scale(0.4); transition: opacity 0.3s, transform 0.35s cubic-bezier(0.3,1.3,0.5,1); cursor: pointer; }
+  .detached.on { opacity: 1; transform: scale(1); }
+  .detached .bars { height: 11px; } .detached .bars span { width: 2.5px; }
+
+  .expanded-overlay { position: absolute; top: 46px; left: 14px; right: 14px; background: #000; border-radius: 26px; padding: 16px 18px 14px; opacity: 0; transform: translateY(-14px) scale(0.9); transform-origin: top center; pointer-events: none; transition: opacity 0.28s, transform 0.32s cubic-bezier(0.3,1.2,0.5,1); box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+  .expanded-overlay.on { opacity: 1; transform: translateY(0) scale(1); pointer-events: auto; }
+
+  .lockscreen { position: absolute; inset: 0; background: linear-gradient(170deg, #2c2a44 0%, #4a3a5e 60%, #262238 100%); opacity: 0; pointer-events: none; transition: opacity 0.3s; display: flex; flex-direction: column; align-items: center; }
+  .lockscreen.on { opacity: 1; pointer-events: auto; }
+  .ls-time { font-size: 56px; font-weight: 600; color: #fff; margin-top: 64px; letter-spacing: -1px; }
+  .ls-date { font-size: 14px; color: rgba(255,255,255,0.75); margin-top: 2px; }
+  .ls-card { margin-top: 26px; width: 250px; background: rgba(0,0,0,0.72); backdrop-filter: blur(8px); border-radius: 20px; padding: 14px 16px 12px; }
+
+  .homescreen { position: absolute; inset: 0; padding: 60px 24px 0; display: grid; grid-template-columns: repeat(4, 1fr); gap: 18px; align-content: start; }
+  .app-ico { width: 46px; height: 46px; border-radius: 11px; background: rgba(255,255,255,0.22); }
+
+  .statelabel { font-size: 12px; color: #8f8f96; margin-top: 10px; min-height: 34px; max-width: 320px; line-height: 1.5; }
+  .legend { font-size: 12.5px; color: #8f8f96; line-height: 1.6; max-width: 300px; }
+  .legend b { color: #c8c8cc; font-weight: 500; }
+</style>
+</head>
+<body>
+
+<h1>Live Activity anatomy — the iOS HUD</h1>
+<p class="sub">One activity, four authored presentations. The app designs all four; <em>the system</em> decides
+which is on screen based on what else is live and what the user does. Buttons inside any of them run App
+Intents in place — no app launch.</p>
+
+<div class="anatomy">
+  <div class="exhibit">
+    <div class="stage">
+      <div class="pill compact">
+        <div class="bars"><span style="height:7px"></span><span style="height:13px"></span><span style="height:9px"></span><span style="height:15px"></span><span style="height:8px"></span></div>
+        <div class="camera"></div>
+        <div class="timer">0:07</div>
+      </div>
+    </div>
+    <div class="cap-label">Compact</div>
+    <p class="cap-when">The default. Yours is the only activity: a leading and a trailing slot hugging the camera.</p>
+  </div>
+
+  <div class="exhibit">
+    <div class="stage">
+      <div class="mini-circle">
+        <div class="bars"><span style="height:6px"></span><span style="height:10px"></span><span style="height:7px"></span><span style="height:11px"></span><span style="height:6px"></span></div>
+      </div>
+    </div>
+    <div class="cap-label">Minimal</div>
+    <p class="cap-when">Two activities live at once: one stays in the island, the other detaches into this circle. It must say “recording” alone, at ~20 pt.</p>
+  </div>
+
+  <div class="exhibit">
+    <div class="stage">
+      <div class="exp-card">
+        <div class="exp-head">
+          <span class="exp-title">SpeakPaste</span>
+          <div class="bars"><span style="height:6px"></span><span style="height:10px"></span><span style="height:7px"></span><span style="height:11px"></span><span style="height:6px"></span></div>
+        </div>
+        <div class="exp-timer">0:07</div>
+        <div class="exp-buttons">
+          <div class="b pause">Pause</div>
+          <div class="b cancel">Cancel</div>
+        </div>
+      </div>
+    </div>
+    <div class="cap-label">Expanded</div>
+    <p class="cap-when">Touch &amp; hold the island. An authored SwiftUI card; its buttons execute in place.</p>
+  </div>
+
+  <div class="exhibit">
+    <div class="stage" style="align-items:flex-start; padding-top:8px;">
+      <div class="exp-card" style="background:rgba(0,0,0,0.78); width:180px;">
+        <div class="exp-head">
+          <span class="exp-title">SpeakPaste · Recording</span>
+        </div>
+        <div class="exp-timer" style="font-size:20px;">0:07</div>
+        <div class="exp-buttons">
+          <div class="b pause">Pause</div>
+          <div class="b cancel">Cancel</div>
+        </div>
+      </div>
+    </div>
+    <div class="cap-label">Lock Screen</div>
+    <p class="cap-when">Pinned card, zero presses to reach. Multiple activities stack here — nothing is dropped.</p>
+  </div>
+</div>
+
+<h2>Simulator — one dictation’s life in the island</h2>
+<p class="sub">Drive it with the buttons, or interact directly: <b>press and hold the island</b> to expand,
+click the detached circle too. Watch what the “Play music” competitor does to SpeakPaste’s placement —
+that is the everyday two-activity case.</p>
+
+<div class="sim-wrap">
+  <div class="phone" id="phone">
+    <div class="homescreen">
+      <div class="app-ico"></div><div class="app-ico"></div><div class="app-ico"></div><div class="app-ico"></div>
+      <div class="app-ico"></div><div class="app-ico"></div><div class="app-ico"></div><div class="app-ico"></div>
+    </div>
+    <div class="statusbar"><span>10:07</span><span>&#9679;&#9679;&#9679;</span></div>
+    <div class="mic-ind" id="micInd"></div>
+
+    <div class="island-area">
+      <div class="island" id="island">
+        <div class="slot" id="islandSlot"></div>
+        <div class="camera"></div>
+        <div class="slot" id="islandSlotTrail"></div>
+      </div>
+      <div class="detached" id="detached" title="minimal presentation">
+        <div class="bars"><span style="height:6px"></span><span style="height:10px"></span><span style="height:7px"></span><span style="height:11px"></span><span style="height:6px"></span></div>
+      </div>
+    </div>
+
+    <div class="expanded-overlay" id="expCard">
+      <div class="exp-head">
+        <span class="exp-title">SpeakPaste</span>
+        <div class="bars" id="expBars"><span style="height:6px"></span><span style="height:10px"></span><span style="height:7px"></span><span style="height:11px"></span><span style="height:6px"></span></div>
+      </div>
+      <div class="exp-timer" id="expTimer">0:00</div>
+      <div class="exp-buttons">
+        <div class="b pause" id="btnPause">Pause</div>
+        <div class="b cancel" id="btnCancel">Cancel</div>
+      </div>
+    </div>
+
+    <div class="lockscreen" id="lockscreen">
+      <div class="ls-time">10:07</div>
+      <div class="ls-date">Wednesday, August 5</div>
+      <div class="ls-card" id="lsCard" style="display:none;">
+        <div class="exp-head">
+          <span class="exp-title">SpeakPaste · <span id="lsState">Recording</span></span>
+          <div class="bars" id="lsBars"><span style="height:6px"></span><span style="height:10px"></span><span style="height:7px"></span><span style="height:11px"></span><span style="height:6px"></span></div>
+        </div>
+        <div class="exp-timer" id="lsTimer" style="font-size:22px;">0:00</div>
+        <div class="exp-buttons">
+          <div class="b pause" id="lsPause">Pause</div>
+          <div class="b cancel" id="lsCancel">Cancel</div>
+        </div>
+      </div>
+      <div class="ls-card" id="lsMusic" style="display:none; margin-top:10px;">
+        <div class="exp-head"><span class="exp-title">Music · De nada</span><div class="eq"><span style="height:6px"></span><span style="height:10px"></span><span style="height:7px"></span></div></div>
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <div class="controls" style="margin-top:0;">
+      <button id="cStart">Double-tap — start dictation</button>
+      <button id="cMusic">Play music</button>
+    </div>
+    <div class="controls">
+      <button id="cHold">Touch &amp; hold island</button>
+      <button id="cLock">Lock phone</button>
+      <button id="cStop" disabled>Stop &amp; Insert (keyboard)</button>
+    </div>
+    <div class="statelabel" id="stateLabel">Idle. No activity. The island is just the camera housing.</div>
+    <div class="legend" style="margin-top:18px;">
+      <b>What to notice</b><br>
+      · Start puts SpeakPaste in <b>compact</b> — waveform leading, elapsed trailing.<br>
+      · Music arriving demotes one of them to the <b>minimal</b> detached circle. The system picks; you don’t.<br>
+      · Hold expands the authored card; Pause/Cancel act in place, the app never opens.<br>
+      · The lock screen shows the card with zero presses — and stacks both activities.<br>
+      · The orange dot is the system’s own mic indicator: the backstop that is never ours to lose.
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  const $ = id => document.getElementById(id);
+  const island = $('island'), slot = $('islandSlot'), trail = $('islandSlotTrail');
+  const detached = $('detached'), expCard = $('expCard'), lock = $('lockscreen');
+  const label = $('stateLabel'), micInd = $('micInd');
+
+  let recording = false, paused = false, music = false, locked = false, expanded = false;
+  let seconds = 0, tick = null;
+
+  const fmt = s => Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+
+  const barsHTML = '<div class="bars"><span style="height:6px"></span><span style="height:11px"></span><span style="height:8px"></span><span style="height:13px"></span><span style="height:7px"></span></div>';
+  const musicHTML = '<div class="music-dot"></div>';
+  const eqHTML = '<div class="eq"><span style="height:6px"></span><span style="height:10px"></span><span style="height:7px"></span></div>';
+
+  function say(t) { label.textContent = t; }
+
+  function render() {
+    micInd.classList.toggle('on', recording && !paused);
+    document.querySelectorAll('.bars').forEach(b => b.parentElement && b.closest('body'));
+    document.body.classList.toggle('paused', paused);
+
+    // island contents
+    if (recording && !music) {
+      island.classList.add('has-content');
+      slot.innerHTML = barsHTML;
+      trail.innerHTML = '<div class="timer" id="pillTimer">' + fmt(seconds) + '</div>';
+      detached.classList.remove('on');
+    } else if (recording && music) {
+      // two activities: music keeps the island, SpeakPaste detaches to minimal
+      island.classList.add('has-content');
+      slot.innerHTML = musicHTML;
+      trail.innerHTML = eqHTML;
+      detached.classList.add('on');
+    } else if (!recording && music) {
+      island.classList.add('has-content');
+      slot.innerHTML = musicHTML;
+      trail.innerHTML = eqHTML;
+      detached.classList.remove('on');
+    } else {
+      island.classList.remove('has-content');
+      slot.innerHTML = ''; trail.innerHTML = '';
+      detached.classList.remove('on');
+    }
+
+    expCard.classList.toggle('on', expanded && recording && !locked);
+    lock.classList.toggle('on', locked);
+    $('lsCard').style.display = (locked && recording) ? '' : 'none';
+    $('lsMusic').style.display = (locked && music) ? '' : 'none';
+
+    $('btnPause').textContent = paused ? 'Resume' : 'Pause';
+    $('btnPause').className = 'b ' + (paused ? 'resume' : 'pause');
+    $('lsPause').textContent = paused ? 'Resume' : 'Pause';
+    $('lsPause').className = 'b ' + (paused ? 'resume' : 'pause');
+    $('lsState').textContent = paused ? 'Paused' : 'Recording';
+    $('cStart').textContent = recording ? (paused ? 'Double-tap — resume' : 'Double-tap — pause') : 'Double-tap — start dictation';
+    $('cMusic').textContent = music ? 'Stop music' : 'Play music';
+    $('cStop').disabled = !recording;
+    $('cLock').textContent = locked ? 'Unlock' : 'Lock phone';
+  }
+
+  function timerLoop() {
+    clearInterval(tick);
+    tick = setInterval(() => {
+      if (recording && !paused) {
+        seconds++;
+        const pt = $('pillTimer'); if (pt) pt.textContent = fmt(seconds);
+        $('expTimer').textContent = fmt(seconds);
+        $('lsTimer').textContent = fmt(seconds);
+      }
+    }, 1000);
+  }
+
+  function start() {
+    recording = true; paused = false; seconds = 0;
+    $('expTimer').textContent = '0:00'; $('lsTimer').textContent = '0:00';
+    timerLoop(); render();
+    say(music
+      ? 'Recording — but Music holds the island, so SpeakPaste rides the minimal circle. Both hot at once.'
+      : 'Compact: SpeakPaste alone in the island. Waveform leading, elapsed trailing. Capture is hot.');
+  }
+
+  function togglePause() {
+    paused = !paused; render();
+    say(paused ? 'Paused, in place. The card and circle stay; the waveform freezes; the mic indicator drops.'
+               : 'Resumed. Same activity, same card — nothing was torn down.');
+  }
+
+  function cancel() {
+    recording = false; paused = false; expanded = false; render();
+    say('Canceled. The activity folds away — and by the invariant, into recovery, never into loss.');
+  }
+
+  function stopInsert() {
+    recording = false; paused = false; expanded = false; render();
+    say('Stop & Insert: the activity ends because the dictation ended. Born at double-tap, dead at the cursor.');
+  }
+
+  $('cStart').onclick = () => { recording ? togglePause() : start(); };
+  $('cMusic').onclick = () => {
+    music = !music; render();
+    if (music && recording) say('A second activity arrived. The system splits: Music in the island, SpeakPaste demoted to the detached minimal circle. This is why the tiny glyph must read “recording” by itself.');
+    else if (music) say('Music alone: it gets the compact island.');
+    else { render(); say(recording ? 'Music gone — SpeakPaste reclaims the compact island.' : 'Idle again.'); }
+  };
+  $('cHold').onclick = () => {
+    if (!recording) { say('Nothing to expand — no activity is live. Start a dictation first.'); return; }
+    expanded = !expanded; render();
+    if (expanded) say('Expanded: the authored card. These buttons run App Intents in place — the app never opens.');
+  };
+  $('cLock').onclick = () => {
+    locked = !locked; expanded = false; render();
+    say(locked ? 'Lock Screen: the card is pinned with zero presses to reach it. Both activities stack.'
+               : 'Unlocked, back to the island.');
+  };
+  $('cStop').onclick = stopInsert;
+  $('btnPause').onclick = togglePause;
+  $('lsPause').onclick = togglePause;
+  $('btnCancel').onclick = cancel;
+  $('lsCancel').onclick = cancel;
+
+  // press-and-hold on the island itself
+  let holdT = null;
+  island.addEventListener('pointerdown', () => {
+    holdT = setTimeout(() => { if (recording) { expanded = true; render(); say('Expanded via touch & hold — the real gesture.'); } }, 380);
+  });
+  ['pointerup', 'pointerleave'].forEach(ev => island.addEventListener(ev, () => clearTimeout(holdT)));
+  detached.addEventListener('click', () => {
+    if (recording) { expanded = !expanded; render(); if (expanded) say('The minimal circle expands to the same card. One activity, many doors.'); }
+  });
+  document.addEventListener('click', e => {
+    if (expanded && !expCard.contains(e.target) && !island.contains(e.target) && !detached.contains(e.target) && e.target.tagName !== 'BUTTON') {
+      expanded = false; render();
+    }
+  });
+
+  render();
+})();
+</script>
+</body>
+</html>

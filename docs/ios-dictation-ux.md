@@ -1,15 +1,151 @@
 # iPhone dictation UX
 
-SpeakPaste follows the Wispr Flow keyboard pattern on iPhone: start from the
-keyboard, let the containing app briefly own the microphone, return to the same
-host app while capture continues, then stop and insert from the keyboard.
+Dictation on iPhone starts with a double tap on the back of the phone and ends
+at the keyboard. Back Tap runs the `Toggle Dictation` App Intent, which starts
+microphone capture without leaving the current app; **Stop & Insert** in the
+SpeakPaste keyboard ends the capture and lands the transcript exactly once at
+the cursor. In the happy path, SpeakPaste's own screens never appear.
+
+When the Back Tap route is unavailable, SpeakPaste falls back to the Wispr Flow
+keyboard pattern: start from the keyboard, let the containing app briefly own
+the microphone, return to the same host app while capture continues, then stop
+and insert from the keyboard.
 
 The detailed device evidence, failure reproductions, runtime contract, and
 acceptance matrix are in
 [`ios-keyboard-roundtrip-spec.md`](ios-keyboard-roundtrip-spec.md). That file is
 the source of truth for the return implementation.
 
-## Target interaction
+## Primary interaction
+
+1. Double-tap the back of the phone, from anywhere. Capture starts where you
+   are: no app switch, and no waiting for a focused field or an active
+   keyboard — the thought does not wait for the UI.
+2. Speak. The system microphone indicator and the Live Activity confirm the
+   capture is hot for its whole duration.
+3. Focus the destination field, bring up the SpeakPaste keyboard, and tap
+   **Stop & Insert**. Stop lives at the point of insertion: the same tap that
+   ends the capture places the text.
+
+The trigger choice is deliberate, on everyday per-use cost alone:
+
+- Back Tap is an eyes-free, one-handed gesture with no target to aim at, and it
+  works from anywhere — mid-scroll, before the destination field exists.
+  Capture is decoupled from destination: speak first, aim second.
+- A keyboard start can only begin once a field is focused and the keyboard is
+  up, and it pays the visible app bounce on every single dictation.
+- The intent route is public API end to end (`AudioRecordingIntent`, Live
+  Activity, background capture); the bounce rests on recovered private
+  behavior that an iOS update can break. The durable route carries the daily
+  load.
+
+Back Tap requires one-time configuration in Settings > Accessibility > Touch.
+That setup cost is accepted: SpeakPaste is a power tool first, and the everyday
+experience outranks first-run ease.
+
+## Verbs and their surfaces
+
+iOS collapses the macOS source dimension — one phone, one microphone — so four
+keys become three verbs. Each verb goes to the cheapest surface that can carry
+it, and as on macOS the trigger is fixed while the current state picks the
+meaning:
+
+| Verb | Surface |
+|---|---|
+| start / pause / resume | double-tap — one gesture, state picks the verb |
+| end, deliver | **Stop & Insert** in the keyboard — stop lives at the point of insertion |
+| dismiss into recovery | **Cancel** on the Live Activity — island hold, or the Lock Screen card |
+
+Assignment follows one principle: a verb lives on a surface guaranteed to
+exist at the moment the verb is needed. Delivery needs the keyboard because
+only the keyboard can insert. Pause and cancel are needed during capture, and
+during capture the only guaranteed surface is the Live Activity — the
+keyboard is merely conditional, so it carries no copy of either. The Live
+Activity also mirrors pause, so an interruption is handled where the eyes
+already are, keyboard or no keyboard.
+
+Pause and resume keep the macOS segment model: a dictation is an ordered list
+of segments plus at most one hot capture. Pause finalizes the current segment
+eagerly — microphone released, segment transcribed immediately. Resume does
+not un-pause a recording; it opens a new segment in the same dictation, and
+stitching happens at the transcript layer by concatenation. The double tap is
+the same fixed trigger throughout: idle starts, recording pauses, paused
+resumes — state picks the verb, exactly as the macOS source keys do.
+
+The Live Activity is the iOS HUD: a persistent control strip for the whole
+capture. Compact in the Dynamic Island; touch and hold to expand an authored
+SwiftUI card with working Pause and Cancel buttons (App Intent-backed,
+executed in place, no app launch); the same card sits on the Lock Screen with
+zero presses to reach it.
+
+Dismissal keeps the macOS invariant: it destroys nothing. A canceled
+dictation folds into recovery, so a misfired Cancel costs a trip to recovery,
+never text.
+
+Provisional, pending real use:
+
+- Whether pause earns its keep on the phone at all — pocket dictations are
+  short, and the players ship start/stop/cancel only. Toggle-as-start/stop
+  may be enough.
+- Triple-tap is a second free global gesture (a candidate eyes-free dismiss,
+  safe precisely because dismissal destroys nothing). Unbound unless
+  double-tap alone proves insufficient.
+- A Control Center control, placeable in the Lock Screen bottom slots:
+  capture without unlocking — speak first, unlock and aim later. Optional
+  addition, not part of the core loop.
+
+## Delivery
+
+At-cursor insertion on iOS has exactly one door: a custom keyboard extension,
+while it is the active keyboard on the focused field. Nothing else can type
+into another app, and the clipboard is constitutionally manual. Inside that
+door, delivery is automatic: when a transcript completes and the SpeakPaste
+keyboard is up, the text lands at the cursor without a tap. Stop from the
+Live Activity and the words simply appear. Aiming is focusing — wherever the
+cursor sits when the keyboard is up is where the dictation was aimed. The
+keyboard's **Stop & Insert** button is the manual form of this automatic
+behavior, not a required step.
+
+Automatic delivery requires residency: SpeakPaste is the daily keyboard. The
+bet behind residency is explicit. SpeakPaste is a transcription application,
+not a keyboard — it does not compete with Apple's keyboard at typing, it
+competes with typing. Residency is won at the transcription layer, accuracy
+and register, never by reimplementing autocorrect or lexicon memory.
+
+- The typing surface only clears the residual bar: what remains once
+  dictation carries the prose. It is designed as a correction surface first
+  and a keyboard second — the three-second fix of a mistranscribed word is
+  the one typing task that cannot be escaped. Typed corrections are signal:
+  they feed keyterm biasing and the register pass, so the loop shrinks
+  itself.
+- Apple's keyboard stays one globe-switch away for heavy typing, permanently.
+  Secure fields are not our problem: iOS refuses custom keyboards there and
+  substitutes the system keyboard on its own.
+- The keyboard sees both input streams, so the bet is measurable: dictated
+  words versus typed characters. If the dictated share is not overwhelming
+  after real use, residency is not paying its rent.
+- Where a field or app refuses custom keyboards entirely, the clipboard
+  fallback is part of the product — same status as the manual swipe in the
+  round trip, a documented fallback, not an error.
+
+## Decisions and platform implications
+
+The double-tap start, stop-at-the-keyboard, and exactly-once insertion at the
+cursor are product decisions. How iOS realizes them — whether background
+capture demands the Live Activity, whether the app must surface for a moment,
+what feedback marks the start — is dictated by the platform. Those
+implications are recorded here from device evidence as they are discovered,
+not designed in advance.
+
+One implication is already on record from earlier device work: iOS forbids
+*activating* a recording session cold from the background — recording in the
+background is allowed, cold activation is not. A double tap starts capture
+invisibly only while SpeakPaste is resident; after a force quit or eviction,
+the first start has to surface the app once to re-establish residency.
+superwhisper behaves the same way — it dictates while backgrounded and only
+opens after a force quit — which is the existence proof for both halves.
+
+## Fallback interaction: keyboard round trip
 
 1. Focus a text field and select the SpeakPaste keyboard.
 2. Tap **Start** in the keyboard.
@@ -133,19 +269,35 @@ The return target validator accepts a cataloged arbiter host identifier, but
 rejects SpeakPaste itself and system brokers such as SpringBoard, Spotlight,
 and SafariViewService.
 
-## Optional global trigger
+## Primary trigger machinery
 
-The iPhone target also exposes a `Toggle Dictation` App Intent backed by
-`AudioRecordingIntent`, `LiveActivityIntent`, and a Live Activity. A Shortcut or
-Back Tap can use it to start capture without foregrounding SpeakPaste and queue
-the result for keyboard insertion. It remains an optional automation surface;
-the default product interaction starts and stops in the keyboard.
+The `Toggle Dictation` App Intent is backed by `AudioRecordingIntent`,
+`LiveActivityIntent`, and a Live Activity. Back Tap — or any Shortcut — uses it
+to start capture without foregrounding SpeakPaste and queue the result for
+keyboard insertion.
 
 ## Verification boundary
 
 Focused builds and tests can verify state transitions, exact-once insertion
 bookkeeping, hook linkage, catalog mappings, and bundle filtering. They cannot
 prove a visible iOS scene transition.
+
+Before the primary interaction is called end-to-end verified, exercise directly
+on the physical iPhone:
+
+- Back Tap start inside a third-party host: double tap, capture begins with no
+  app switch, Stop & Insert from the keyboard, exactly one insertion.
+- Back Tap recognition over a week of real use: missed starts and phantom
+  triggers, with the phone in its case. A trigger that cannot be trusted loses
+  to a slow one that can; persistent flakiness flips the primary back to the
+  keyboard start.
+- Pause from the island, then resume by double tap: whether the microphone
+  re-arms from the background after the paused segment released the session,
+  or whether resume needs a warm session or a momentary app surface. The verb
+  survives either answer; only its cost is at stake.
+- Whatever the platform forces onto the flow — Live Activity requirement,
+  momentary app surfacing, start feedback — recorded under
+  "Decisions and platform implications".
 
 Before the keyboard round trip is called end-to-end verified, exercise directly
 on the physical iPhone:
