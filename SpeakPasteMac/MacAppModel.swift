@@ -2997,7 +2997,12 @@ final class MacAppModel: ObservableObject {
                 language: requestedLanguage,
                 cleanSpeech: cleanSpeech,
                 keyterms: requestKeyterms(for: target),
-                diarize: true
+                diarize: true,
+                // Prefer false splits over merged room voices. The local
+                // filter already keeps every label that resembles the owner,
+                // so splitting a whispered speaker twice is recoverable;
+                // merging a television voice into that speaker is not.
+                diarizationThreshold: 0.1
             )
             let ownVoice = await resolveOwnVoice(in: result, audioURL: audioURL)
             if let candidate = ownVoice.enrollmentCandidate {
