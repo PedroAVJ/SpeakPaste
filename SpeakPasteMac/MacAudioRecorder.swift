@@ -1318,6 +1318,8 @@ private final class MacVoiceProcessingAudioRecorder: @unchecked Sendable {
     private var selectedDeviceID: AudioObjectID?
     private var originalDefaultDeviceID: AudioObjectID?
     private var engineObserver: NSObjectProtocol?
+    private var engineRestartWorkItem: DispatchWorkItem?
+    private var engineRestartFailureCount = 0
     private var sessionGeneration: UInt64 = 0
 
     private var segmentURL: URL?
@@ -1330,6 +1332,7 @@ private final class MacVoiceProcessingAudioRecorder: @unchecked Sendable {
 
     private let recordingStartTimeout: TimeInterval = 8
     private let steadyAudioTimeout: TimeInterval = 15
+    private let engineRestartDelays: [TimeInterval] = [0.25, 0.5, 1]
     private static let requiredSteadyWindows = 6
     private static let recordingFormat = AVAudioFormat(
         commonFormat: .pcmFormatFloat32,
@@ -1437,10 +1440,25 @@ private final class MacVoiceProcessingAudioRecorder: @unchecked Sendable {
     }
 
     private func currentSessionFailure(generation: UInt64) -> Error? {
-        guard sessionGeneration == generation, engine?.isRunning == true else {
+        // Voice Processing I/O intentionally stops AVAudioEngine while macOS
+        // finishes rebuilding its private input/output aggregate. Treating
+        // that brief stopped state as a disconnect races the configuration
+        // notification and tears the Continuity session down before it can be
+        // restarted. The notification handler owns recovery; the ordinary
+        // steady-audio timeout still bounds a route that never comes back.
+        switch MacVoiceProcessingSessionHealth.evaluate(
+            sessionMatches: sessionGeneration == generation,
+            hasEngine: engine != nil,
+            inputRouteMatches: MacCoreAudioInputRoute.defaultDeviceID() == selectedDeviceID,
+            engineIsRunning: engine?.isRunning == true
+        ) {
+        case .active, .recoveringConfiguration:
+            return nil
+        case .connectionFailed:
             return MacAudioRecorderError.connectionFailed
+        case .deviceUnavailable:
+            return MacAudioRecorderError.deviceUnavailable
         }
-        return nil
     }
 
     private func releaseSession(with error: Error, generation: UInt64) async {
@@ -1722,32 +1740,77 @@ private final class MacVoiceProcessingAudioRecorder: @unchecked Sendable {
             }
             return
         }
-        if engine.isRunning { return }
+        if engine.isRunning {
+            cancelEngineRestart()
+            engineRestartFailureCount = 0
+            return
+        }
 
-        // Changing Mic Mode can rebuild the I/O unit. The installed tap is
-        // retained across an engine configuration change, so restart once and
-        // let the app's ordinary sample-stall monitor verify resumed delivery.
+        // Initial Continuity setup and later Mic Mode changes can both rebuild
+        // the I/O unit. AVAudioEngine posts the notification before that
+        // rebuild has fully settled, so an immediate start races Core Audio
+        // and fails. Keep the installed tap, wait briefly, then retry with a
+        // small bounded backoff. The steady-audio timeout remains the outer
+        // bound for a route that never resumes.
+        scheduleEngineRestart(engine: engine, generation: generation)
+    }
+
+    private func scheduleEngineRestart(engine: AVAudioEngine, generation: UInt64) {
+        guard engineRestartWorkItem == nil else { return }
+        let delayIndex = min(engineRestartFailureCount, engineRestartDelays.count - 1)
+        let workItem = DispatchWorkItem { [weak self, weak engine] in
+            guard let self, let engine else { return }
+            self.engineRestartWorkItem = nil
+            self.restartEngineAfterConfigurationChange(engine: engine, generation: generation)
+        }
+        engineRestartWorkItem = workItem
+        captureQueue.asyncAfter(deadline: .now() + engineRestartDelays[delayIndex], execute: workItem)
+    }
+
+    private func restartEngineAfterConfigurationChange(
+        engine: AVAudioEngine,
+        generation: UInt64
+    ) {
+        guard self.engine === engine, sessionGeneration == generation else { return }
+        guard MacCoreAudioInputRoute.defaultDeviceID() == selectedDeviceID else {
+            failForChangedInputRoute()
+            return
+        }
+        guard !engine.isRunning else {
+            engineRestartFailureCount = 0
+            return
+        }
+
         do {
             try engine.start()
+            engineRestartFailureCount = 0
         } catch {
-            let wasRecording = segmentDidStart && startContinuation == nil
-            let salvagedURL = failSession(
-                with: error,
-                preservingPartialRecording: wasRecording
-            )
-            if wasRecording {
-                let surfaced: Error
-                if let salvagedURL {
-                    surfaced = MacAudioRecorderSalvagedFailure(
-                        underlying: error,
-                        audioURL: salvagedURL
-                    )
-                } else {
-                    surfaced = error
-                }
-                pendingRecordingError = surfaced
-                recordingFailureHandler?(error, salvagedURL)
+            engineRestartFailureCount += 1
+            if engineRestartFailureCount < engineRestartDelays.count {
+                scheduleEngineRestart(engine: engine, generation: generation)
             }
+        }
+    }
+
+    private func failForChangedInputRoute() {
+        let error = MacAudioRecorderError.deviceUnavailable
+        let wasRecording = segmentDidStart && startContinuation == nil
+        let salvagedURL = failSession(
+            with: error,
+            preservingPartialRecording: wasRecording
+        )
+        if wasRecording {
+            let surfaced: Error
+            if let salvagedURL {
+                surfaced = MacAudioRecorderSalvagedFailure(
+                    underlying: error,
+                    audioURL: salvagedURL
+                )
+            } else {
+                surfaced = error
+            }
+            pendingRecordingError = surfaced
+            recordingFailureHandler?(error, salvagedURL)
         }
     }
 
@@ -1847,6 +1910,11 @@ private final class MacVoiceProcessingAudioRecorder: @unchecked Sendable {
         }
     }
 
+    private func cancelEngineRestart() {
+        engineRestartWorkItem?.cancel()
+        engineRestartWorkItem = nil
+    }
+
     private func restoreInputRoute() {
         guard let selectedDeviceID else { return }
         MacCoreAudioInputRoute.restore(
@@ -1856,6 +1924,8 @@ private final class MacVoiceProcessingAudioRecorder: @unchecked Sendable {
     }
 
     private func clearEngineState() {
+        cancelEngineRestart()
+        engineRestartFailureCount = 0
         removeEngineObserver()
         engine = nil
         inputNode = nil

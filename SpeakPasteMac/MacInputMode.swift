@@ -25,3 +25,24 @@ enum MacInputMode: String, CaseIterable, Equatable, Sendable {
         }
     }
 }
+
+/// Separates an expected Voice Processing I/O route rebuild from a real lost
+/// session. Kept free of AVFoundation types so the recovery contract can be
+/// tested without opening a microphone.
+enum MacVoiceProcessingSessionHealth: Equatable {
+    case active
+    case recoveringConfiguration
+    case connectionFailed
+    case deviceUnavailable
+
+    static func evaluate(
+        sessionMatches: Bool,
+        hasEngine: Bool,
+        inputRouteMatches: Bool,
+        engineIsRunning: Bool
+    ) -> Self {
+        guard sessionMatches, hasEngine else { return .connectionFailed }
+        guard inputRouteMatches else { return .deviceUnavailable }
+        return engineIsRunning ? .active : .recoveringConfiguration
+    }
+}
