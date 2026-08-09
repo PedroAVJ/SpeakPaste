@@ -1,5 +1,4 @@
 import AppKit
-import AVFoundation
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -191,12 +190,6 @@ private struct MacAudioHUDSettings: View {
 
             Section("Microphone") {
                 Text("Microphone selection, fallback order, input gain, and the 3-second record-and-playback test live in the main window, along with its live level meter and result.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Button("Choose Microphone Mode…") {
-                    AVCaptureDevice.showSystemUserInterface(.microphoneModes)
-                }
-                Text("For whispered iPhone dictation near a television or conversation, start the iPhone microphone and choose Voice Isolation. macOS owns this setting; SpeakPaste can open it but cannot select it for you.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

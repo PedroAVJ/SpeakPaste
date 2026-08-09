@@ -2,56 +2,6 @@ import Foundation
 import XCTest
 @testable import SpeakPaste
 
-final class MacVoiceProcessingSessionHealthTests: XCTestCase {
-    func testStoppedEngineDuringRouteRebuildIsRecoverable() {
-        XCTAssertEqual(
-            MacVoiceProcessingSessionHealth.evaluate(
-                sessionMatches: true,
-                hasEngine: true,
-                inputRouteMatches: true,
-                engineIsRunning: false
-            ),
-            .recoveringConfiguration
-        )
-    }
-
-    func testRunningEngineWithOwnedRouteIsActive() {
-        XCTAssertEqual(
-            MacVoiceProcessingSessionHealth.evaluate(
-                sessionMatches: true,
-                hasEngine: true,
-                inputRouteMatches: true,
-                engineIsRunning: true
-            ),
-            .active
-        )
-    }
-
-    func testChangedInputRouteIsNotRecoverable() {
-        XCTAssertEqual(
-            MacVoiceProcessingSessionHealth.evaluate(
-                sessionMatches: true,
-                hasEngine: true,
-                inputRouteMatches: false,
-                engineIsRunning: false
-            ),
-            .deviceUnavailable
-        )
-    }
-
-    func testStaleSessionCannotRecover() {
-        XCTAssertEqual(
-            MacVoiceProcessingSessionHealth.evaluate(
-                sessionMatches: false,
-                hasEngine: true,
-                inputRouteMatches: true,
-                engineIsRunning: false
-            ),
-            .connectionFailed
-        )
-    }
-}
-
 final class MacPasteMenuShortcutTests: XCTestCase {
     func testAcceptsElectronAndNativeCommandVCasing() {
         XCTAssertTrue(

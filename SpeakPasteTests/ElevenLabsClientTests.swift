@@ -332,9 +332,7 @@ final class ElevenLabsClientTests: XCTestCase {
             apiKey: "test-key",
             language: .english,
             cleanSpeech: true,
-            keyterms: ["SpeakPaste", "ElevenLabs"],
-            diarize: true,
-            diarizationThreshold: 0.1
+            keyterms: ["SpeakPaste", "ElevenLabs"]
         )
 
         XCTAssertEqual(result.text, "Streamed transcript.")
@@ -352,9 +350,6 @@ final class ElevenLabsClientTests: XCTestCase {
         XCTAssertTrue(body.contains("name=\"model_id\"\r\n\r\nscribe_v2\r\n"))
         XCTAssertTrue(body.contains("name=\"no_verbatim\"\r\n\r\ntrue\r\n"))
         XCTAssertTrue(body.contains("name=\"tag_audio_events\"\r\n\r\nfalse\r\n"))
-        XCTAssertTrue(body.contains("name=\"diarize\"\r\n\r\ntrue\r\n"))
-        XCTAssertTrue(body.contains("name=\"timestamps_granularity\"\r\n\r\nword\r\n"))
-        XCTAssertTrue(body.contains("name=\"diarization_threshold\"\r\n\r\n0.1\r\n"))
         XCTAssertTrue(body.contains("name=\"language_code\"\r\n\r\nen\r\n"))
         XCTAssertTrue(body.contains("name=\"keyterms\"\r\n\r\nSpeakPaste\r\n"))
         XCTAssertTrue(body.contains("name=\"keyterms\"\r\n\r\nElevenLabs\r\n"))

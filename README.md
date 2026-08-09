@@ -186,15 +186,6 @@ surcharge whenever keyterms are sent, and using more than 100 makes every
 request bill for at least 20 seconds. **Replacements** are the blunt instrument
 for the cases Scribe gets wrong every time; they always fire locally.
 
-For whispered iPhone dictation around a television or nearby conversation,
-start the iPhone microphone and open **Settings › Audio & Indicator › Choose
-Microphone Mode…**, then select **Voice Isolation** in macOS. Apple keeps that
-selection in the system-owned microphone-modes panel, so SpeakPaste can open
-the panel and report its purpose but cannot select the mode itself. Mac
-dictation also asks Scribe to favor separating possible speakers; this reduces
-merged television dialogue, although no single-microphone system can perfectly
-recover a whisper that is acoustically buried under louder speech.
-
 When language is **Auto**, SpeakPaste also reads Scribe's language-confidence
 metadata. A result below 50% is kept intact but visibly flagged for review, with
 the option to pin a language for later dictations.

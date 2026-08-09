@@ -9,31 +9,11 @@ protocol ElevenLabsClientProtocol: Sendable {
         language: TranscriptionLanguage,
         cleanSpeech: Bool,
         keyterms: [String],
-        diarize: Bool,
-        diarizationThreshold: Double?
+        diarize: Bool
     ) async throws -> TranscriptionResult
 }
 
 extension ElevenLabsClientProtocol {
-    func transcribe(
-        audioURL: URL,
-        apiKey: String,
-        language: TranscriptionLanguage,
-        cleanSpeech: Bool,
-        keyterms: [String],
-        diarize: Bool
-    ) async throws -> TranscriptionResult {
-        try await transcribe(
-            audioURL: audioURL,
-            apiKey: apiKey,
-            language: language,
-            cleanSpeech: cleanSpeech,
-            keyterms: keyterms,
-            diarize: diarize,
-            diarizationThreshold: nil
-        )
-    }
-
     func transcribe(
         audioURL: URL,
         apiKey: String,
@@ -47,8 +27,7 @@ extension ElevenLabsClientProtocol {
             language: language,
             cleanSpeech: cleanSpeech,
             keyterms: keyterms,
-            diarize: false,
-            diarizationThreshold: nil
+            diarize: false
         )
     }
 
@@ -64,8 +43,7 @@ extension ElevenLabsClientProtocol {
             language: language,
             cleanSpeech: cleanSpeech,
             keyterms: [],
-            diarize: false,
-            diarizationThreshold: nil
+            diarize: false
         )
     }
 }
@@ -386,8 +364,7 @@ final class ElevenLabsClient: ElevenLabsClientProtocol, @unchecked Sendable {
         language: TranscriptionLanguage,
         cleanSpeech: Bool,
         keyterms: [String],
-        diarize: Bool,
-        diarizationThreshold: Double?
+        diarize: Bool
     ) async throws -> TranscriptionResult {
         // Admission covers multipart preparation, retries, and response decode.
         // Eight simultaneous twenty-minute WAVs must not each allocate/build a
@@ -400,8 +377,7 @@ final class ElevenLabsClient: ElevenLabsClientProtocol, @unchecked Sendable {
                 language: language,
                 cleanSpeech: cleanSpeech,
                 keyterms: keyterms,
-                diarize: diarize,
-                diarizationThreshold: diarizationThreshold
+                diarize: diarize
             )
             await limiter.release()
             return result
@@ -417,8 +393,7 @@ final class ElevenLabsClient: ElevenLabsClientProtocol, @unchecked Sendable {
         language: TranscriptionLanguage,
         cleanSpeech: Bool,
         keyterms: [String],
-        diarize: Bool,
-        diarizationThreshold: Double?
+        diarize: Bool
     ) async throws -> TranscriptionResult {
         try Task.checkCancellation()
         let boundary = "SpeakPaste-\(UUID().uuidString)"
@@ -441,8 +416,7 @@ final class ElevenLabsClient: ElevenLabsClientProtocol, @unchecked Sendable {
             languageCode: language.apiCode,
             cleanSpeech: cleanSpeech,
             keyterms: Self.validKeyterms(keyterms),
-            diarize: diarize,
-            diarizationThreshold: diarizationThreshold
+            diarize: diarize
         )
         try Task.checkCancellation()
 
@@ -610,8 +584,7 @@ final class ElevenLabsClient: ElevenLabsClientProtocol, @unchecked Sendable {
         languageCode: String?,
         cleanSpeech: Bool,
         keyterms: [String],
-        diarize: Bool,
-        diarizationThreshold: Double?
+        diarize: Bool
     ) throws {
         _ = FileManager.default.createFile(
             atPath: destinationURL.path,
@@ -643,16 +616,6 @@ final class ElevenLabsClient: ElevenLabsClientProtocol, @unchecked Sendable {
         if diarize {
             try appendField(name: "diarize", value: "true")
             try appendField(name: "timestamps_granularity", value: "word")
-            if
-                let diarizationThreshold,
-                diarizationThreshold.isFinite,
-                (0.1...0.4).contains(diarizationThreshold)
-            {
-                try appendField(
-                    name: "diarization_threshold",
-                    value: String(diarizationThreshold)
-                )
-            }
         }
         if let languageCode {
             try appendField(name: "language_code", value: languageCode)
