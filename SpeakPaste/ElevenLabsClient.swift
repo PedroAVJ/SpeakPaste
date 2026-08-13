@@ -248,7 +248,7 @@ private actor ElevenLabsRequestLimiter {
 /// cross-origin redirect, so SpeakPaste rejects every redirect before a second
 /// request can be created. ElevenLabs' documented endpoint is final; a 3xx is
 /// safer as a visible retryable failure than as credential/audio forwarding.
-final class ElevenLabsNoRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+class ElevenLabsNoRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     func urlSession(
         _ session: URLSession,
         task: URLSessionTask,
@@ -260,17 +260,73 @@ final class ElevenLabsNoRedirectDelegate: NSObject, URLSessionTaskDelegate, @unc
     }
 }
 
+/// Per-attempt upload progress used to distinguish a dead connection from
+/// legitimate server-side transcription time. Scribe does not stream a
+/// response while it works, so the short deadline applies only until every
+/// multipart byte has left the Mac.
+final class ElevenLabsUploadProgressDelegate: ElevenLabsNoRedirectDelegate, @unchecked Sendable {
+    struct Snapshot: Sendable {
+        let uploadIsComplete: Bool
+        let attemptIsFinished: Bool
+        let lastProgressUptime: TimeInterval
+    }
+
+    private let expectedUploadBytes: Int64
+    private let lock = NSLock()
+    private var totalBytesSent: Int64 = 0
+    private var attemptIsFinished = false
+    private var lastProgressUptime = ProcessInfo.processInfo.systemUptime
+
+    init(expectedUploadBytes: Int64) {
+        self.expectedUploadBytes = max(1, expectedUploadBytes)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didSendBodyData bytesSent: Int64,
+        totalBytesSent: Int64,
+        totalBytesExpectedToSend: Int64
+    ) {
+        lock.withLock {
+            guard !attemptIsFinished else { return }
+            self.totalBytesSent = max(self.totalBytesSent, totalBytesSent)
+            lastProgressUptime = ProcessInfo.processInfo.systemUptime
+        }
+    }
+
+    func snapshot() -> Snapshot {
+        lock.withLock {
+            Snapshot(
+                uploadIsComplete: totalBytesSent >= expectedUploadBytes,
+                attemptIsFinished: attemptIsFinished,
+                lastProgressUptime: lastProgressUptime
+            )
+        }
+    }
+
+    func markFinished() {
+        lock.withLock {
+            attemptIsFinished = true
+        }
+    }
+}
+
+private enum ElevenLabsAttemptResult: @unchecked Sendable {
+    case response(Data, URLResponse)
+}
+
 final class ElevenLabsClient: ElevenLabsClientProtocol, @unchecked Sendable {
     typealias Sleeper = @Sendable (TimeInterval) async throws -> Void
 
-    private let session: URLSession
+    private let sessionConfiguration: URLSessionConfiguration
     private let endpoint: URL
     private let retryPolicy: ElevenLabsRetryPolicy
     private let requestTimeout: TimeInterval
+    private let uploadStallTimeout: TimeInterval
     private let limiter: ElevenLabsRequestLimiter
     private let sleeper: Sleeper
     private let now: @Sendable () -> Date
-    private let redirectDelegate = ElevenLabsNoRedirectDelegate()
 
     /// A process can be terminated after URLSession cancellation but before
     /// this client's normal `defer` runs. At primary-app launch, remove only
@@ -338,6 +394,7 @@ final class ElevenLabsClient: ElevenLabsClientProtocol, @unchecked Sendable {
         endpoint: URL = URL(string: "https://api.elevenlabs.io/v1/speech-to-text")!,
         retryPolicy: ElevenLabsRetryPolicy = .standard,
         requestTimeout: TimeInterval = 300,
+        uploadStallTimeout: TimeInterval = 8,
         maximumConcurrentRequests: Int = 3,
         sleeper: @escaping Sleeper = { delay in
             try Task.checkCancellation()
@@ -349,10 +406,11 @@ final class ElevenLabsClient: ElevenLabsClientProtocol, @unchecked Sendable {
         },
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
-        self.session = session
+        sessionConfiguration = session.configuration
         self.endpoint = endpoint
         self.retryPolicy = retryPolicy
         self.requestTimeout = requestTimeout.isFinite ? max(1, requestTimeout) : 300
+        self.uploadStallTimeout = uploadStallTimeout.isFinite ? max(0.1, uploadStallTimeout) : 8
         limiter = ElevenLabsRequestLimiter(limit: maximumConcurrentRequests)
         self.sleeper = sleeper
         self.now = now
@@ -431,12 +489,15 @@ final class ElevenLabsClient: ElevenLabsClientProtocol, @unchecked Sendable {
         request.timeoutInterval = requestTimeout
         request.setValue(apiKey, forHTTPHeaderField: "xi-api-key")
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-        if
+        guard
             let values = try? bodyURL.resourceValues(forKeys: [.fileSizeKey]),
-            let size = values.fileSize
-        {
-            request.setValue(String(size), forHTTPHeaderField: "Content-Length")
+            let size = values.fileSize,
+            size > 0
+        else {
+            throw ElevenLabsClientError.invalidResponse
         }
+        let uploadByteCount = Int64(size)
+        request.setValue(String(size), forHTTPHeaderField: "Content-Length")
 
         var attempt = 0
         while attempt < retryPolicy.maximumAttempts {
@@ -446,12 +507,11 @@ final class ElevenLabsClient: ElevenLabsClientProtocol, @unchecked Sendable {
             let data: Data
             let response: URLResponse
             do {
-                var attemptRequest = request
-                guard let bodyStream = InputStream(url: bodyURL) else {
-                    throw ElevenLabsClientError.invalidResponse
-                }
-                attemptRequest.httpBodyStream = bodyStream
-                (data, response) = try await perform(attemptRequest)
+                (data, response) = try await perform(
+                    request,
+                    bodyURL: bodyURL,
+                    uploadByteCount: uploadByteCount
+                )
             } catch {
                 if error is CancellationError || Task.isCancelled {
                     throw CancellationError()
@@ -519,9 +579,74 @@ final class ElevenLabsClient: ElevenLabsClientProtocol, @unchecked Sendable {
         throw ElevenLabsClientError.invalidResponse
     }
 
-    private func perform(_ request: URLRequest) async throws -> (Data, URLResponse) {
+    private func perform(
+        _ request: URLRequest,
+        bodyURL: URL,
+        uploadByteCount: Int64
+    ) async throws -> (Data, URLResponse) {
         try Task.checkCancellation()
-        return try await session.data(for: request, delegate: redirectDelegate)
+        // A session is deliberately single-attempt. A retry must never inherit
+        // the stale HTTP/3 connection that prompted this safeguard.
+        let attemptSession = URLSession(configuration: sessionConfiguration)
+        let progress = ElevenLabsUploadProgressDelegate(
+            expectedUploadBytes: uploadByteCount
+        )
+        defer {
+            progress.markFinished()
+            attemptSession.invalidateAndCancel()
+        }
+
+        return try await withThrowingTaskGroup(of: ElevenLabsAttemptResult.self) { group in
+            group.addTask {
+                let (data, response) = try await attemptSession.upload(
+                    for: request,
+                    fromFile: bodyURL,
+                    delegate: progress
+                )
+                progress.markFinished()
+                return .response(data, response)
+            }
+            group.addTask {
+                try await self.watchForStalledUpload(progress)
+            }
+            defer { group.cancelAll() }
+
+            guard let first = try await group.next() else {
+                throw CancellationError()
+            }
+            switch first {
+            case let .response(data, response):
+                return (data, response)
+            }
+        }
+    }
+
+    func watchForStalledUpload(
+        _ progress: ElevenLabsUploadProgressDelegate
+    ) async throws -> Never {
+        while true {
+            try Task.checkCancellation()
+            let snapshot = progress.snapshot()
+            if snapshot.attemptIsFinished || snapshot.uploadIsComplete {
+                // Once the upload is complete, the request's longer timeout
+                // governs Scribe's legitimate server-side processing time.
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+                continue
+            }
+
+            let elapsed = max(
+                0,
+                ProcessInfo.processInfo.systemUptime - snapshot.lastProgressUptime
+            )
+            if elapsed >= uploadStallTimeout {
+                throw URLError(.timedOut)
+            }
+            let remaining = max(0.01, uploadStallTimeout - elapsed)
+            let pollInterval = min(0.25, remaining)
+            try await Task.sleep(
+                nanoseconds: UInt64(pollInterval * 1_000_000_000)
+            )
+        }
     }
 
     private func waitBeforeRetry(attempt: Int, retryAfter: TimeInterval?) async throws {
