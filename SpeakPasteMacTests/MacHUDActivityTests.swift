@@ -113,6 +113,76 @@ final class MacHUDVisualStateTests: XCTestCase {
     }
 }
 
+final class MacLoudnessPromptFilterTests: XCTestCase {
+    func testOrdinarySpeechAndBriefPeakDoNotPrompt() {
+        var filter = MacLoudnessPromptFilter()
+
+        for _ in 0..<80 {
+            XCTAssertFalse(filter.observe(normalizedLevel: 0.25, interval: 0.08))
+        }
+        for _ in 0..<2 {
+            XCTAssertFalse(filter.observe(normalizedLevel: 0.95, interval: 0.08))
+        }
+        for _ in 0..<20 {
+            XCTAssertFalse(filter.observe(normalizedLevel: 0.10, interval: 0.08))
+        }
+    }
+
+    func testSustainedHighLevelPromptsThenHoldsAcrossSpeechGap() {
+        var filter = MacLoudnessPromptFilter()
+
+        for _ in 0..<20 {
+            _ = filter.observe(normalizedLevel: 0.75, interval: 0.08)
+        }
+        XCTAssertTrue(filter.isPrompting)
+
+        // A pause between phrases must not make the wordless cue flicker.
+        for _ in 0..<8 {
+            _ = filter.observe(normalizedLevel: 0, interval: 0.08)
+        }
+        XCTAssertTrue(filter.isPrompting)
+
+        for _ in 0..<24 {
+            _ = filter.observe(normalizedLevel: 0, interval: 0.08)
+        }
+        XCTAssertFalse(filter.isPrompting)
+    }
+
+    func testResetAndInvalidSamplesReturnToSafeFloor() {
+        var filter = MacLoudnessPromptFilter()
+        for _ in 0..<20 {
+            _ = filter.observe(normalizedLevel: 0.75, interval: 0.08)
+        }
+        XCTAssertTrue(filter.isPrompting)
+
+        filter.reset()
+        XCTAssertFalse(filter.isPrompting)
+        XCTAssertEqual(filter.filteredLevel, 0)
+        XCTAssertFalse(filter.observe(normalizedLevel: .nan, interval: 0.08))
+        XCTAssertFalse(filter.observe(normalizedLevel: .infinity, interval: 0.08))
+        XCTAssertFalse(filter.observe(normalizedLevel: 1, interval: .nan))
+    }
+}
+
+final class MacOtherAudioDuckingPolicyTests: XCTestCase {
+    func testDuckingExistsOnlyForLiveRecording() {
+        let phases: [MacCapturePhase] = [
+            .ready,
+            .connecting,
+            .recording,
+            .finalizing,
+            .paused,
+            .succeeded("done"),
+            .failed("failed"),
+        ]
+
+        XCTAssertEqual(
+            phases.filter(MacOtherAudioDuckingPolicy.isEnabled(during:)),
+            [.recording]
+        )
+    }
+}
+
 final class MacOrderedDictationBatchTests: XCTestCase {
     func testClosedDictationWaitsForEveryPausedSegment() {
         let batch = MacOrderedDictationBatch(sequences: [4, 5, 6])

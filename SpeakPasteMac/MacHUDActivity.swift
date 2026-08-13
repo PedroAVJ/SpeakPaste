@@ -25,6 +25,88 @@ enum MacHUDCaptureActivity: Equatable, Sendable {
     case releasing
 }
 
+/// Turns the recorder's normalized average-power samples into one calm
+/// "ease down" decision for the HUD. A high threshold and dwell time avoid
+/// calling ordinary speech loud; separate release criteria and a slow envelope
+/// keep the cue from blinking between syllables.
+struct MacLoudnessPromptFilter: Equatable, Sendable {
+    /// Normalized amplitude, equivalent to roughly -7.5 dBFS. This is
+    /// deliberately near the top of the recorder's range: the cue is for
+    /// sustained close/loud speech, not a judgment on normal conversation.
+    static let engageLevel = 0.42
+    /// Roughly -14 dBFS. The wide gap is intentional hysteresis.
+    static let releaseLevel = 0.20
+    static let engageDuration: TimeInterval = 0.48
+    static let releaseDuration: TimeInterval = 0.88
+
+    private(set) var filteredLevel = 0.0
+    private(set) var isPrompting = false
+    private var highDuration = 0.0
+    private var lowDuration = 0.0
+
+    @discardableResult
+    mutating func observe(
+        normalizedLevel: Double,
+        interval: TimeInterval
+    ) -> Bool {
+        let sample = normalizedLevel.isFinite
+            ? min(max(normalizedLevel, 0), 1)
+            : 0
+        let dt = interval.isFinite ? min(max(interval, 0), 0.25) : 0
+        guard dt > 0 else { return isPrompting }
+
+        // Fast enough to notice genuinely loud speech, slow enough on the way
+        // down that gaps between words do not flash the cue off and on.
+        let timeConstant = sample > filteredLevel ? 0.10 : 0.45
+        let alpha = 1 - exp(-dt / timeConstant)
+        filteredLevel += (sample - filteredLevel) * alpha
+
+        if isPrompting {
+            if filteredLevel <= Self.releaseLevel {
+                lowDuration += dt
+            } else {
+                lowDuration = 0
+            }
+            if lowDuration >= Self.releaseDuration {
+                isPrompting = false
+                highDuration = 0
+                lowDuration = 0
+            }
+        } else {
+            // The envelope may stay elevated after a dropped object or one
+            // emphatic consonant. Require the live samples themselves to stay
+            // high for the full dwell as well.
+            if sample >= Self.engageLevel,
+               filteredLevel >= Self.engageLevel {
+                highDuration += dt
+            } else {
+                highDuration = 0
+            }
+            if highDuration >= Self.engageDuration {
+                isPrompting = true
+                highDuration = 0
+                lowDuration = 0
+            }
+        }
+        return isPrompting
+    }
+
+    mutating func reset() {
+        self = Self()
+    }
+}
+
+/// "While transcribing" means the interval in which the user is actively
+/// speaking into a live microphone. Network transcription starts only after
+/// that microphone is released, when competing media no longer makes the user
+/// strain. Keeping this policy pure makes every lifecycle edge testable while
+/// the recorder owns the platform-specific Voice Processing implementation.
+enum MacOtherAudioDuckingPolicy {
+    static func isEnabled(during phase: MacCapturePhase) -> Bool {
+        phase == .recording
+    }
+}
+
 /// The delivery gate for one user-owned dictation. Segment transcription may
 /// complete in any order, but none of it is eligible for output until every
 /// sequence in the closed dictation has produced a result.

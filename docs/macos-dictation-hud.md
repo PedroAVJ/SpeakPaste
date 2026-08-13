@@ -162,6 +162,29 @@ hot mic** (live waveform), **gray = cold** (resting). Red never appears
 unless the microphone is capturing. Glyphs never recolor: identity and
 status are separate channels.
 
+## Quieter-voice cue
+
+The hot waveform can add one small **double-down chevron** at its trailing
+edge. It has no words, alert color, sound, separate card, or size change: it
+means only “ease down.” The waveform remains centered and truthful. Paused,
+connecting, draining, and held states never carry it.
+
+The cue is intentionally conservative. Recorder power is normalized to 0...1,
+then filtered with a 100 ms attack and 450 ms decay. It engages only after the
+live samples and filtered signal both remain at or above **0.42** (about
+-7.5 dBFS) for **480 ms**. It clears only after the filtered signal stays at or
+below **0.20** (about -14 dBFS) for **880 ms**. This hysteresis keeps a pause
+between words from flickering and a brief dropped-object/consonant peak from
+being mislabeled as loud speech. Starting, pausing, ending, dismissing, errors,
+and Quit reset the filter immediately.
+
+Those values are a deliberately high first calibration, not a claim about
+vocal-health decibels. Physical acceptance must verify normal speech does not
+trigger it, sustained close/loud speech does, and a comfortable whisper clears
+it, through both the built-in and Continuity microphones. If Voice Processing
+gain changes the normalized range, calibrate these implementation values from
+real capture samples rather than lowering them speculatively.
+
 ## Sound
 
 Earcons fire on real edges of the machine, never on cosmetic animation.

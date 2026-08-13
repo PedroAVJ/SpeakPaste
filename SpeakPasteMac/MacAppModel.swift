@@ -293,6 +293,16 @@ final class MacAppModel: ObservableObject {
     @Published private(set) var hasCompletedOnboarding = false
     @Published private(set) var elapsed: TimeInterval = 0
     @Published private(set) var inputLevel: Double = 0
+    /// A deliberately conservative, wordless nudge in the live HUD. The raw
+    /// level never drives presentation directly; `loudnessPromptFilter`
+    /// supplies dwell, hysteresis, and decay so ordinary speech does not flash
+    /// a warning between syllables.
+    @Published private(set) var speakingTooLoud = false {
+        didSet {
+            guard speakingTooLoud, !oldValue else { return }
+            postAccessibilityAnnouncement("Voice level is high. Speak more softly.")
+        }
+    }
     @Published private(set) var recordingWarning: String?
     @Published private(set) var microphoneTestState: MacMicrophoneTestState = .idle
     @Published private(set) var capturedContextTermCount = 0
@@ -395,6 +405,8 @@ final class MacAppModel: ObservableObject {
     private let pendingAudioStore = MacPendingAudioStore()
     private let historyAudioStore = MacHistoryAudioStore()
     private var meterTimer: Timer?
+    private var loudnessPromptFilter = MacLoudnessPromptFilter()
+    private var lastLoudnessSampleAt: Date?
     /// Long hands-free dictations must count as active work even when the user
     /// does not touch the keyboard or trackpad. The assertion covers only the
     /// live microphone window and is balanced across every exit path.
@@ -908,6 +920,7 @@ final class MacAppModel: ObservableObject {
             microphoneTestSound?.stop()
             microphoneTestState = .idle
             inputLevel = 0
+            resetLoudnessPrompt()
         }
         selectDevice(device, semanticMode: semanticMode(for: device))
     }
@@ -2244,6 +2257,7 @@ final class MacAppModel: ObservableObject {
         captureStartTask = nil
         microphoneTestTask?.cancel()
         microphoneTestTask = nil
+        stopMeter()
         recorder.disconnectSynchronously()
         endRecordingActivity()
         networkMonitor.cancel()
@@ -2637,6 +2651,7 @@ final class MacAppModel: ObservableObject {
             recordingStartedAt = Date()
             elapsed = 0
             inputLevel = 0
+            resetLoudnessPrompt()
             recordingWarning = nil
             automaticStopInProgress = false
             lastDeliveredSampleCount = recorder.deliveredSampleCount
@@ -5200,6 +5215,17 @@ final class MacAppModel: ObservableObject {
                 let now = Date()
                 self.elapsed = now.timeIntervalSince(self.recordingStartedAt ?? now)
                 self.inputLevel = self.recorder.normalizedLevel
+                let loudnessInterval = self.lastLoudnessSampleAt.map {
+                    now.timeIntervalSince($0)
+                } ?? 0.08
+                self.lastLoudnessSampleAt = now
+                let shouldPromptQuieterVoice = self.loudnessPromptFilter.observe(
+                    normalizedLevel: self.inputLevel,
+                    interval: loudnessInterval
+                )
+                if self.speakingTooLoud != shouldPromptQuieterVoice {
+                    self.speakingTooLoud = shouldPromptQuieterVoice
+                }
                 let deliveredSamples = self.recorder.deliveredSampleCount
                 if deliveredSamples != self.lastDeliveredSampleCount {
                     self.lastDeliveredSampleCount = deliveredSamples
@@ -5248,6 +5274,13 @@ final class MacAppModel: ObservableObject {
         meterTimer?.invalidate()
         meterTimer = nil
         inputLevel = 0
+        resetLoudnessPrompt()
+    }
+
+    private func resetLoudnessPrompt() {
+        loudnessPromptFilter.reset()
+        lastLoudnessSampleAt = nil
+        if speakingTooLoud { speakingTooLoud = false }
     }
 
     private func beginRecordingActivity() {

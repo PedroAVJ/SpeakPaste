@@ -80,6 +80,30 @@ is a recovery entry, not a loss — slower to get back than text at the
 cursor, and that is the whole cost. The fn path takes no artificial
 delay — delivery is only ever as slow as transcription itself.
 
+## Competing-media integration contract
+
+“While transcribing” means **Recording(source)** — the interval in which the
+user can still be speaking and competing sound can make them raise their voice.
+It does not mean Scribe's later network request: by then the microphone is free
+and reducing media no longer protects the spoken capture.
+
+A conforming recorder integration enables the public macOS 14+
+`voiceProcessingOtherAudioDuckingConfiguration` with advanced (speech-aware)
+ducking at the medium level only in Recording. Every transition out of
+Recording must disable it before or as capture releases: pause, End, Esc,
+stream/device failure, sleep, and normal Quit. Connecting does not duck because
+the go-signal has not arrived; Paused and Draining never duck. Reopen/resume may
+enable it again only after the new segment is actually recording.
+
+The same contract applies to the built-in Mac and Continuity/iPhone sources. An
+integration must surface setup failure rather than silently recording one
+source without ducking. It must avoid transport control, per-app automation,
+and permanent volume changes; macOS owns attenuation and restoration as part of
+the Voice Processing session. Physical acceptance still needs media playing
+through the real output route while exercising both sources through start,
+pause/resume, End, Esc, disconnect, sleep/wake, and Quit, including a check that
+a user-initiated media/volume change is never overwritten.
+
 ## Menu bar keyboard sheet
 
 Clicking the menu bar icon opens a small anchored panel that is a live

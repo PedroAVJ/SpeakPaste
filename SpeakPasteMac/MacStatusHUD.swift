@@ -349,6 +349,7 @@ private struct MacStatusHUDView: View {
                 MacHUDCapsuleView(
                     card: card,
                     inputLevel: model.inputLevel,
+                    promptsQuieterVoice: model.speakingTooLoud,
                     heldClipboardBacked: model.hasVisibleClipboardFallback
                         || model.heldClipboardOwnerID != nil,
                     reduceMotion: reduceMotion
@@ -367,13 +368,17 @@ private struct MacStatusHUDView: View {
             height: MacHUDMetrics.panelSize.height
         )
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(
-            presentation.stack.accessibilityLabel(
-                sourceName: model.activeSource?.title,
-                heldClipboardBacked: model.hasVisibleClipboardFallback
-                    || model.heldClipboardOwnerID != nil
-            )
+        .accessibilityLabel(accessibilityLabel)
+    }
+
+    private var accessibilityLabel: String {
+        let base = presentation.stack.accessibilityLabel(
+            sourceName: model.activeSource?.title,
+            heldClipboardBacked: model.hasVisibleClipboardFallback
+                || model.heldClipboardOwnerID != nil
         )
+        guard model.speakingTooLoud else { return base }
+        return "\(base). Voice level is high; speak more softly"
     }
 
     private var exitScale: CGSize {
@@ -407,6 +412,7 @@ private struct MacStatusHUDView: View {
 private struct MacHUDCapsuleView: View {
     let card: MacHUDStack.Card
     let inputLevel: Double
+    let promptsQuieterVoice: Bool
     let heldClipboardBacked: Bool
     let reduceMotion: Bool
 
@@ -418,11 +424,13 @@ private struct MacHUDCapsuleView: View {
     init(
         card: MacHUDStack.Card,
         inputLevel: Double,
+        promptsQuieterVoice: Bool,
         heldClipboardBacked: Bool,
         reduceMotion: Bool
     ) {
         self.card = card
         self.inputLevel = inputLevel
+        self.promptsQuieterVoice = promptsQuieterVoice
         self.heldClipboardBacked = heldClipboardBacked
         self.reduceMotion = reduceMotion
         _visual = State(
@@ -453,6 +461,7 @@ private struct MacHUDCapsuleView: View {
 
             MacHUDWaveform(
                 level: inputLevel,
+                promptsQuieterVoice: promptsQuieterVoice,
                 frozenAt: frozenAt,
                 frozen: waveform.frozen,
                 isActive: waveform.visible,
@@ -683,6 +692,7 @@ private struct MacHUDSourceNudge: View {
 
 private struct MacHUDWaveform: View {
     let level: Double
+    let promptsQuieterVoice: Bool
     let frozenAt: Date
     let frozen: Bool
     let isActive: Bool
@@ -730,6 +740,21 @@ private struct MacHUDWaveform: View {
             }
         }
         .opacity(frozen ? 0.72 : 1)
+        .overlay(alignment: .trailing) {
+            // Keep the waveform at the exact same center. The quiet double
+            // chevron appears beside it rather than resizing or replacing it,
+            // yielding one wordless "ease down" cue without a new HUD card.
+            Image(systemName: "chevron.down.2")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(Color(nsColor: .secondaryLabelColor))
+                .offset(x: 24)
+                .opacity(promptsQuieterVoice && !frozen ? 0.9 : 0)
+                .scaleEffect(promptsQuieterVoice && !frozen ? 1 : 0.72)
+        }
+        .animation(
+            .easeInOut(duration: reduceMotion ? 0 : 0.24),
+            value: promptsQuieterVoice
+        )
     }
 
     private func height(
