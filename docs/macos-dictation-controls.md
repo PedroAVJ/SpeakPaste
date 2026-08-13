@@ -98,22 +98,24 @@ user can still be speaking and competing sound can make them raise their voice.
 It does not mean Scribe's later network request: by then the microphone is free
 and reducing media no longer protects the spoken capture.
 
-A conforming recorder integration enables the public macOS 14+
-`voiceProcessingOtherAudioDuckingConfiguration` with advanced (speech-aware)
-ducking at the medium level only in Recording. Every transition out of
-Recording must disable it before or as capture releases: pause, End, Esc,
-stream/device failure, sleep, and normal Quit. Connecting does not duck because
-the go-signal has not arrived; Paused and Draining never duck. Reopen/resume may
-enable it again only after the new segment is actually recording.
+macOS has no AVAudioSession-style `duckOthers` contract. Physical Spotify
+testing showed that starting a second Voice Processing I/O session merely to
+request ducking interrupted and restarted playback. The desktop contract is
+therefore a microphone-independent output fade: once Recording is truthful,
+ease the current output about 16 dB down over 400 ms; keep playback at that
+level even through pauses in speech; on every transition out of Recording,
+ease it back over 900 ms. Connecting, Paused, Draining, and network transcription
+never attenuate.
 
-The same contract applies to the built-in Mac and Continuity/iPhone sources. An
-integration must surface setup failure rather than silently recording one
-source without ducking. It must avoid transport control, per-app automation,
-and permanent volume changes; macOS owns attenuation and restoration as part of
-the Voice Processing session. Physical acceptance still needs media playing
-through the real output route while exercising both sources through start,
-pause/resume, End, Esc, disconnect, sleep/wake, and Quit, including a check that
-a user-initiated media/volume change is never overwritten.
+The same contract applies to the built-in Mac and Continuity/iPhone sources. It
+sends no transport or per-app commands and changes no default device. One
+crash-recovery lease records the exact original and last-written output levels.
+If the output route changes or the observed volume differs from SpeakPaste's
+last write, the lease is abandoned without another write; the user's choice
+wins. An output without writable volume controls fails open at full volume.
+Physical acceptance still needs media playing through the real output while
+exercising both sources through rapid start/reverse, pause/resume, End, Esc,
+disconnect, sleep/wake, crash recovery, and Quit.
 
 ## Menu bar keyboard sheet
 

@@ -109,6 +109,49 @@ enum MacOtherAudioDuckingLifecyclePolicy {
     }
 }
 
+/// A desktop approximation of iOS audio-session ducking. macOS does not
+/// expose AVAudioSession's `duckOthers`, so SpeakPaste owns a short, reversible
+/// fade of the current output volume instead of starting a second Voice
+/// Processing route. The cosine easing has zero slope at both ends, which
+/// avoids the audible step produced by a linear on/off volume change.
+enum MacCompetingMediaFadePolicy {
+    static let attenuationDecibels = 16.0
+    static let quietRatio = pow(10.0, -attenuationDecibels / 20.0)
+    static let fadeDownDuration: TimeInterval = 0.40
+    static let fadeUpDuration: TimeInterval = 0.90
+    static let updatesPerSecond = 30.0
+    static let ownershipTolerance = 0.04
+
+    static func easedProgress(_ progress: Double) -> Double {
+        let clamped = min(max(progress.isFinite ? progress : 0, 0), 1)
+        return 0.5 - (0.5 * cos(.pi * clamped))
+    }
+
+    static func volume(
+        from start: Float,
+        to end: Float,
+        progress: Double
+    ) -> Float {
+        let safeStart = min(max(start.isFinite ? Double(start) : 0, 0), 1)
+        let safeEnd = min(max(end.isFinite ? Double(end) : 0, 0), 1)
+        let eased = easedProgress(progress)
+        return Float(safeStart + ((safeEnd - safeStart) * eased))
+    }
+
+    static func quietVolume(for original: Float) -> Float {
+        min(max(original, 0), 1) * Float(quietRatio)
+    }
+
+    /// A volume-key press or another app changing the output while SpeakPaste
+    /// is faded is user-owned. Once the observed value leaves this tolerance,
+    /// SpeakPaste abandons the lease and will not overwrite that new choice.
+    static func stillOwns(current: Float, lastWritten: Float) -> Bool {
+        current.isFinite
+            && lastWritten.isFinite
+            && abs(Double(current - lastWritten)) <= ownershipTolerance
+    }
+}
+
 /// The system-owned microphone processing choice, translated into a stable
 /// value that can be rendered and exported without carrying AVFoundation types
 /// through the rest of the app.

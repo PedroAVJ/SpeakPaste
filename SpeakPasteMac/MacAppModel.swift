@@ -396,6 +396,7 @@ final class MacAppModel: ObservableObject {
     private let reliabilityStore: MacReliabilityStore
     private let globalHotKey: MacGlobalHotKey
     private let sessionHealthMarker: MacSessionHealthMarker
+    private let competingMediaFader = MacCompetingMediaFader()
     private let networkMonitor = NWPathMonitor()
     private let networkMonitorQueue = DispatchQueue(
         label: "com.speakpaste.network-monitor",
@@ -458,9 +459,6 @@ final class MacAppModel: ObservableObject {
     /// must never turn the app back to Recording (or overwrite a newer start).
     private var captureRequestID: UUID?
     private var captureStartTask: Task<Void, Never>?
-    /// Guards the async VPIO ducking handoff. A late successful enable from an
-    /// older recording is immediately undone instead of surviving pause/Escape.
-    private var otherAudioDuckingActivationID: UUID?
     /// Where the in-flight finalization should land. It is read only after
     /// AVFoundation has released the input, so the resting or closed state and
     /// the actual hardware can never disagree.
@@ -2126,6 +2124,11 @@ final class MacAppModel: ObservableObject {
         guard !hasStartedSessionTracking else { return }
         hasStartedSessionTracking = true
 
+        // A previous crash may have happened between fade-down and release.
+        // Recover only after the single-instance guard identifies this process
+        // as the surviving primary; a secondary launch must never touch audio.
+        competingMediaFader.recoverStaleFade()
+
         do {
             let previous = try sessionHealthMarker.beginSession()
             if previous.endedWithoutCleanTermination == true {
@@ -2333,7 +2336,7 @@ final class MacAppModel: ObservableObject {
         microphoneTestTask?.cancel()
         microphoneTestTask = nil
         stopMeter()
-        otherAudioDuckingActivationID = nil
+        competingMediaFader.restoreImmediately()
         recorder.disconnectSynchronously()
         stopMicrophoneModeMonitoring()
         endRecordingActivity()
@@ -2418,7 +2421,7 @@ final class MacAppModel: ObservableObject {
         captureStartTask?.cancel()
         captureStartTask = nil
 
-        await disableOtherAudioDucking()
+        restoreCompetingMedia()
 
         let deviceName = selectedDevice?.name ?? "Unknown microphone"
         let recordingDuration = max(0, Date().timeIntervalSince(recordingStartedAt ?? Date()))
@@ -2755,7 +2758,7 @@ final class MacAppModel: ObservableObject {
             beginRecordingActivity()
             sounds.playRecordingStarted()
             startMeter()
-            await enableOtherAudioDuckingForCurrentRecording()
+            attenuateCompetingMedia()
         } catch {
             guard captureRequestID == requestID else {
                 if ownsRecorder { await recorder.disconnectAndWait() }
@@ -2780,7 +2783,7 @@ final class MacAppModel: ObservableObject {
 
         // Restore other apps before recorder finalization and before any
         // transcription work. This await also serializes behind a racing enable.
-        await disableOtherAudioDucking()
+        restoreCompetingMedia()
 
         let segment: MacRecordedSegment
         do {
@@ -5296,10 +5299,9 @@ final class MacAppModel: ObservableObject {
         phase = .finalizing
         Task { [weak self] in
             guard let self else { return }
-            await self.disableOtherAudioDucking()
-            // AVCapture may already have released its recorder while the
-            // built-in path's ducking companion is still live. Await the whole
-            // facade so no private aggregate route reaches transcription.
+            self.restoreCompetingMedia()
+            // AVCapture may already have released its recorder. Await the
+            // whole facade so no capture route reaches transcription.
             await self.recorder.disconnectAndWait()
             guard let salvagedAudioURL else {
                 self.recordFailure(
@@ -5424,43 +5426,16 @@ final class MacAppModel: ObservableObject {
         refreshMicrophoneModeStatus()
     }
 
-    /// Enables Apple's speech-aware ducking only after `startSegment` has
-    /// delivered its first frames and the phase is truthfully Recording.
-    /// Failure is nonfatal: capture continues and the user gets an actionable
-    /// warning instead of a silent claim that other audio was lowered.
-    private func enableOtherAudioDuckingForCurrentRecording() async {
+    /// macOS has no AVAudioSession-style `duckOthers` contract. Starting an
+    /// extra VPIO merely to ask for ducking interrupted Spotify in physical
+    /// testing, so media attenuation is intentionally independent of capture.
+    private func attenuateCompetingMedia() {
         guard phase == .recording else { return }
-        let activationID = UUID()
-        otherAudioDuckingActivationID = activationID
-        do {
-            try await recorder.setOtherAudioDucking(enabled: true)
-            guard MacOtherAudioDuckingLifecyclePolicy.shouldKeepActivation(
-                activationID: activationID,
-                currentActivationID: otherAudioDuckingActivationID,
-                isRecording: phase == .recording
-            ) else {
-                // A pause, Escape, Quit, or newer start won while enable was
-                // suspended. Undo this stale activation before returning.
-                try? await recorder.setOtherAudioDucking(enabled: false)
-                return
-            }
-        } catch {
-            guard MacOtherAudioDuckingLifecyclePolicy.shouldKeepActivation(
-                activationID: activationID,
-                currentActivationID: otherAudioDuckingActivationID,
-                isRecording: phase == .recording
-            ) else {
-                return
-            }
-            recordingWarning = error.localizedDescription
-        }
+        competingMediaFader.fadeDown()
     }
 
-    /// Invalidates a racing enable before awaiting the recorder's serial audio
-    /// queues. When this returns, neither capture backend owns a ducking VPIO.
-    private func disableOtherAudioDucking() async {
-        otherAudioDuckingActivationID = nil
-        try? await recorder.setOtherAudioDucking(enabled: false)
+    private func restoreCompetingMedia() {
+        competingMediaFader.fadeUp()
     }
 
     private func stopMeter() {
