@@ -489,6 +489,22 @@ flow still require the direct physical-device matrix in
 `docs/ios-dictation-ux.md`; a signed install or compile does not establish that
 acceptance.
 
+## Reference IPA tooling
+
+The repository owns the helper used to download the latest Wispr Flow and
+Superwhisper IPAs for local product research:
+
+```bash
+ipatool auth login
+./scripts/download-reference-ipas.sh
+```
+
+The helper relies on `ipatool`, `jq`, `unzip`, and `shasum`. It uses ipatool's
+saved App Store session and never reads or forwards an Apple ID password. IPAs
+are written with mode 600 outside the repository, under
+`~/Library/Application Support/SpeakPaste/ReferenceIPAs` by default. Override
+that location with `SPEAKPASTE_REFERENCE_IPA_DIR` when needed.
+
 ## License
 
 SpeakPaste is available under the [MIT License](LICENSE).
