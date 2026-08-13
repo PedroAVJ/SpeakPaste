@@ -141,7 +141,8 @@ global shortcut require macOS Accessibility permission; without it, the
 transcript remains on the clipboard.
 
 While either microphone is actually recording, SpeakPaste smoothly fades the
-current output about 16 dB quieter over 400 ms, leaves playback running, then
+current output about 12 dB quieter (roughly one quarter of its prior amplitude)
+over 400 ms, leaves playback running, then
 eases it back over 900 ms on pause, End, Escape, error, sleep, disconnect, or
 Quit. It never sends a player a pause command and never starts a second audio
 capture session to request ducking. Before every hardware write, SpeakPaste

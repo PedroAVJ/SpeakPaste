@@ -57,7 +57,7 @@ placeholder API key. Do not point this run at the installed app's Keychain,
 TCC grants, or Application Support.
 
 - [ ] For both the Mac and iPhone source, play media before recording. Confirm
-      it keeps advancing while output eases 16 dB down over 400 ms and returns
+      it keeps advancing while output eases 12 dB down over 400 ms and returns
       over 900 ms on pause, End, Escape, error, sleep, disconnect, and Quit.
       Reverse start/stop rapidly without a jump. Change volume manually during
       capture and confirm SpeakPaste yields. Force-quit during fade and restore,

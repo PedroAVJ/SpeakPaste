@@ -101,7 +101,8 @@ macOS has no AVAudioSession-style `duckOthers` contract. Physical Spotify
 testing showed that starting a second Voice Processing I/O session merely to
 request ducking interrupted and restarted playback. The desktop contract is
 therefore a microphone-independent output fade: once Recording is truthful,
-ease the current output 16 dB down over 400 ms; on every transition out of
+ease the current output 12 dB down (roughly one-quarter amplitude) over 400 ms;
+on every transition out of
 Recording, ease it back over 900 ms. Connecting, Paused, Draining, and network
 transcription never attenuate.
 

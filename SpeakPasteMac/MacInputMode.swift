@@ -32,7 +32,8 @@ enum MacInputMode: String, CaseIterable, Equatable, Sendable {
 /// Processing route. The cosine easing has zero slope at both ends, which
 /// avoids the audible step produced by a linear on/off volume change.
 enum MacCompetingMediaFadePolicy {
-    static let attenuationDecibels = 16.0
+    /// Leaves competing media at about one quarter of its original amplitude.
+    static let attenuationDecibels = 12.0
     static let fadeDownDuration: TimeInterval = 0.40
     static let fadeUpDuration: TimeInterval = 0.90
     static let updatesPerSecond = 30.0

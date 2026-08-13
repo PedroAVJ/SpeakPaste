@@ -3,6 +3,15 @@ import XCTest
 @testable import SpeakPaste
 
 final class MacAudioPolicyTests: XCTestCase {
+    func testCompetingMediaAttenuationKeepsBackgroundAudible() {
+        XCTAssertEqual(MacCompetingMediaFadePolicy.attenuationDecibels, 12)
+        XCTAssertEqual(
+            pow(10, -MacCompetingMediaFadePolicy.attenuationDecibels / 20),
+            0.25,
+            accuracy: 0.002
+        )
+    }
+
     func testCompetingMediaFadeUsesSmoothMonotonicEndpoints() {
         let down = stride(from: 0.0, through: 1.0, by: 0.05).map {
             MacCompetingMediaFadePolicy.decibels(

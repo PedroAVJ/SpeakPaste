@@ -371,7 +371,7 @@ extension MacCoreAudioTransport {
                     - Float(MacCompetingMediaFadePolicy.attenuationDecibels)
             ) else {
                 // Scalar volume is device-specific and is not promised to be
-                // linear amplitude. Without both translators, a claimed 16 dB
+                // linear amplitude. Without both translators, a claimed 12 dB
                 // fade would be fiction, so this output fails open unchanged.
                 return nil
             }
