@@ -43,6 +43,32 @@ final class MacAudioPolicyTests: XCTestCase {
         )
     }
 
+    func testPrivateAggregateExposesOnlySelectedInputDirection() throws {
+        let plan = try XCTUnwrap(
+            MacVoiceProcessingAggregateChannelPlan.make(
+                selectedInputChannels: 1,
+                currentOutputChannels: 2
+            )
+        )
+        XCTAssertEqual(plan.selectedInputChannels, 1)
+        XCTAssertEqual(plan.selectedInputOutputChannels, 0)
+        XCTAssertEqual(plan.currentOutputInputChannels, 0)
+        XCTAssertEqual(plan.currentOutputChannels, 2)
+        XCTAssertTrue(
+            plan.matchesAggregate(inputChannels: 1, outputChannels: 2)
+        )
+        XCTAssertFalse(
+            plan.matchesAggregate(inputChannels: 2, outputChannels: 2),
+            "A full-duplex output microphone must not widen capture"
+        )
+        XCTAssertNil(
+            MacVoiceProcessingAggregateChannelPlan.make(
+                selectedInputChannels: 0,
+                currentOutputChannels: 2
+            )
+        )
+    }
+
     func testChannelMapCanReferenceOnlyLeadingSelectedInputChannels() {
         let map = MacSelectedInputChannelMap.make(
             selectedInputChannelCount: 2,
