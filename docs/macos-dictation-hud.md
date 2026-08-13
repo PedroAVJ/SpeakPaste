@@ -20,7 +20,7 @@ Companion to `macos-dictation-controls.md`; the HUD renders that machine.
 
 States are distinguished by motion. The grammar: **pop = delivered,
 fold = dismissed to recovery, still = waiting on you, breath = waiting
-on the world, dots = being typed.**
+on the world, dots = being typed, raised hand = delivery parked.**
 
 - **Hot** — the live capture: source glyph at the bloom, then the red
   waveform. The capsule, identity layer, and waveform layer persist;
@@ -44,13 +44,24 @@ on the world, dots = being typed.**
   seals into Away. Until that delivery side effect begins, a
   source key **reopens** it (back to Hot) and Esc dismisses it to
   recovery — Draining is a Resting that leaves on its own.
+- **Held** — a second `fn` while Draining parks only the landing. The
+  typing dots and patter stop, and the same small output-side capsule settles
+  on one steady amber raised-hand glyph. Transcription continues behind it;
+  no segment card or progress appears. Held never times out. Another `fn`
+  returns the same face to Draining and delivers once at the then-current
+  cursor when the complete transcript is ready. Either source key reopens the
+  same dictation into Hot, and Esc folds every banked segment into recovery.
+  Held cannot be mistaken for paused recording: Resting is always the wide,
+  dim, frozen waveform, while Held is the compact output pill with no waveform
+  or source identity. It is also distinct from the two-second clipboard or
+  document receipt used after a delivery fallback.
 - **Away** — clean screen, nothing owed.
 
 Invariants:
 
 - **Presence means owed text.** The HUD may not disappear while a
-  dictation is open (Hot or Resting). Timeouts apply to transcription
-  work only, never to a resting dictation.
+  dictation is open (Hot, Resting, or Held). Timeouts apply to automatic
+  transcription presentation only, never to a Resting or Held dictation.
 - Esc's exit (the fold, a squash to nothing) is visibly distinct from
   End's (the pop, a bloom) — distinct shapes, both in place. Nothing
   travels.
@@ -91,10 +102,12 @@ where the wave treatments were input-side, the machine consuming
 audio. On delivery-verified the pill pops in place — a bubble
 bursting at center, no travel; a bubble pops where it stands — and
 the arrival sound calls back a user who looked away. Dots exist
-only while delivery is owed; a near-instant delivery shows a blink of
+only while automatic delivery is armed; a near-instant delivery shows a blink of
 them at most, and delivery never waits for the animation. A long wait
 gets the same dots, never an escalation. Reopen stands the capsule
-back up into the live wave; Esc folds the pill to recovery.
+back up into the live wave; Esc folds the pill to recovery. A second `fn`
+parks the dots as Held before the output boundary, and release starts the dots
+and patter again without creating a new dictation identity.
 
 The face's sound, settled with it. **No cue fires at the fn press**: the
 patter starts a moment later and is itself the acknowledgment, so a
@@ -110,7 +123,10 @@ is the **delivery plop**, a struck tone falling E5→E4: a message
 landing, not a rising ping claiming a milestone. Both are synthesized
 by `scripts/generate-macos-earcons.py` — deterministic, no samples —
 and the patter loop is verified to begin and end in silence so the
-wrap cannot click.
+wrap cannot click. Entering Held stops the patter and plays
+`delivery-held`: two dry, level E4 knocks, categorically different from
+Paused's single low A3 tone and the error's falling E4→B3 phrase. Releasing
+Held needs no extra chime because the returning patter is the receipt.
 
 Considered and rejected: word-shaped dashes confirming word by word
 (invents per-word progress, pace, and widths no signal provides; the
@@ -120,8 +136,8 @@ machinery over an almost-always-binary signal, and it rewards
 watching), estimate-driven progress from audio length (an estimate is
 a promise, and it breaks on camera — early snap or the 90% stall),
 frozen wave with the amber wait-dot beside it (the capsule's body
-reads as Paused — departure dressed as parking; a seven-pixel
-accessory cannot overrule the body), the read glint over the frozen
+reads as Paused — automatic departure dressed as parking; even genuine Held
+uses a compact output-side hand rather than borrowing the recording body), the read glint over the frozen
 wave (honest and calm, but input-side — the machine reading — and the
 frozen wave still wears Paused's body), caret with a progress rail
 (discards the message's identity), fixed-frontier wave read (flow
@@ -157,7 +173,8 @@ the bars change address.)
 
 ## Color
 
-Fixed meanings, HUD-wide: **amber = not yet** (the wait-dot), **red =
+Fixed meanings, HUD-wide: **amber = not yet** (a breathing wait-dot when the
+world is pending; a steady raised hand when the user parked delivery), **red =
 hot mic** (live waveform), **gray = cold** (resting). Red never appears
 unless the microphone is capturing. Glyphs never recolor: identity and
 status are separate channels.
@@ -176,7 +193,8 @@ hold tone (paused — held, owed), and the muted fold tone (dismissed to
 recovery). They fire only after the microphone is actually free. Pause never
 plays a rising ping; suspension is not progress. **The closing
 family is the message being written and landing**: the typing patter
-while the dots are up, then the delivery plop on the pop. Closing
+while the dots are up, a distinct double knock when the user parks it, then
+the delivery plop on the pop. Closing
 carries no rising ping at either end — see *Closing on deliver*.
 
 - **The capture ping fires at capture-live. The tick is the wait**, like
@@ -185,7 +203,8 @@ carries no rising ping at either end — see *Closing on deliver*.
   The Mac has no wait, so no tick — one ping, effectively at the
   keypress.
 - End needs no tick and no chime: the patter starts as the dots appear,
-  and the plop lands on the pop.
+  and the plop lands on the pop. The second `fn` stops the patter and plays
+  `delivery-held`; `fn` from Held restarts the patter without another edge cue.
 - `wait-tick`, `dictation-held`, and `dismiss-fold` are low, restrained
   members of the same synthesized family. The fold carries Escape visually;
   its muted low tone only confirms that the dismissal reached recovery.
@@ -208,6 +227,6 @@ placeholder below.
 - `hud-dictation.html` — the whole machine in one capsule, every key
   in every state, speaking the shipped closing face.
 
-The Mac implementation follows: `MacStatusHUD.swift` draws the dots and
-both exits, `MacSoundEffects.swift` owns the patter and plop, and
+The Mac implementation follows: `MacStatusHUD.swift` draws the dots, raised
+hand, and both exits, `MacSoundEffects.swift` owns the patter, hold knock, and plop, and
 `scripts/generate-macos-earcons.py` synthesizes and verifies every cue.

@@ -41,6 +41,27 @@ final class MacHUDHeldSymbolTests: XCTestCase {
     }
 }
 
+final class MacHUDDeliveryHoldSymbolTests: XCTestCase {
+    func testDeliveryHoldUsesRaisedHandWithAPauseFallback() {
+        XCTAssertEqual(
+            MacHUDDeliveryHoldSymbol.systemName(isAvailable: { _ in true }),
+            "hand.raised.fill"
+        )
+        XCTAssertEqual(
+            MacHUDDeliveryHoldSymbol.systemName(isAvailable: { _ in false }),
+            "pause.fill"
+        )
+        for name in [
+            MacHUDDeliveryHoldSymbol.preferred,
+            MacHUDDeliveryHoldSymbol.fallback,
+        ] {
+            XCTAssertNotNil(
+                NSImage(systemSymbolName: name, accessibilityDescription: nil)
+            )
+        }
+    }
+}
+
 final class MacHUDVisualStateTests: XCTestCase {
     private let base = Date(timeIntervalSince1970: 10_000)
 
@@ -110,6 +131,14 @@ final class MacHUDVisualStateTests: XCTestCase {
             MacHUDVisualState.resolve(content: .draining, inputLevel: 0, at: base),
             .typing
         )
+        XCTAssertEqual(
+            MacHUDVisualState.resolve(
+                content: .deliveryHeld,
+                inputLevel: 0,
+                at: base
+            ),
+            .deliveryHeld
+        )
     }
 }
 
@@ -128,6 +157,25 @@ final class MacOrderedDictationBatchTests: XCTestCase {
 
         XCTAssertFalse(batch.starts(at: 7))
         XCTAssertTrue(batch.starts(at: 8))
+    }
+
+    func testHeldBlocksACompleteBatchUntilFnReturnsItToDraining() {
+        let batch = MacOrderedDictationBatch(sequences: [3, 4])
+        let completed = Set([3, 4])
+
+        XCTAssertTrue(batch.isReady(completedSequences: completed))
+        XCTAssertFalse(
+            batch.isReadyForDelivery(
+                completedSequences: completed,
+                timingState: .held
+            )
+        )
+        XCTAssertTrue(
+            batch.isReadyForDelivery(
+                completedSequences: completed,
+                timingState: .draining
+            )
+        )
     }
 }
 
@@ -420,6 +468,110 @@ final class MacHUDStackTests: XCTestCase {
         XCTAssertFalse(pipeline.isTyping)
     }
 
+    func testDeliveryHoldIsIndefiniteAndReleaseResumesTheSameDrain() {
+        let segment = UUID()
+        var pipeline = MacHUDPipeline()
+        pipeline.beginCapture(
+            id: segment,
+            ordinal: 1,
+            source: .mac,
+            at: base
+        )
+        let faceID = pipeline.visibleFaceID
+        pipeline.beginTranscription(
+            id: segment,
+            ordinal: 1,
+            recordingDuration: 3,
+            createdAt: base,
+            at: base.addingTimeInterval(1)
+        )
+        pipeline.beginDraining(at: base.addingTimeInterval(2))
+        pipeline.beginDeliveryHold(at: base.addingTimeInterval(3))
+
+        XCTAssertEqual(pipeline.deliveryTimingState, .held)
+        XCTAssertTrue(pipeline.isAwaitingDelivery)
+        XCTAssertFalse(pipeline.isTyping)
+        XCTAssertEqual(pipeline.visibleFaceID, faceID)
+        XCTAssertNil(
+            MacHUDStack.nextExpiry(
+                in: pipeline,
+                after: base.addingTimeInterval(10_000)
+            )
+        )
+        let held = MacHUDStack.resolve(
+            pipeline: pipeline,
+            at: base.addingTimeInterval(10_000)
+        )
+        XCTAssertEqual(held.cards, [MacHUDStack.Card(id: faceID!, content: .deliveryHeld)])
+        XCTAssertEqual(
+            held.accessibilityLabel(sourceName: nil),
+            "SpeakPaste, Delivery held — transcription continues, Press the Function key to deliver at the current cursor"
+        )
+
+        pipeline.releaseDeliveryHold(at: base.addingTimeInterval(10_001))
+        XCTAssertEqual(pipeline.deliveryTimingState, .draining)
+        XCTAssertTrue(pipeline.isTyping)
+        XCTAssertEqual(pipeline.visibleFaceID, faceID)
+        XCTAssertEqual(
+            MacHUDStack.nextExpiry(
+                in: pipeline,
+                after: base.addingTimeInterval(10_001)
+            ),
+            base.addingTimeInterval(10_001 + MacHUDStack.drainingVisibilityCap)
+        )
+    }
+
+    func testSourceReopenFromDeliveryHoldPreservesFaceAndWork() {
+        let segment = UUID()
+        let resumedSegment = UUID()
+        var pipeline = MacHUDPipeline()
+        pipeline.beginCapture(id: segment, ordinal: 1, source: .mac, at: base)
+        let faceID = pipeline.visibleFaceID
+        pipeline.beginTranscription(
+            id: segment,
+            ordinal: 1,
+            recordingDuration: 2,
+            createdAt: base,
+            at: base.addingTimeInterval(1)
+        )
+        pipeline.beginDraining(at: base.addingTimeInterval(2))
+        pipeline.beginDeliveryHold(at: base.addingTimeInterval(3))
+
+        pipeline.beginCapture(
+            id: resumedSegment,
+            ordinal: 2,
+            source: .iPhone,
+            at: base.addingTimeInterval(4)
+        )
+
+        XCTAssertEqual(pipeline.visibleFaceID, faceID)
+        XCTAssertEqual(pipeline.deliveryTimingState, .inactive)
+        XCTAssertEqual(pipeline.capture?.id, resumedSegment)
+        XCTAssertEqual(pipeline.faceIDs(forWorkIDs: [segment]), [faceID!])
+    }
+
+    func testDismissFromDeliveryHoldDetachesTheFaceButKeepsRecoveryWork() {
+        let segment = UUID()
+        var pipeline = MacHUDPipeline()
+        pipeline.beginCapture(id: segment, ordinal: 1, source: .mac, at: base)
+        pipeline.beginTranscription(
+            id: segment,
+            ordinal: 1,
+            recordingDuration: 2,
+            createdAt: base,
+            at: base.addingTimeInterval(1)
+        )
+        pipeline.beginDraining(at: base.addingTimeInterval(2))
+        pipeline.beginDeliveryHold(at: base.addingTimeInterval(3))
+
+        pipeline.dismissFace()
+
+        XCTAssertEqual(pipeline.deliveryTimingState, .inactive)
+        XCTAssertNil(pipeline.visibleFaceID)
+        XCTAssertEqual(pipeline.faceIDs(forWorkIDs: [segment]), [])
+        XCTAssertEqual(pipeline.orderedDictations.map(\.id), [segment])
+    }
+
     func testNewCaptureAfterHeldAcknowledgmentGetsFreshDictationIdentity() {
         let heldWork = UUID()
         let newCapture = UUID()
@@ -439,7 +591,7 @@ final class MacHUDStackTests: XCTestCase {
         XCTAssertEqual(pipeline.faceIDs(forWorkIDs: [heldWork]), [heldFaceID!])
     }
 
-    func testRestingNeverExpiresButDrainingAndHeldDo() {
+    func testRestingAndDeliveryHoldNeverExpireButDrainingAndRecoveryHeldDo() {
         let segment = UUID()
         var pipeline = MacHUDPipeline()
         pipeline.beginCapture(
@@ -473,6 +625,15 @@ final class MacHUDStackTests: XCTestCase {
             MacHUDStack.resolve(
                 pipeline: pipeline,
                 at: base.addingTimeInterval(MacHUDStack.drainingVisibilityCap)
+            ).isEmpty
+        )
+
+        pipeline.beginDeliveryHold(at: base)
+        XCTAssertNil(MacHUDStack.nextExpiry(in: pipeline, after: base))
+        XCTAssertFalse(
+            MacHUDStack.resolve(
+                pipeline: pipeline,
+                at: base.addingTimeInterval(10_000)
             ).isEmpty
         )
 

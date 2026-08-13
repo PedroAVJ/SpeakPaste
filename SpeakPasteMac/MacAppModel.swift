@@ -851,7 +851,9 @@ final class MacAppModel: ObservableObject {
         globalHotKey.install(
             key: { [weak self] key in self?.handleDictationKey(key) },
             isDictationOpen: { [weak self] in
-                self?.phase.dictationIsOpen == true
+                guard let self else { return false }
+                return self.phase.dictationIsOpen
+                    || self.hudPipeline.isAwaitingDelivery
             },
             release: { [weak self] in self?.releaseHeldTranscripts() },
             pasteLast: { [weak self] in self?.pasteLastTranscript() },
@@ -883,6 +885,13 @@ final class MacAppModel: ObservableObject {
         hasAPIKey
             && selectedDevice != nil
             && permissions.granted[.microphone] == true
+    }
+
+    /// Closed-dictation timing is owned by the one HUD face rather than the
+    /// microphone phase. The keyboard map reads this same value that the key
+    /// handler and ordered drain enforce.
+    var deliveryTimingState: MacDeliveryTimingState {
+        hudPipeline.deliveryTimingState
     }
 
     var isShortcutGlobal: Bool { globalHotKey.isGlobal }
@@ -1114,7 +1123,7 @@ final class MacAppModel: ObservableObject {
     private func sourceKeyPressed(_ mode: MacInputMode) {
         switch phase {
         case .ready, .succeeded, .failed:
-            if hudPipeline.isDraining {
+            if hudPipeline.isAwaitingDelivery {
                 // Until delivery crosses its side-effect boundary, a closing
                 // dictation is still the user's message. Reopening restores the
                 // same tickets and the same HUD face; it never starts a second
@@ -1178,9 +1187,38 @@ final class MacAppModel: ObservableObject {
         Task { await stopAndTranscribe() }
     }
 
-    /// `fn`: close the dictation and deliver everything banked, in spoken order.
+    /// `fn`: close toward delivery, park Draining, or release Held output.
     func endDictation() {
         guard !microphoneTestState.isRunning else { return }
+        if hudPipeline.isDeliveryHeld {
+            guard activeDeliveryEscrowIDs.isEmpty else { return }
+            var pipeline = hudPipeline
+            pipeline.releaseDeliveryHold()
+            hudPipeline = pipeline
+            postAccessibilityAnnouncement(
+                "Delivery released. SpeakPaste will place this dictation once at the current cursor."
+            )
+            Task { await drainCompletedDictations() }
+            return
+        }
+        if hudPipeline.isDraining {
+            // Once the serialized paste transaction starts, the first possible
+            // side effect seals this dictation. Before that boundary, fn may
+            // park only its timing; all transcription work keeps running.
+            guard activeDeliveryEscrowIDs.isEmpty,
+                  !closingDictationSequences.isEmpty
+            else {
+                return
+            }
+            var pipeline = hudPipeline
+            pipeline.beginDeliveryHold()
+            hudPipeline = pipeline
+            sounds.playDeliveryHeld()
+            postAccessibilityAnnouncement(
+                "Delivery held. Transcription continues. Press the Function key to deliver at the current cursor."
+            )
+            return
+        }
         switch phase {
         case .recording:
             finalizationOutcome = .close
@@ -3422,7 +3460,9 @@ final class MacAppModel: ObservableObject {
             // of the safely finalized segment: recovery instead of rest/end.
             finalizationOutcome = .dismiss
         case .ready, .succeeded, .failed:
-            guard hudPipeline.isDraining, activeDeliveryEscrowIDs.isEmpty else {
+            guard hudPipeline.isAwaitingDelivery,
+                  activeDeliveryEscrowIDs.isEmpty
+            else {
                 return
             }
             if let faceID = hudPipeline.visibleFaceID {
@@ -3434,6 +3474,11 @@ final class MacAppModel: ObservableObject {
             var pipeline = hudPipeline
             pipeline.dismissFace()
             hudPipeline = pipeline
+            // A complete batch may already be parked behind Held. Removing
+            // its closing tickets changes the destination to recovery, so wake
+            // the ordered lane now instead of waiting for unrelated future
+            // transcription work to produce another callback.
+            Task { await drainCompletedDictations() }
         }
     }
 
@@ -3526,8 +3571,14 @@ final class MacAppModel: ObservableObject {
                 sequences: closingDictationSequences
             )
             if closingBatch.starts(at: nextDeliverySequence) {
-                guard closingBatch.isReady(
-                    completedSequences: Set(completedDictations.keys)
+                // Held gates only this dictation's landing. Completed
+                // transcripts stay in the ordered lane and their durable
+                // escrows stay pending; older dismissed work may still finish
+                // banking ahead of it. fn release wakes this same drain at the
+                // then-current cursor.
+                guard closingBatch.isReadyForDelivery(
+                    completedSequences: Set(completedDictations.keys),
+                    timingState: hudPipeline.deliveryTimingState
                 ) else {
                     break
                 }

@@ -17,6 +17,7 @@ struct MacKeyboardMapPanel: View {
     private var indications: [MacDictationKey: MacKeyIndication] {
         MacKeyboardMapState.indications(
             phase: model.phase,
+            deliveryTimingState: model.deliveryTimingState,
             activeSource: model.activeSource,
             hasBankedSegments: model.hasBankedSegments,
             canStartRecording: model.canStartRecording
@@ -48,6 +49,7 @@ struct MacKeyboardMapPanel: View {
             alignment: .topLeading
         )
         .animation(.easeInOut(duration: 0.18), value: model.phase)
+        .animation(.easeInOut(duration: 0.18), value: model.deliveryTimingState)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(boardAccessibilityLabel)
     }
@@ -112,6 +114,7 @@ struct MacKeyboardMapPanel: View {
     private func color(for tint: MacKeyTint) -> Color {
         switch tint {
         case .source: model.phase == .recording ? .red : .accentColor
+        case .hold: .yellow
         case .deliver: .green
         case .discard: .orange
         }
@@ -131,14 +134,27 @@ struct MacKeyboardMapPanel: View {
     private func verb(for key: MacDictationKey) -> String {
         switch key {
         case .macSource, .iPhoneSource:
-            switch model.phase {
+            if model.deliveryTimingState.isAwaitingDelivery {
+                return key == .macSource
+                    ? "reopen on the Mac microphone"
+                    : "reopen on the iPhone microphone"
+            }
+            return switch model.phase {
             case .recording: "pause"
             case .paused: "resume"
             case .connecting: "record here instead"
             default: "start"
             }
-        case .end: "end and deliver"
-        case .cancel: model.phase == .paused ? "discard this dictation" : "discard"
+        case .end:
+            return switch model.deliveryTimingState {
+            case .draining: "hold delivery"
+            case .held: "deliver at the current cursor"
+            case .inactive: "end and deliver"
+            }
+        case .cancel:
+            return model.deliveryTimingState.isAwaitingDelivery || model.phase == .paused
+                ? "dismiss into recovery"
+                : "dismiss"
         }
     }
 

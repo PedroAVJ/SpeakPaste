@@ -36,6 +36,18 @@ enum MacCapturePhase: Equatable {
     var dictationIsOpen: Bool { isBusy }
 }
 
+/// Delivery timing after `fn` closes capture. This stays separate from
+/// `MacCapturePhase`: the microphone is already free and transcription keeps
+/// running in both states. The only difference is whether the ordered drain
+/// may cross into its durable delivery escrow and resolve the current cursor.
+enum MacDeliveryTimingState: Equatable, Sendable {
+    case inactive
+    case draining
+    case held
+
+    var isAwaitingDelivery: Bool { self != .inactive }
+}
+
 /// Where an in-flight finalization should leave the dictation. The source keys
 /// can only ever choose `rest`; `close` is reachable only from `fn`.
 enum MacFinalizationOutcome: Equatable {
@@ -55,15 +67,17 @@ enum MacFinalizationOutcome: Equatable {
 /// taps and no timing windows anywhere in this control surface.
 ///
 /// The two source keys can only start, pause, or resume — they can never
-/// deliver text and never destroy it. `end` always delivers; `cancel` always
-/// discards. That asymmetry is the whole safety story, so it is expressed here
-/// rather than rediscovered at each call site.
+/// deliver text and never destroy it. `end` always moves the dictation toward
+/// delivery, although a second press while Draining may park its timing before
+/// a third releases it. `cancel` always dismisses into recovery. That
+/// asymmetry is the whole safety story, so it is expressed here rather than
+/// rediscovered at each call site.
 enum MacDictationKey: String, CaseIterable, Identifiable, Sendable {
     /// Right Command: capture on this Mac's own microphone.
     case macSource
     /// Right Option: capture on the Continuity iPhone microphone.
     case iPhoneSource
-    /// fn: close the dictation and deliver everything banked.
+    /// fn: close, park while Draining, or release Held delivery.
     case end
     /// Escape: discard.
     case cancel
@@ -146,11 +160,11 @@ struct MacDictationShortcut: Identifiable {
         ),
         MacDictationShortcut(
             dictationKey: .end,
-            purpose: "End the dictation and deliver everything banked"
+            purpose: "End, hold while draining, or release delivery"
         ),
         MacDictationShortcut(
             dictationKey: .cancel,
-            purpose: "Discard — the live segment, or a resting dictation's banked text"
+            purpose: "Dismiss into recovery without delivering"
         ),
     ]
 }

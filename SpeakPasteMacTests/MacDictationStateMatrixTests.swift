@@ -8,12 +8,14 @@ import XCTest
 final class MacDictationStateMatrixTests: XCTestCase {
     private func indications(
         _ phase: MacCapturePhase,
+        timing: MacDeliveryTimingState = .inactive,
         source: MacInputMode? = nil,
         banked: Bool = false,
         ready: Bool = true
     ) -> [MacDictationKey: MacKeyIndication] {
         MacKeyboardMapState.indications(
             phase: phase,
+            deliveryTimingState: timing,
             activeSource: source,
             hasBankedSegments: banked,
             canStartRecording: ready
@@ -115,24 +117,72 @@ final class MacDictationStateMatrixTests: XCTestCase {
         XCTAssertTrue(map[.cancel]?.isActive == true)
     }
 
+    // MARK: Draining and Held
+
+    func testDrainingOffersReopenHoldAndDismiss() {
+        let map = indications(.ready, timing: .draining, banked: false)
+        XCTAssertEqual(
+            map[.macSource],
+            .active(symbol: "laptopcomputer", tint: .source)
+        )
+        XCTAssertEqual(
+            map[.iPhoneSource],
+            .active(symbol: "iphone", tint: .source)
+        )
+        XCTAssertEqual(
+            map[.end],
+            .active(symbol: "pause.circle.fill", tint: .hold)
+        )
+        XCTAssertEqual(map[.cancel], .active(symbol: "xmark", tint: .discard))
+    }
+
+    func testHeldChangesOnlyFnFromHoldToDeliver() {
+        let draining = indications(.ready, timing: .draining)
+        let held = indications(.ready, timing: .held)
+
+        XCTAssertEqual(draining[.macSource], held[.macSource])
+        XCTAssertEqual(draining[.iPhoneSource], held[.iPhoneSource])
+        XCTAssertEqual(draining[.cancel], held[.cancel])
+        XCTAssertEqual(
+            held[.end],
+            .active(symbol: "text.insert", tint: .deliver)
+        )
+        XCTAssertNotEqual(draining[.end], held[.end])
+    }
+
+    func testHeldKeepsTimingControlsActiveWhenADeviceCannotReopen() {
+        let map = indications(.ready, timing: .held, ready: false)
+        XCTAssertFalse(map[.macSource]?.isActive == true)
+        XCTAssertFalse(map[.iPhoneSource]?.isActive == true)
+        XCTAssertTrue(map[.end]?.isActive == true)
+        XCTAssertTrue(map[.cancel]?.isActive == true)
+    }
+
     // MARK: Invariants
 
     /// The safety property the whole control surface exists to guarantee.
     func testNoSourceKeyEverDeliversOrDiscards() {
         for phase in Self.everyPhase {
-            for source in [MacInputMode.mac, .iPhone, nil] {
-                for banked in [true, false] {
-                    let map = indications(phase, source: source, banked: banked)
-                    for key in [MacDictationKey.macSource, .iPhoneSource] {
-                        switch map[key] {
-                        case .active(_, let tint):
-                            XCTAssertEqual(
-                                tint,
-                                .source,
-                                "\(key) must never carry a delivery or discard verb"
-                            )
-                        case .blank, .inert, .refused, nil:
-                            continue
+            for timing in Self.everyTimingState {
+                for source in [MacInputMode.mac, .iPhone, nil] {
+                    for banked in [true, false] {
+                        let map = indications(
+                            phase,
+                            timing: timing,
+                            source: source,
+                            banked: banked
+                        )
+                        for key in [MacDictationKey.macSource, .iPhoneSource] {
+                            switch map[key] {
+                            case .active(_, let tint):
+                                XCTAssertEqual(
+                                    tint,
+                                    .source,
+                                    "\(key) must never carry a delivery or discard verb"
+                                )
+                            case .blank, .inert, .refused, nil:
+                                continue
+                            }
                         }
                     }
                 }
@@ -164,6 +214,20 @@ final class MacDictationStateMatrixTests: XCTestCase {
         .succeeded("done"),
         .failed("nope"),
     ]
+
+    private static let everyTimingState: [MacDeliveryTimingState] = [
+        .inactive,
+        .draining,
+        .held,
+    ]
+}
+
+final class MacDeliveryTimingStateTests: XCTestCase {
+    func testOnlyDrainingAndHeldAwaitDelivery() {
+        XCTAssertFalse(MacDeliveryTimingState.inactive.isAwaitingDelivery)
+        XCTAssertTrue(MacDeliveryTimingState.draining.isAwaitingDelivery)
+        XCTAssertTrue(MacDeliveryTimingState.held.isAwaitingDelivery)
+    }
 }
 
 final class MacCapturePhaseTests: XCTestCase {
