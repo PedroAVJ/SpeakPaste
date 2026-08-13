@@ -744,6 +744,103 @@ final class ElevenLabsClientTests: XCTestCase {
         XCTAssertEqual(recordedDelays, [0.25])
     }
 
+    func testUploadWithNoByteProgressIsCancelledAndRetriedQuickly() async throws {
+        let tracker = RequestTracker()
+        let delays = DelayRecorder()
+        let stalledAttemptCancelled = expectation(description: "stalled attempt cancelled")
+        let client = ElevenLabsClient(
+            session: makeSession(),
+            endpoint: endpoint,
+            retryPolicy: ElevenLabsRetryPolicy(
+                maximumAttempts: 2,
+                initialDelay: 0.01,
+                maximumDelay: 0.01
+            ),
+            requestTimeout: 300,
+            uploadStallTimeout: 0.1,
+            sleeper: { delay in await delays.record(delay) }
+        )
+
+        MockURLProtocol.requestHandler = { request in
+            let attempt = tracker.begin()
+            if attempt == 1 {
+                // Do not consume the request body. This reproduces the observed
+                // dead HTTP/3 stream: headers exist, but audio bytes never move.
+                return MockHTTPResult(
+                    response: Self.response(url: request.url!, statusCode: 200),
+                    data: Self.successData(text: "Too late."),
+                    delay: 10,
+                    onCompletion: {
+                        tracker.finish()
+                        stalledAttemptCancelled.fulfill()
+                    }
+                )
+            }
+            _ = try Self.bodyData(from: request)
+            tracker.finish()
+            return MockHTTPResult(
+                response: Self.response(url: request.url!, statusCode: 200),
+                data: Self.successData(text: "Fresh retry succeeded.")
+            )
+        }
+
+        let audioURL = try makeAudioFile(contents: Data(repeating: 0xA5, count: 32_768))
+        defer { try? FileManager.default.removeItem(at: audioURL) }
+        let startedAt = Date()
+        let result = try await client.transcribe(
+            audioURL: audioURL,
+            apiKey: "test-key",
+            language: .automatic,
+            cleanSpeech: false
+        )
+
+        XCTAssertEqual(result.text, "Fresh retry succeeded.")
+        XCTAssertEqual(tracker.attempts, 2)
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 1)
+        await fulfillment(of: [stalledAttemptCancelled], timeout: 1)
+        let recordedDelays = await delays.snapshot()
+        XCTAssertEqual(recordedDelays, [0.01])
+    }
+
+    func testCompletedUploadCanWaitForScribeWithoutTriggeringUploadStallDeadline() async throws {
+        let client = ElevenLabsClient(
+            session: makeSession(),
+            endpoint: endpoint,
+            retryPolicy: ElevenLabsRetryPolicy(
+                maximumAttempts: 1,
+                initialDelay: 0,
+                maximumDelay: 0
+            ),
+            uploadStallTimeout: 0.1
+        )
+        let progress = ElevenLabsUploadProgressDelegate(expectedUploadBytes: 32_768)
+        let session = makeSession()
+        let task = session.dataTask(with: endpoint)
+        progress.urlSession(
+            session,
+            task: task,
+            didSendBodyData: 32_768,
+            totalBytesSent: 32_768,
+            totalBytesExpectedToSend: 32_768
+        )
+        let watchdog = Task {
+            try await client.watchForStalledUpload(progress)
+        }
+
+        try await Task.sleep(nanoseconds: 250_000_000)
+        watchdog.cancel()
+        switch await watchdog.result {
+        case .success:
+            XCTFail("The watchdog should run until the request finishes or is cancelled")
+        case let .failure(error):
+            if !(error is CancellationError) {
+                XCTFail("Completed upload was incorrectly treated as stalled: \(error)")
+            }
+        }
+        progress.markFinished()
+        session.invalidateAndCancel()
+    }
+
     func testBackgroundIntentClientUsesOneBoundedRequestWithoutBackoff() async throws {
         let tracker = RequestTracker()
         let recorder = MultipartRequestRecorder()
