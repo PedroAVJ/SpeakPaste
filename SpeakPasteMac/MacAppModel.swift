@@ -341,6 +341,13 @@ final class MacAppModel: ObservableObject {
     @Published private(set) var apiKeyNotice: String?
     @Published private(set) var isMicrophoneConnected = false
     @Published private(set) var connectionLatency: TimeInterval?
+    /// Apple owns microphone modes. The preference is always readable; the
+    /// active value is exposed only while SpeakPaste has a live capture route,
+    /// because an idle global value is not evidence about the next microphone.
+    @Published private(set) var microphoneModeStatus = MacMicrophoneModeStatus(
+        preferred: .unknown,
+        active: nil
+    )
     /// Transcripts whose output is unresolved or ambiguous. They are never
     /// replayed automatically; the dashboard owns explicit recovery actions.
     @Published private(set) var heldTranscripts: [MacHeldTranscript] = []
@@ -407,6 +414,8 @@ final class MacAppModel: ObservableObject {
     private var meterTimer: Timer?
     private var loudnessPromptFilter = MacLoudnessPromptFilter()
     private var lastLoudnessSampleAt: Date?
+    private var microphoneModeMonitorTimer: Timer?
+    private var microphoneModePickerObservationTask: Task<Void, Never>?
     /// Long hands-free dictations must count as active work even when the user
     /// does not touch the keyboard or trackpad. The assertion covers only the
     /// live microphone window and is balanced across every exit path.
@@ -449,6 +458,9 @@ final class MacAppModel: ObservableObject {
     /// must never turn the app back to Recording (or overwrite a newer start).
     private var captureRequestID: UUID?
     private var captureStartTask: Task<Void, Never>?
+    /// Guards the async VPIO ducking handoff. A late successful enable from an
+    /// older recording is immediately undone instead of surviving pause/Escape.
+    private var otherAudioDuckingActivationID: UUID?
     /// Where the in-flight finalization should land. It is read only after
     /// AVFoundation has released the input, so the resting or closed state and
     /// the actual hardware can never disagree.
@@ -852,6 +864,7 @@ final class MacAppModel: ObservableObject {
         }
         UserDefaults.standard.removeObject(forKey: Self.autoPersistedDeviceKey)
         refreshDevices()
+        refreshMicrophoneModeStatus()
         observeDeviceChanges()
         observeLifecycleChanges()
         startNetworkMonitoring()
@@ -915,6 +928,30 @@ final class MacAppModel: ObservableObject {
     var releaseHotKeyLabel: String { MacGlobalHotKey.releaseLabel }
     var pasteLastHotKeyLabel: String { MacGlobalHotKey.pasteLastLabel }
     var copyLastHotKeyLabel: String { MacGlobalHotKey.copyLastLabel }
+
+    /// Opens Apple's non-blocking microphone-mode panel. SpeakPaste may prompt
+    /// and observe, but the public API intentionally provides no setter.
+    func showSystemMicrophoneModes() {
+        refreshMicrophoneModeStatus()
+        AVCaptureDevice.showSystemUserInterface(.microphoneModes)
+
+        // The system panel does not call back when it closes. Poll for one
+        // bounded window so an idle preference change is reflected without
+        // keeping a permanent timer alive. Live capture has its own monitor.
+        microphoneModePickerObservationTask?.cancel()
+        microphoneModePickerObservationTask = Task { [weak self] in
+            for _ in 0..<120 {
+                do {
+                    try await Task.sleep(for: .milliseconds(250))
+                } catch {
+                    return
+                }
+                guard let self else { return }
+                self.refreshMicrophoneModeStatus()
+            }
+            self?.microphoneModePickerObservationTask = nil
+        }
+    }
 
     var hasUncertainHeldTranscripts: Bool {
         heldTranscripts.contains(where: \.deliveryIsUncertain)
@@ -2296,7 +2333,9 @@ final class MacAppModel: ObservableObject {
         microphoneTestTask?.cancel()
         microphoneTestTask = nil
         stopMeter()
+        otherAudioDuckingActivationID = nil
         recorder.disconnectSynchronously()
+        stopMicrophoneModeMonitoring()
         endRecordingActivity()
         networkMonitor.cancel()
         sessionHeartbeatTimer?.invalidate()
@@ -2378,6 +2417,8 @@ final class MacAppModel: ObservableObject {
         captureRequestID = nil
         captureStartTask?.cancel()
         captureStartTask = nil
+
+        await disableOtherAudioDucking()
 
         let deviceName = selectedDevice?.name ?? "Unknown microphone"
         let recordingDuration = max(0, Date().timeIntervalSince(recordingStartedAt ?? Date()))
@@ -2593,6 +2634,7 @@ final class MacAppModel: ObservableObject {
             _ = try await recorder.connect(deviceID: device.id)
             isMicrophoneConnected = true
             connectedDeviceID = device.id
+            startMicrophoneModeMonitoring()
             testURL = try await recorder.startSegment()
             microphoneTestState = .listening
 
@@ -2610,6 +2652,7 @@ final class MacAppModel: ObservableObject {
 
             let segment = try await recorder.stop()
             isMicrophoneConnected = false
+            stopMicrophoneModeMonitoring()
             connectedDeviceID = nil
             connectionLatency = nil
             resolveSelection()
@@ -2641,6 +2684,7 @@ final class MacAppModel: ObservableObject {
             recorder.disconnect()
             if let testURL { try? FileManager.default.removeItem(at: testURL) }
             isMicrophoneConnected = false
+            stopMicrophoneModeMonitoring()
             connectedDeviceID = nil
             connectionLatency = nil
             inputLevel = 0
@@ -2675,17 +2719,27 @@ final class MacAppModel: ObservableObject {
         )
         capturedContextTermCount = dynamicContextKeyterms(for: deliveryTarget).count
 
+        var ownsRecorder = false
+
         do {
             let connectionStartedAt = Date()
             let createdConnection = try await recorder.connect(deviceID: device.id)
-            guard captureRequestID == requestID, !Task.isCancelled else { return }
+            ownsRecorder = true
+            guard captureRequestID == requestID, !Task.isCancelled else {
+                await recorder.disconnectAndWait()
+                return
+            }
             if createdConnection {
                 connectionLatency = Date().timeIntervalSince(connectionStartedAt)
             }
             isMicrophoneConnected = true
             connectedDeviceID = device.id
+            startMicrophoneModeMonitoring()
             _ = try await recorder.startSegment()
-            guard captureRequestID == requestID, !Task.isCancelled else { return }
+            guard captureRequestID == requestID, !Task.isCancelled else {
+                await recorder.disconnectAndWait()
+                return
+            }
             recordingStartedAt = Date()
             elapsed = 0
             inputLevel = 0
@@ -2701,12 +2755,17 @@ final class MacAppModel: ObservableObject {
             beginRecordingActivity()
             sounds.playRecordingStarted()
             startMeter()
+            await enableOtherAudioDuckingForCurrentRecording()
         } catch {
-            guard captureRequestID == requestID else { return }
+            guard captureRequestID == requestID else {
+                if ownsRecorder { await recorder.disconnectAndWait() }
+                return
+            }
             await recorder.disconnectAndWait()
             captureRequestID = nil
             captureStartTask = nil
             isMicrophoneConnected = false
+            stopMicrophoneModeMonitoring()
             connectedDeviceID = nil
             connectionLatency = nil
             recordFailure(diagnosticMessage(for: error), deviceName: device.name, recordingDuration: 0, transcriptionDuration: 0)
@@ -2719,6 +2778,10 @@ final class MacAppModel: ObservableObject {
         let deviceName = selectedDevice?.name ?? "Unknown microphone"
         let recordingDuration = Date().timeIntervalSince(recordingStartedAt ?? Date())
 
+        // Restore other apps before recorder finalization and before any
+        // transcription work. This await also serializes behind a racing enable.
+        await disableOtherAudioDucking()
+
         let segment: MacRecordedSegment
         do {
             segment = try await recorder.stop()
@@ -2726,6 +2789,7 @@ final class MacAppModel: ObservableObject {
             // A generic recorder error is not itself a teardown receipt.
             await recorder.disconnectAndWait()
             isMicrophoneConnected = false
+            stopMicrophoneModeMonitoring()
             connectedDeviceID = nil
             connectionLatency = nil
             resolveSelection()
@@ -2775,6 +2839,7 @@ final class MacAppModel: ObservableObject {
         // free again.
         playFinalizationSound(for: finalizationOutcome)
         isMicrophoneConnected = false
+        stopMicrophoneModeMonitoring()
         connectedDeviceID = nil
         connectionLatency = nil
         resolveSelection()
@@ -3532,6 +3597,7 @@ final class MacAppModel: ObservableObject {
             self.resolveSelection()
             self.endRecordingActivity()
             self.isMicrophoneConnected = false
+            self.stopMicrophoneModeMonitoring()
             self.connectedDeviceID = nil
             self.connectionLatency = nil
             var pipeline = self.hudPipeline
@@ -3556,6 +3622,7 @@ final class MacAppModel: ObservableObject {
         deliveryTarget = nil
         recorder.disconnect()
         isMicrophoneConnected = false
+        stopMicrophoneModeMonitoring()
         connectedDeviceID = nil
         connectionLatency = nil
         endRecordingActivity()
@@ -5222,12 +5289,18 @@ final class MacAppModel: ObservableObject {
         stopMeter()
         endRecordingActivity()
         isMicrophoneConnected = false
+        stopMicrophoneModeMonitoring()
         connectedDeviceID = nil
         connectionLatency = nil
         deliveryTarget = nil
         phase = .finalizing
         Task { [weak self] in
             guard let self else { return }
+            await self.disableOtherAudioDucking()
+            // AVCapture may already have released its recorder while the
+            // built-in path's ducking companion is still live. Await the whole
+            // facade so no private aggregate route reaches transcription.
+            await self.recorder.disconnectAndWait()
             guard let salvagedAudioURL else {
                 self.recordFailure(
                     self.diagnosticMessage(for: error),
@@ -5319,6 +5392,75 @@ final class MacAppModel: ObservableObject {
                 }
             }
         }
+    }
+
+    private func refreshMicrophoneModeStatus() {
+        let status = MacMicrophoneModeStatus.evaluate(
+            preferred: MacSystemMicrophoneMode(AVCaptureDevice.preferredMicrophoneMode),
+            systemActive: MacSystemMicrophoneMode(AVCaptureDevice.activeMicrophoneMode),
+            hasActiveCaptureRoute: isMicrophoneConnected
+        )
+        microphoneModeStatus = status
+    }
+
+    /// Active mode can change from Control Center during a dictation. Observe
+    /// only while SpeakPaste owns a route, and stop alongside every recorder
+    /// teardown so this support feature cannot extend microphone ownership.
+    private func startMicrophoneModeMonitoring() {
+        microphoneModeMonitorTimer?.invalidate()
+        refreshMicrophoneModeStatus()
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refreshMicrophoneModeStatus()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        microphoneModeMonitorTimer = timer
+    }
+
+    private func stopMicrophoneModeMonitoring() {
+        microphoneModeMonitorTimer?.invalidate()
+        microphoneModeMonitorTimer = nil
+        refreshMicrophoneModeStatus()
+    }
+
+    /// Enables Apple's speech-aware ducking only after `startSegment` has
+    /// delivered its first frames and the phase is truthfully Recording.
+    /// Failure is nonfatal: capture continues and the user gets an actionable
+    /// warning instead of a silent claim that other audio was lowered.
+    private func enableOtherAudioDuckingForCurrentRecording() async {
+        guard phase == .recording else { return }
+        let activationID = UUID()
+        otherAudioDuckingActivationID = activationID
+        do {
+            try await recorder.setOtherAudioDucking(enabled: true)
+            guard MacOtherAudioDuckingLifecyclePolicy.shouldKeepActivation(
+                activationID: activationID,
+                currentActivationID: otherAudioDuckingActivationID,
+                isRecording: phase == .recording
+            ) else {
+                // A pause, Escape, Quit, or newer start won while enable was
+                // suspended. Undo this stale activation before returning.
+                try? await recorder.setOtherAudioDucking(enabled: false)
+                return
+            }
+        } catch {
+            guard MacOtherAudioDuckingLifecyclePolicy.shouldKeepActivation(
+                activationID: activationID,
+                currentActivationID: otherAudioDuckingActivationID,
+                isRecording: phase == .recording
+            ) else {
+                return
+            }
+            recordingWarning = error.localizedDescription
+        }
+    }
+
+    /// Invalidates a racing enable before awaiting the recorder's serial audio
+    /// queues. When this returns, neither capture backend owns a ducking VPIO.
+    private func disableOtherAudioDucking() async {
+        otherAudioDuckingActivationID = nil
+        try? await recorder.setOtherAudioDucking(enabled: false)
     }
 
     private func stopMeter() {
@@ -5453,6 +5595,7 @@ final class MacAppModel: ObservableObject {
                     }
                     self.recorder.disconnect()
                     self.isMicrophoneConnected = false
+                    self.stopMicrophoneModeMonitoring()
                     self.connectedDeviceID = nil
                     self.connectionLatency = nil
                     // The earlier refresh skipped selection while the mic was
@@ -5483,6 +5626,7 @@ final class MacAppModel: ObservableObject {
                         self.microphoneTestTask = nil
                         self.recorder.disconnectSynchronously()
                         self.isMicrophoneConnected = false
+                        self.stopMicrophoneModeMonitoring()
                         self.connectedDeviceID = nil
                         self.connectionLatency = nil
                         self.inputLevel = 0

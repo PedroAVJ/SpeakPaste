@@ -192,6 +192,19 @@ private struct MacAudioHUDSettings: View {
                 Text("Microphone selection, fallback order, input gain, and the 3-second record-and-playback test live in the main window, along with its live level meter and result.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                HStack {
+                    Text("System microphone mode")
+                    Spacer()
+                    Button("Choose…") { model.showSystemMicrophoneModes() }
+                }
+                Text(model.microphoneModeStatus.summary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("You choose Voice Isolation in macOS. SpeakPaste never changes that preference; when the iPhone is selected, it uses a compatible Voice Processing route and refuses to claim Voice Isolation unless macOS reports it active.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .formStyle(.grouped)

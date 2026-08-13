@@ -74,7 +74,7 @@ enum MacAudioDeviceCatalog {
     }
 }
 
-private enum MacCoreAudioTransport {
+enum MacCoreAudioTransport {
     /// Maps each input device's UID — the same string AVCaptureDevice reports as
     /// `uniqueID` — to its Core Audio transport type.
     static func transportTypesByDeviceUID() -> [String: UInt32] {
@@ -105,7 +105,83 @@ private enum MacCoreAudioTransport {
         return result
     }
 
-    private static func allDeviceIDs() -> [AudioObjectID] {
+    static func deviceID(forUID uid: String) -> AudioObjectID? {
+        allDeviceIDs().first {
+            stringProperty(kAudioDevicePropertyDeviceUID, of: $0) == uid
+        }
+    }
+
+    static func defaultOutputDeviceID() -> AudioObjectID? {
+        systemDeviceID(for: kAudioHardwarePropertyDefaultOutputDevice)
+    }
+
+    static func deviceUID(for deviceID: AudioObjectID) -> String? {
+        stringProperty(kAudioDevicePropertyDeviceUID, of: deviceID)
+    }
+
+    static func inputChannelCount(for deviceID: AudioObjectID) -> UInt32? {
+        channelCount(for: deviceID, scope: kAudioDevicePropertyScopeInput)
+    }
+
+    static func outputChannelCount(for deviceID: AudioObjectID) -> UInt32? {
+        channelCount(for: deviceID, scope: kAudioDevicePropertyScopeOutput)
+    }
+
+    /// Aggregate stream order is security-relevant for capture: a later
+    /// full-duplex output subdevice may contribute its own microphone channels.
+    /// Read the order Core Audio actually activated instead of trusting only the
+    /// creation dictionary we supplied.
+    static func aggregateSubDeviceUIDs(for deviceID: AudioObjectID) -> [String]? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioAggregateDevicePropertyFullSubDeviceList,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var value: Unmanaged<CFArray>?
+        var dataSize = UInt32(MemoryLayout<Unmanaged<CFArray>?>.size)
+        guard
+            AudioObjectGetPropertyData(
+                deviceID,
+                &address,
+                0,
+                nil,
+                &dataSize,
+                &value
+            ) == noErr
+        else {
+            return nil
+        }
+        guard let value else { return nil }
+        return value.takeRetainedValue() as? [String]
+    }
+
+    private static func systemDeviceID(
+        for selector: AudioObjectPropertySelector
+    ) -> AudioObjectID? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: selector,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var value = AudioObjectID(kAudioObjectUnknown)
+        var dataSize = UInt32(MemoryLayout<AudioObjectID>.size)
+        guard
+            AudioObjectGetPropertyData(
+                AudioObjectID(kAudioObjectSystemObject),
+                &address,
+                0,
+                nil,
+                &dataSize,
+                &value
+            ) == noErr,
+            value != kAudioObjectUnknown
+        else {
+            return nil
+        }
+        return value
+    }
+
+    static func allDeviceIDs() -> [AudioObjectID] {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDevices,
             mScope: kAudioObjectPropertyScopeGlobal,
@@ -142,7 +218,7 @@ private enum MacCoreAudioTransport {
         return deviceIDs
     }
 
-    private static func stringProperty(
+    static func stringProperty(
         _ selector: AudioObjectPropertySelector,
         of deviceID: AudioObjectID
     ) -> String? {
@@ -199,5 +275,51 @@ private enum MacCoreAudioTransport {
             return nil
         }
         return min(1, max(0, value))
+    }
+
+    private static func channelCount(
+        for deviceID: AudioObjectID,
+        scope: AudioObjectPropertyScope
+    ) -> UInt32? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreamConfiguration,
+            mScope: scope,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var dataSize: UInt32 = 0
+        guard
+            AudioObjectGetPropertyDataSize(
+                deviceID,
+                &address,
+                0,
+                nil,
+                &dataSize
+            ) == noErr,
+            dataSize >= UInt32(MemoryLayout<AudioBufferList>.size)
+        else {
+            return nil
+        }
+
+        let raw = UnsafeMutableRawPointer.allocate(
+            byteCount: Int(dataSize),
+            alignment: MemoryLayout<AudioBufferList>.alignment
+        )
+        defer { raw.deallocate() }
+        guard
+            AudioObjectGetPropertyData(
+                deviceID,
+                &address,
+                0,
+                nil,
+                &dataSize,
+                raw
+            ) == noErr
+        else {
+            return nil
+        }
+        let bufferList = raw.assumingMemoryBound(to: AudioBufferList.self)
+        return UnsafeMutableAudioBufferListPointer(bufferList).reduce(0) {
+            $0 + $1.mNumberChannels
+        }
     }
 }

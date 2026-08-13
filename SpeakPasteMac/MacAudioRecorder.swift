@@ -1,4 +1,6 @@
 @preconcurrency import AVFoundation
+import AudioToolbox
+import CoreAudio
 import Foundation
 
 enum MacAudioRecorderError: LocalizedError {
@@ -16,6 +18,13 @@ enum MacAudioRecorderError: LocalizedError {
     case audioStreamSilent
     case audioMonitorUnavailable
     case audioStreamStalled
+    case voiceProcessingUnavailable
+    case privateVoiceRouteUnavailable
+    case otherAudioDuckingUnavailable
+    case microphoneModeNotActive(
+        preferred: MacSystemMicrophoneMode,
+        active: MacSystemMicrophoneMode
+    )
 
     var errorDescription: String? {
         switch self {
@@ -47,6 +56,14 @@ enum MacAudioRecorderError: LocalizedError {
             "macOS would not let SpeakPaste watch the microphone's audio stream, so it cannot tell when the iPhone is really ready. Recording was not started."
         case .audioStreamStalled:
             "The microphone stopped sending audio partway through. SpeakPaste kept what it had already recorded."
+        case .voiceProcessingUnavailable:
+            "macOS could not start the Voice Processing I/O route required for microphone modes. SpeakPaste reset the connection; reconnect the iPhone and try again."
+        case .privateVoiceRouteUnavailable:
+            "macOS could not create a private Voice Processing route for the selected iPhone microphone. No system audio device was changed; reconnect the iPhone and try again."
+        case .otherAudioDuckingUnavailable:
+            "Recording is still live, but macOS could not start voice-aware audio ducking for this microphone. Other audio may stay at full volume."
+        case let .microphoneModeNotActive(preferred, active):
+            "macOS has \(preferred.title) selected, but the iPhone route activated \(active.title). SpeakPaste released the microphone instead of recording without the selected mode."
         }
     }
 }
@@ -122,7 +139,7 @@ private final class MacSampleFlowCounter: @unchecked Sendable {
     }
 }
 
-final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
+private final class MacCaptureSessionAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
     AVCaptureAudioDataOutputSampleBufferDelegate, @unchecked Sendable {
     private let captureQueue = DispatchQueue(label: "com.example.speakpaste.capture")
     private let sampleQueue = DispatchQueue(label: "com.example.speakpaste.samples")
@@ -1045,5 +1062,1517 @@ final class MacAudioRecorder: NSObject, AVCaptureFileOutputRecordingDelegate,
                 )
             )
         }
+    }
+}
+
+// MARK: - Continuity Voice Processing I/O
+
+/// Selects the recorder without consulting a localized device name. The Mac's
+/// built-in microphone keeps the mature AVCaptureSession implementation;
+/// Continuity is the only recording source routed through AUVoiceIO for Mic
+/// Modes. A short-lived VPIO companion supplies PRO-26 ducking on the Mac path
+/// without changing its recording and recovery behavior.
+enum MacAudioRecorderBackendChoice: Equatable, Sendable {
+    case captureSession
+    case voiceProcessing
+
+    static func choose(isContinuityDevice: Bool) -> Self {
+        isContinuityDevice ? .voiceProcessing : .captureSession
+    }
+}
+
+/// One nonpersistent, process-private full-duplex device. Voice Processing I/O
+/// accepts one current device, while Pedro's selected Continuity microphone is
+/// input-only and the current speaker is a different output device. Combining
+/// them privately lets the I/O unit use both without changing either global
+/// system default.
+private final class MacVoiceProcessingRoute {
+    let deviceID: AudioObjectID
+    /// Nil for a direct full-duplex device. A private aggregate carries an
+    /// explicit map because its output subdevice may expose a second microphone.
+    let selectedInputChannelCount: UInt32?
+    private let isPrivateAggregate: Bool
+    private var isDestroyed = false
+
+    private init(
+        deviceID: AudioObjectID,
+        selectedInputChannelCount: UInt32?,
+        isPrivateAggregate: Bool
+    ) {
+        self.deviceID = deviceID
+        self.selectedInputChannelCount = selectedInputChannelCount
+        self.isPrivateAggregate = isPrivateAggregate
+    }
+
+    static func create(selectedInputUID: String) throws -> MacVoiceProcessingRoute {
+        guard
+            let inputDeviceID = MacCoreAudioTransport.deviceID(forUID: selectedInputUID),
+            let outputDeviceID = MacCoreAudioTransport.defaultOutputDeviceID(),
+            let outputUID = MacCoreAudioTransport.deviceUID(for: outputDeviceID),
+            let inputChannelCount = MacCoreAudioTransport.inputChannelCount(
+                for: inputDeviceID
+            ),
+            let outputChannelCount = MacCoreAudioTransport.outputChannelCount(
+                for: outputDeviceID
+            ),
+            let plan = MacVoiceProcessingRoutePlan.choose(
+                selectedInputUID: selectedInputUID,
+                selectedInputChannelCount: inputChannelCount,
+                currentOutputUID: outputUID,
+                currentOutputChannelCount: outputChannelCount
+            )
+        else {
+            throw MacAudioRecorderError.privateVoiceRouteUnavailable
+        }
+
+        switch plan {
+        case .directDevice:
+            guard inputDeviceID == outputDeviceID else {
+                throw MacAudioRecorderError.privateVoiceRouteUnavailable
+            }
+            return MacVoiceProcessingRoute(
+                deviceID: inputDeviceID,
+                selectedInputChannelCount: nil,
+                isPrivateAggregate: false
+            )
+        case .privateAggregate:
+            break
+        }
+
+        let routeUID = "com.example.speakpaste.private-vpio.\(UUID().uuidString)"
+        let description: [String: Any] = [
+            kAudioAggregateDeviceUIDKey: routeUID,
+            kAudioAggregateDeviceNameKey: "SpeakPaste Private Voice Route",
+            kAudioAggregateDeviceSubDeviceListKey: [
+                [
+                    kAudioSubDeviceUIDKey: selectedInputUID,
+                    kAudioSubDeviceDriftCompensationKey: true,
+                    kAudioSubDeviceDriftCompensationQualityKey:
+                        kAudioAggregateDriftCompensationMaxQuality,
+                ],
+                [kAudioSubDeviceUIDKey: outputUID],
+            ],
+            kAudioAggregateDeviceMainSubDeviceKey: outputUID,
+            kAudioAggregateDeviceIsPrivateKey: true,
+            kAudioAggregateDeviceIsStackedKey: false,
+        ]
+
+        var aggregateID = AudioObjectID(kAudioObjectUnknown)
+        let status = AudioHardwareCreateAggregateDevice(
+            description as CFDictionary,
+            &aggregateID
+        )
+        guard status == noErr, aggregateID != kAudioObjectUnknown else {
+            throw MacAudioRecorderError.privateVoiceRouteUnavailable
+        }
+
+        // Subdevice order defines aggregate stream order. Validate that Core
+        // Audio kept the selected input first and that both directions really
+        // exist before binding AUVoiceIO. This fails closed instead of possibly
+        // recording a full-duplex output device's microphone (for example
+        // AirPods) when the user selected the iPhone.
+        guard
+            MacCoreAudioTransport.aggregateSubDeviceUIDs(for: aggregateID)
+                == [selectedInputUID, outputUID],
+            let aggregateInputChannels = MacCoreAudioTransport.inputChannelCount(
+                for: aggregateID
+            ),
+            aggregateInputChannels >= inputChannelCount,
+            let aggregateOutputChannels = MacCoreAudioTransport.outputChannelCount(
+                for: aggregateID
+            ),
+            aggregateOutputChannels >= outputChannelCount
+        else {
+            _ = AudioHardwareDestroyAggregateDevice(aggregateID)
+            throw MacAudioRecorderError.privateVoiceRouteUnavailable
+        }
+        return MacVoiceProcessingRoute(
+            deviceID: aggregateID,
+            selectedInputChannelCount: inputChannelCount,
+            isPrivateAggregate: true
+        )
+    }
+
+    func destroy() {
+        guard isPrivateAggregate, !isDestroyed else { return }
+        for _ in 0..<3 {
+            if AudioHardwareDestroyAggregateDevice(deviceID) == noErr {
+                isDestroyed = true
+                return
+            }
+        }
+    }
+
+    deinit {
+        destroy()
+    }
+}
+
+enum MacAudioLevelMath {
+    static func rootMeanSquare(_ samples: [Float]) -> Float {
+        guard !samples.isEmpty else { return 0 }
+        let sumOfSquares = samples.reduce(0.0) { partial, sample in
+            partial + Double(sample) * Double(sample)
+        }
+        return Float(sqrt(sumOfSquares / Double(samples.count)))
+    }
+
+    static func smoothedRMS(previous: Float, current: Float) -> Float {
+        min(1, max(current, previous * 0.72))
+    }
+}
+
+private enum MacVoiceProcessingIO {
+    static func bind(
+        audioUnit: AudioUnit,
+        to route: MacVoiceProcessingRoute
+    ) throws {
+        let deviceID = route.deviceID
+        var requestedDeviceID = deviceID
+        let setStatus = AudioUnitSetProperty(
+            audioUnit,
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global,
+            0,
+            &requestedDeviceID,
+            UInt32(MemoryLayout<AudioObjectID>.size)
+        )
+        guard setStatus == noErr else {
+            throw MacAudioRecorderError.privateVoiceRouteUnavailable
+        }
+
+        var actualDeviceID = AudioObjectID(kAudioObjectUnknown)
+        var dataSize = UInt32(MemoryLayout<AudioObjectID>.size)
+        let getStatus = AudioUnitGetProperty(
+            audioUnit,
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global,
+            0,
+            &actualDeviceID,
+            &dataSize
+        )
+        guard getStatus == noErr, actualDeviceID == deviceID else {
+            throw MacAudioRecorderError.privateVoiceRouteUnavailable
+        }
+
+        guard let selectedInputChannelCount = route.selectedInputChannelCount else {
+            return
+        }
+
+        var inputFormat = AudioStreamBasicDescription()
+        var formatSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        let formatStatus = AudioUnitGetProperty(
+            audioUnit,
+            kAudioUnitProperty_StreamFormat,
+            kAudioUnitScope_Output,
+            1,
+            &inputFormat,
+            &formatSize
+        )
+        guard
+            formatStatus == noErr,
+            let channelMap = MacSelectedInputChannelMap.make(
+                selectedInputChannelCount: selectedInputChannelCount,
+                destinationChannelCount: inputFormat.mChannelsPerFrame
+            )
+        else {
+            throw MacAudioRecorderError.privateVoiceRouteUnavailable
+        }
+
+        var requestedMap = channelMap
+        let mapSize = UInt32(requestedMap.count * MemoryLayout<Int32>.size)
+        let mapStatus = requestedMap.withUnsafeMutableBytes { bytes in
+            AudioUnitSetProperty(
+                audioUnit,
+                kAudioOutputUnitProperty_ChannelMap,
+                kAudioUnitScope_Output,
+                1,
+                bytes.baseAddress!,
+                mapSize
+            )
+        }
+        guard mapStatus == noErr else {
+            throw MacAudioRecorderError.privateVoiceRouteUnavailable
+        }
+
+        var actualMap = [Int32](repeating: -1, count: requestedMap.count)
+        var actualMapSize = mapSize
+        let verifyStatus = actualMap.withUnsafeMutableBytes { bytes in
+            AudioUnitGetProperty(
+                audioUnit,
+                kAudioOutputUnitProperty_ChannelMap,
+                kAudioUnitScope_Output,
+                1,
+                bytes.baseAddress!,
+                &actualMapSize
+            )
+        }
+        guard
+            verifyStatus == noErr,
+            actualMapSize == mapSize,
+            actualMap == requestedMap
+        else {
+            throw MacAudioRecorderError.privateVoiceRouteUnavailable
+        }
+    }
+}
+
+/// The built-in Mac path deliberately keeps AVCaptureSession as its recorder.
+/// While the microphone is actively recording, this process-local VPIO session
+/// supplies Apple's voice-activity signal for advanced ducking and discards its
+/// own input tap. It never changes a system default and owns no output media.
+private final class MacVoiceProcessingDuckingSession: @unchecked Sendable {
+    private let queue = DispatchQueue(
+        label: "com.example.speakpaste.voice-processing-ducking"
+    )
+    private var engine: AVAudioEngine?
+    private var inputNode: AVAudioInputNode?
+    private var route: MacVoiceProcessingRoute?
+    private var activeDeviceUID: String?
+    private var tapInstalled = false
+    private var originalConfiguration:
+        AVAudioVoiceProcessingOtherAudioDuckingConfiguration?
+
+    func setEnabled(_ enabled: Bool, selectedInputUID: String?) async throws {
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Void, Error>) in
+            queue.async { [weak self] in
+                guard let self else {
+                    continuation.resume(
+                        throwing: MacAudioRecorderError.otherAudioDuckingUnavailable
+                    )
+                    return
+                }
+                if !enabled {
+                    teardown()
+                    continuation.resume()
+                    return
+                }
+                guard let selectedInputUID else {
+                    continuation.resume(
+                        throwing: MacAudioRecorderError.otherAudioDuckingUnavailable
+                    )
+                    return
+                }
+                if activeDeviceUID == selectedInputUID,
+                   engine?.isRunning == true,
+                   let inputNode,
+                   inputNode.isVoiceProcessingEnabled {
+                    do {
+                        try applyEnabledConfiguration(to: inputNode)
+                        continuation.resume()
+                    } catch {
+                        teardown()
+                        continuation.resume(
+                            throwing: MacAudioRecorderError.otherAudioDuckingUnavailable
+                        )
+                    }
+                    return
+                }
+
+                teardown()
+                do {
+                    try configure(selectedInputUID: selectedInputUID)
+                    continuation.resume()
+                } catch {
+                    teardown()
+                    continuation.resume(
+                        throwing: MacAudioRecorderError.otherAudioDuckingUnavailable
+                    )
+                }
+            }
+        }
+    }
+
+    func disconnect() {
+        queue.async { [weak self] in self?.teardown() }
+    }
+
+    func disconnectAndWait() async {
+        await withCheckedContinuation { continuation in
+            queue.async { [weak self] in
+                self?.teardown()
+                continuation.resume()
+            }
+        }
+    }
+
+    func disconnectSynchronously() {
+        queue.sync { teardown() }
+    }
+
+    private func configure(selectedInputUID: String) throws {
+        let route = try MacVoiceProcessingRoute.create(
+            selectedInputUID: selectedInputUID
+        )
+        let engine = AVAudioEngine()
+        let inputNode = engine.inputNode
+        var didInstallTap = false
+        var originalConfiguration:
+            AVAudioVoiceProcessingOtherAudioDuckingConfiguration?
+
+        do {
+            try inputNode.setVoiceProcessingEnabled(true)
+            guard inputNode.isVoiceProcessingEnabled,
+                  let audioUnit = inputNode.audioUnit
+            else {
+                throw MacAudioRecorderError.otherAudioDuckingUnavailable
+            }
+            try MacVoiceProcessingIO.bind(audioUnit: audioUnit, to: route)
+
+            let format = inputNode.outputFormat(forBus: 0)
+            guard format.sampleRate > 0, format.channelCount > 0 else {
+                throw MacAudioRecorderError.otherAudioDuckingUnavailable
+            }
+            inputNode.installTap(
+                onBus: 0,
+                bufferSize: 1024,
+                format: format
+            ) { _, _ in
+                // Intentionally discarded. Pulling the VPIO input keeps voice
+                // activity analysis live without becoming a second recorder.
+            }
+            didInstallTap = true
+
+            let original = inputNode.voiceProcessingOtherAudioDuckingConfiguration
+            originalConfiguration = original
+            try applyEnabledConfiguration(to: inputNode)
+            engine.prepare()
+            try engine.start()
+            guard engine.isRunning else {
+                throw MacAudioRecorderError.otherAudioDuckingUnavailable
+            }
+
+            self.engine = engine
+            self.inputNode = inputNode
+            self.route = route
+            activeDeviceUID = selectedInputUID
+            tapInstalled = true
+            originalConfiguration = original
+        } catch {
+            if let originalConfiguration {
+                inputNode.voiceProcessingOtherAudioDuckingConfiguration =
+                    originalConfiguration
+            }
+            engine.stop()
+            if didInstallTap { inputNode.removeTap(onBus: 0) }
+            route.destroy()
+            throw error
+        }
+    }
+
+    private func applyEnabledConfiguration(to inputNode: AVAudioInputNode) throws {
+        inputNode.voiceProcessingOtherAudioDuckingConfiguration = .init(
+            enableAdvancedDucking: true,
+            duckingLevel: .mid
+        )
+        let applied = inputNode.voiceProcessingOtherAudioDuckingConfiguration
+        guard applied.enableAdvancedDucking.boolValue,
+              applied.duckingLevel == .mid
+        else {
+            throw MacAudioRecorderError.otherAudioDuckingUnavailable
+        }
+    }
+
+    private func teardown() {
+        if let inputNode,
+           inputNode.isVoiceProcessingEnabled,
+           let originalConfiguration {
+            inputNode.voiceProcessingOtherAudioDuckingConfiguration =
+                originalConfiguration
+        }
+        engine?.stop()
+        if tapInstalled { inputNode?.removeTap(onBus: 0) }
+        let staleRoute = route
+        engine = nil
+        inputNode = nil
+        route = nil
+        activeDeviceUID = nil
+        tapInstalled = false
+        originalConfiguration = nil
+        staleRoute?.destroy()
+    }
+}
+
+private final class MacVoiceProcessingSampleFlow: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedCount: UInt64 = 0
+    private var storedAudibleCount: UInt64 = 0
+    private var storedRMS: Float = 0
+
+    func record(buffer: AVAudioPCMBuffer) {
+        var sumOfSquares = 0.0
+        var sampleCount = 0
+        if let channels = buffer.floatChannelData {
+            for channel in 0..<Int(buffer.format.channelCount) {
+                let samples = channels[channel]
+                for index in 0..<Int(buffer.frameLength) {
+                    let sample = Double(samples[index])
+                    sumOfSquares += sample * sample
+                    sampleCount += 1
+                }
+            }
+        }
+        let rms = sampleCount > 0
+            ? Float(sqrt(sumOfSquares / Double(sampleCount)))
+            : 0
+
+        lock.lock()
+        storedCount &+= 1
+        if MacAudibleReadinessPolicy.isAudible(rms: rms) {
+            storedAudibleCount &+= 1
+        }
+        storedRMS = MacAudioLevelMath.smoothedRMS(
+            previous: storedRMS,
+            current: rms
+        )
+        lock.unlock()
+    }
+
+    func reset() {
+        lock.lock()
+        storedCount = 0
+        storedAudibleCount = 0
+        storedRMS = 0
+        lock.unlock()
+    }
+
+    var count: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedCount
+    }
+
+    var audibleCount: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedAudibleCount
+    }
+
+    var normalizedLevel: Double {
+        lock.lock()
+        defer { lock.unlock() }
+        return Double(min(1, max(0, storedRMS)))
+    }
+}
+
+private final class MacVoiceProcessingFileSink: @unchecked Sendable {
+    struct WriteReceipt {
+        let wroteFirstFrames: Bool
+        let error: Error?
+    }
+
+    struct FinishReceipt {
+        let url: URL?
+        let frameCount: AVAudioFramePosition
+        let error: Error?
+    }
+
+    private let lock = NSLock()
+    private var file: AVAudioFile?
+    private var url: URL?
+    private var frameCount: AVAudioFramePosition = 0
+    private var storedError: Error?
+    private var surfacedError = false
+
+    func start(url: URL, format: AVAudioFormat) throws {
+        let file = try AVAudioFile(
+            forWriting: url,
+            settings: format.settings,
+            commonFormat: format.commonFormat,
+            interleaved: format.isInterleaved
+        )
+        lock.lock()
+        self.file = file
+        self.url = url
+        frameCount = 0
+        storedError = nil
+        surfacedError = false
+        lock.unlock()
+    }
+
+    func consume(_ buffer: AVAudioPCMBuffer) -> WriteReceipt {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let file, storedError == nil else {
+            if let storedError, !surfacedError {
+                surfacedError = true
+                return WriteReceipt(wroteFirstFrames: false, error: storedError)
+            }
+            return WriteReceipt(wroteFirstFrames: false, error: nil)
+        }
+
+        let wasEmpty = frameCount == 0
+        do {
+            try file.write(from: buffer)
+            frameCount += AVAudioFramePosition(buffer.frameLength)
+            return WriteReceipt(
+                wroteFirstFrames: wasEmpty && buffer.frameLength > 0,
+                error: nil
+            )
+        } catch {
+            storedError = error
+            surfacedError = true
+            return WriteReceipt(wroteFirstFrames: false, error: error)
+        }
+    }
+
+    func finish() -> FinishReceipt {
+        lock.lock()
+        let receipt = FinishReceipt(
+            url: url,
+            frameCount: frameCount,
+            error: storedError
+        )
+        // Releasing AVAudioFile finalizes the WAV header synchronously before
+        // the capture queue hands this URL to recovery or transcription.
+        file = nil
+        url = nil
+        frameCount = 0
+        storedError = nil
+        surfacedError = false
+        lock.unlock()
+        return receipt
+    }
+}
+
+/// Continuity-only capture through Apple's Voice Processing I/O unit. This is
+/// the Core Audio opt-in Apple requires for system Mic Modes; user selection
+/// remains in Control Center and is verified through `activeMicrophoneMode`.
+private final class MacVoiceProcessingAudioRecorder: @unchecked Sendable {
+    private let captureQueue = DispatchQueue(
+        label: "com.example.speakpaste.voice-processing"
+    )
+    private let sampleFlow = MacVoiceProcessingSampleFlow()
+    private let fileSink = MacVoiceProcessingFileSink()
+
+    private var engine: AVAudioEngine?
+    private var inputNode: AVAudioInputNode?
+    private var route: MacVoiceProcessingRoute?
+    private var activeDeviceUID: String?
+    private var engineObserver: NSObjectProtocol?
+    private var sessionGeneration: UInt64 = 0
+    private var tapFormat: AVAudioFormat?
+    private var tapInstalled = false
+    private var originalDuckingConfiguration:
+        AVAudioVoiceProcessingOtherAudioDuckingConfiguration?
+    private var otherAudioDuckingEnabled = false
+
+    private var segmentURL: URL?
+    private var segmentDidStart = false
+    private var startContinuation: CheckedContinuation<URL, Error>?
+    private var startTimeoutWorkItem: DispatchWorkItem?
+    private var pendingRecordingError: Error?
+    private var recordingFailureHandler: (@Sendable (Error, URL?) -> Void)?
+    private var stopping = false
+
+    private let readinessTimeout: TimeInterval = 18
+    private let recordingStartTimeout: TimeInterval = 8
+    private static let requiredSteadyWindows = 6
+
+    func setRecordingFailureHandler(
+        _ handler: @escaping @Sendable (Error, URL?) -> Void
+    ) {
+        captureQueue.async { [weak self] in
+            self?.recordingFailureHandler = handler
+        }
+    }
+
+    /// Integration hook for PRO-26. The original Voice Processing configuration
+    /// is restored before every stop, pause, error, cancellation, or quit.
+    func setOtherAudioDucking(enabled: Bool) async throws {
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Void, Error>) in
+            captureQueue.async { [weak self] in
+                guard let self else {
+                    continuation.resume(
+                        throwing: MacAudioRecorderError.otherAudioDuckingUnavailable
+                    )
+                    return
+                }
+                guard !enabled || (
+                    engine?.isRunning == true
+                        && inputNode?.isVoiceProcessingEnabled == true
+                ) else {
+                    continuation.resume(
+                        throwing: MacAudioRecorderError.otherAudioDuckingUnavailable
+                    )
+                    return
+                }
+                otherAudioDuckingEnabled = enabled
+                do {
+                    try applyOtherAudioDucking(enabled: enabled)
+                    continuation.resume()
+                } catch {
+                    otherAudioDuckingEnabled = false
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    var normalizedLevel: Double { sampleFlow.normalizedLevel }
+    var deliveredSampleCount: UInt64 { sampleFlow.count }
+
+    func connect(deviceID: String) async throws -> Bool {
+        try await ensurePermission()
+        try Task.checkCancellation()
+        let receipt = try await establishSession(deviceUID: deviceID)
+        do {
+            try await waitForSteadyAudioAndSelectedMode(
+                timeout: readinessTimeout,
+                generation: receipt.generation
+            )
+        } catch {
+            await releaseSession(with: error, generation: receipt.generation)
+            throw error
+        }
+        return receipt.wasCreated
+    }
+
+    private struct ConnectionReceipt: Sendable {
+        let wasCreated: Bool
+        let generation: UInt64
+    }
+
+    private func establishSession(deviceUID: String) async throws -> ConnectionReceipt {
+        try await withCheckedThrowingContinuation { continuation in
+            captureQueue.async { [weak self] in
+                guard let self else {
+                    continuation.resume(
+                        throwing: MacAudioRecorderError.connectionFailed
+                    )
+                    return
+                }
+                do {
+                    if
+                        activeDeviceUID == deviceUID,
+                        engine?.isRunning == true,
+                        route != nil,
+                        segmentURL == nil,
+                        startContinuation == nil,
+                        pendingRecordingError == nil
+                    {
+                        continuation.resume(
+                            returning: ConnectionReceipt(
+                                wasCreated: false,
+                                generation: sessionGeneration
+                            )
+                        )
+                        return
+                    }
+                    guard segmentURL == nil, startContinuation == nil else {
+                        throw MacAudioRecorderError.recorderBusy
+                    }
+
+                    finishSession(removingSegment: true)
+                    try configureAndConnect(deviceUID: deviceUID)
+                    continuation.resume(
+                        returning: ConnectionReceipt(
+                            wasCreated: true,
+                            generation: sessionGeneration
+                        )
+                    )
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    private func waitForSteadyAudioAndSelectedMode(
+        timeout: TimeInterval,
+        generation: UInt64
+    ) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(timeout))
+        var lastCount = sampleFlow.count
+        var lastAudibleCount = sampleFlow.audibleCount
+        var steadyWindows = 0
+        var audibleWindows = 0
+        var lastPreferred = MacSystemMicrophoneMode(
+            AVCaptureDevice.preferredMicrophoneMode
+        )
+        var lastActive = MacSystemMicrophoneMode(
+            AVCaptureDevice.activeMicrophoneMode
+        )
+
+        while true {
+            try Task.checkCancellation()
+            if let failure = captureQueue.sync(execute: {
+                currentSessionFailure(generation: generation)
+            }) {
+                throw failure
+            }
+
+            lastPreferred = MacSystemMicrophoneMode(
+                AVCaptureDevice.preferredMicrophoneMode
+            )
+            lastActive = MacSystemMicrophoneMode(
+                AVCaptureDevice.activeMicrophoneMode
+            )
+            if MacAudibleReadinessPolicy.isReady(
+                steadyWindows: steadyWindows,
+                audibleWindows: audibleWindows,
+                requiredSteadyWindows: Self.requiredSteadyWindows
+            ),
+               MacMicrophoneModeReadinessPolicy.permitsRecording(
+                   preferred: lastPreferred,
+                   active: lastActive
+               ) {
+                return
+            }
+            guard clock.now < deadline else {
+                if !MacMicrophoneModeReadinessPolicy.permitsRecording(
+                    preferred: lastPreferred,
+                    active: lastActive
+                ) {
+                    throw MacAudioRecorderError.microphoneModeNotActive(
+                        preferred: lastPreferred,
+                        active: lastActive
+                    )
+                }
+                throw lastCount > 0 && lastAudibleCount == 0
+                    ? MacAudioRecorderError.audioStreamSilent
+                    : MacAudioRecorderError.audioStreamNotReady
+            }
+
+            try await Task.sleep(for: .milliseconds(30))
+            let count = sampleFlow.count
+            let audibleCount = sampleFlow.audibleCount
+            steadyWindows = count > lastCount ? steadyWindows + 1 : 0
+            if audibleCount > lastAudibleCount {
+                audibleWindows += 1
+            }
+            lastCount = count
+            lastAudibleCount = audibleCount
+        }
+    }
+
+    private func currentSessionFailure(generation: UInt64) -> Error? {
+        guard
+            sessionGeneration == generation,
+            engine?.isRunning == true,
+            route != nil
+        else {
+            return MacAudioRecorderError.connectionFailed
+        }
+        return nil
+    }
+
+    private func releaseSession(with error: Error, generation: UInt64) async {
+        await withCheckedContinuation { continuation in
+            captureQueue.async { [weak self] in
+                if let self, sessionGeneration == generation {
+                    _ = failSession(
+                        with: error,
+                        preservingPartialRecording: false
+                    )
+                }
+                continuation.resume()
+            }
+        }
+    }
+
+    func startSegment() async throws -> URL {
+        try await withCheckedThrowingContinuation { continuation in
+            captureQueue.async { [weak self] in
+                guard let self else {
+                    continuation.resume(
+                        throwing: MacAudioRecorderError.connectionFailed
+                    )
+                    return
+                }
+                guard
+                    engine?.isRunning == true,
+                    inputNode?.isVoiceProcessingEnabled == true,
+                    let tapFormat
+                else {
+                    continuation.resume(
+                        throwing: MacAudioRecorderError.voiceProcessingUnavailable
+                    )
+                    return
+                }
+                guard
+                    segmentURL == nil,
+                    startContinuation == nil,
+                    pendingRecordingError == nil
+                else {
+                    continuation.resume(throwing: MacAudioRecorderError.recorderBusy)
+                    return
+                }
+
+                let preferred = MacSystemMicrophoneMode(
+                    AVCaptureDevice.preferredMicrophoneMode
+                )
+                let active = MacSystemMicrophoneMode(
+                    AVCaptureDevice.activeMicrophoneMode
+                )
+                guard MacMicrophoneModeReadinessPolicy.permitsRecording(
+                    preferred: preferred,
+                    active: active
+                ) else {
+                    continuation.resume(
+                        throwing: MacAudioRecorderError.microphoneModeNotActive(
+                            preferred: preferred,
+                            active: active
+                        )
+                    )
+                    return
+                }
+
+                let url = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("SpeakPaste-\(UUID().uuidString)")
+                    .appendingPathExtension("wav")
+                try? FileManager.default.removeItem(at: url)
+
+                do {
+                    try fileSink.start(url: url, format: tapFormat)
+                    guard MacActiveCaptureRecovery.makeRecordingPrivate(at: url) else {
+                        _ = fileSink.finish()
+                        try? FileManager.default.removeItem(at: url)
+                        throw MacAudioRecorderError.recordingFileProtectionFailed
+                    }
+                } catch {
+                    continuation.resume(throwing: error)
+                    return
+                }
+
+                segmentURL = url
+                segmentDidStart = false
+                startContinuation = continuation
+                stopping = false
+                scheduleStartTimeout(url: url, generation: sessionGeneration)
+            }
+        }
+    }
+
+    func stop() async throws -> MacRecordedSegment {
+        try await withCheckedThrowingContinuation { continuation in
+            captureQueue.async { [weak self] in
+                guard let self else {
+                    continuation.resume(
+                        throwing: MacAudioRecorderError.connectionFailed
+                    )
+                    return
+                }
+                if let pendingRecordingError {
+                    self.pendingRecordingError = nil
+                    continuation.resume(throwing: pendingRecordingError)
+                    return
+                }
+                guard
+                    let url = segmentURL,
+                    segmentDidStart,
+                    startContinuation == nil,
+                    !stopping
+                else {
+                    continuation.resume(
+                        throwing: MacAudioRecorderError.noActiveRecording
+                    )
+                    return
+                }
+
+                stopping = true
+                stopEngineAndRemoveTap()
+                let finish = fileSink.finish()
+                cancelStartTimeout()
+                segmentURL = nil
+                segmentDidStart = false
+                stopping = false
+                clearEngineAndRoute()
+
+                if let error = finish.error {
+                    if isPlausiblePartialWAV(at: url), finish.frameCount > 0 {
+                        continuation.resume(
+                            throwing: MacAudioRecorderSalvagedFailure(
+                                underlying: error,
+                                audioURL: url
+                            )
+                        )
+                    } else {
+                        try? FileManager.default.removeItem(at: url)
+                        continuation.resume(throwing: error)
+                    }
+                    return
+                }
+                guard
+                    finish.url == url,
+                    finish.frameCount > 0,
+                    isPlausiblePartialWAV(at: url)
+                else {
+                    try? FileManager.default.removeItem(at: url)
+                    continuation.resume(
+                        throwing: MacAudioRecorderError.connectionFailed
+                    )
+                    return
+                }
+                continuation.resume(returning: MacRecordedSegment(url: url))
+            }
+        }
+    }
+
+    func disconnect() {
+        captureQueue.async { [weak self] in
+            self?.finishSession(removingSegment: true)
+        }
+    }
+
+    func disconnectAndWait() async {
+        await withCheckedContinuation { continuation in
+            captureQueue.async { [weak self] in
+                self?.finishSession(removingSegment: true)
+                continuation.resume()
+            }
+        }
+    }
+
+    func disconnectSynchronously() {
+        captureQueue.sync { finishSession(removingSegment: true) }
+    }
+
+    private func ensurePermission() async throws {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            return
+        case .notDetermined:
+            guard await AVCaptureDevice.requestAccess(for: .audio) else {
+                throw MacAudioRecorderError.microphonePermissionDenied
+            }
+        default:
+            throw MacAudioRecorderError.microphonePermissionDenied
+        }
+    }
+
+    private func configureAndConnect(deviceUID: String) throws {
+        let route = try MacVoiceProcessingRoute.create(
+            selectedInputUID: deviceUID
+        )
+        let engine = AVAudioEngine()
+        let inputNode = engine.inputNode
+        var didInstallTap = false
+
+        do {
+            try inputNode.setVoiceProcessingEnabled(true)
+            guard inputNode.isVoiceProcessingEnabled,
+                  let audioUnit = inputNode.audioUnit
+            else {
+                throw MacAudioRecorderError.voiceProcessingUnavailable
+            }
+            try MacVoiceProcessingIO.bind(audioUnit: audioUnit, to: route)
+
+            let format = inputNode.outputFormat(forBus: 0)
+            guard format.sampleRate > 0, format.channelCount > 0 else {
+                throw MacAudioRecorderError.voiceProcessingUnavailable
+            }
+
+            sessionGeneration &+= 1
+            let generation = sessionGeneration
+            inputNode.installTap(
+                onBus: 0,
+                bufferSize: 1024,
+                format: format
+            ) { [weak self] buffer, _ in
+                self?.handleAudioBuffer(buffer, generation: generation)
+            }
+            didInstallTap = true
+
+            self.engine = engine
+            self.inputNode = inputNode
+            self.route = route
+            tapInstalled = true
+            activeDeviceUID = deviceUID
+            tapFormat = format
+            pendingRecordingError = nil
+            sampleFlow.reset()
+            originalDuckingConfiguration =
+                inputNode.voiceProcessingOtherAudioDuckingConfiguration
+            try applyOtherAudioDucking(enabled: otherAudioDuckingEnabled)
+
+            engine.prepare()
+            try engine.start()
+            guard engine.isRunning else {
+                throw MacAudioRecorderError.voiceProcessingUnavailable
+            }
+
+            // Configuration changes can invalidate Voice Processing I/O's
+            // per-unit route. Never mutate a global default or retry forever;
+            // stop, salvage if needed, and ask for an explicit new attempt.
+            engineObserver = NotificationCenter.default.addObserver(
+                forName: .AVAudioEngineConfigurationChange,
+                object: engine,
+                queue: nil
+            ) { [weak self, weak engine] _ in
+                guard let engine else { return }
+                self?.captureQueue.async { [weak self, weak engine] in
+                    guard let self, let engine else { return }
+                    handleConfigurationChange(
+                        engine: engine,
+                        generation: generation
+                    )
+                }
+            }
+        } catch {
+            stopEngineAndRemoveTap(
+                engine: engine,
+                inputNode: inputNode,
+                tapInstalled: didInstallTap
+            )
+            removeEngineObserver()
+            route.destroy()
+            clearEngineState()
+            throw error
+        }
+    }
+
+    private func handleAudioBuffer(
+        _ buffer: AVAudioPCMBuffer,
+        generation: UInt64
+    ) {
+        sampleFlow.record(buffer: buffer)
+        let write = fileSink.consume(buffer)
+        guard write.wroteFirstFrames || write.error != nil else { return }
+        captureQueue.async { [weak self] in
+            guard let self, sessionGeneration == generation else { return }
+            if let error = write.error {
+                handleWriteFailure(error)
+                return
+            }
+            guard
+                write.wroteFirstFrames,
+                let continuation = startContinuation,
+                let url = segmentURL
+            else {
+                return
+            }
+            cancelStartTimeout()
+            startContinuation = nil
+            segmentDidStart = true
+            continuation.resume(returning: url)
+        }
+    }
+
+    private func handleWriteFailure(_ error: Error) {
+        guard segmentURL != nil, !stopping else { return }
+        let wasRecording = segmentDidStart && startContinuation == nil
+        let salvagedURL = failSession(
+            with: error,
+            preservingPartialRecording: wasRecording
+        )
+        if wasRecording {
+            let surfaced = salvagedURL.map {
+                MacAudioRecorderSalvagedFailure(
+                    underlying: error,
+                    audioURL: $0
+                ) as Error
+            } ?? error
+            pendingRecordingError = surfaced
+            recordingFailureHandler?(error, salvagedURL)
+        }
+    }
+
+    private func handleConfigurationChange(
+        engine: AVAudioEngine,
+        generation: UInt64
+    ) {
+        guard self.engine === engine, sessionGeneration == generation else { return }
+        let wasRecording = segmentDidStart && startContinuation == nil
+        let failure = MacAudioRecorderError.connectionFailed
+        let salvagedURL = failSession(
+            with: failure,
+            preservingPartialRecording: wasRecording
+        )
+        if wasRecording {
+            let surfaced = salvagedURL.map {
+                MacAudioRecorderSalvagedFailure(
+                    underlying: failure,
+                    audioURL: $0
+                ) as Error
+            } ?? failure
+            pendingRecordingError = surfaced
+            recordingFailureHandler?(failure, salvagedURL)
+        }
+    }
+
+    private func applyOtherAudioDucking(enabled: Bool) throws {
+        guard let inputNode, inputNode.isVoiceProcessingEnabled else { return }
+        if enabled {
+            inputNode.voiceProcessingOtherAudioDuckingConfiguration = .init(
+                enableAdvancedDucking: true,
+                duckingLevel: .mid
+            )
+            let applied = inputNode.voiceProcessingOtherAudioDuckingConfiguration
+            guard applied.enableAdvancedDucking.boolValue,
+                  applied.duckingLevel == .mid
+            else {
+                throw MacAudioRecorderError.otherAudioDuckingUnavailable
+            }
+        } else if let originalDuckingConfiguration {
+            inputNode.voiceProcessingOtherAudioDuckingConfiguration =
+                originalDuckingConfiguration
+        }
+    }
+
+    private func scheduleStartTimeout(url: URL, generation: UInt64) {
+        cancelStartTimeout()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard
+                let self,
+                sessionGeneration == generation,
+                segmentURL == url,
+                startContinuation != nil
+            else {
+                return
+            }
+            _ = failSession(
+                with: MacAudioRecorderError.recordingStartTimedOut,
+                preservingPartialRecording: false
+            )
+        }
+        startTimeoutWorkItem = workItem
+        captureQueue.asyncAfter(
+            deadline: .now() + recordingStartTimeout,
+            execute: workItem
+        )
+    }
+
+    private func cancelStartTimeout() {
+        startTimeoutWorkItem?.cancel()
+        startTimeoutWorkItem = nil
+    }
+
+    private func finishSession(removingSegment: Bool) {
+        let staleURL = segmentURL
+        let continuation = startContinuation
+        stopEngineAndRemoveTap()
+        _ = fileSink.finish()
+        cancelStartTimeout()
+        segmentURL = nil
+        segmentDidStart = false
+        startContinuation = nil
+        pendingRecordingError = nil
+        stopping = false
+        clearEngineAndRoute()
+        if removingSegment, let staleURL {
+            try? FileManager.default.removeItem(at: staleURL)
+        }
+        continuation?.resume(throwing: MacAudioRecorderError.connectionFailed)
+    }
+
+    @discardableResult
+    private func failSession(
+        with error: Error,
+        preservingPartialRecording: Bool
+    ) -> URL? {
+        let staleURL = segmentURL
+        let continuation = startContinuation
+        stopEngineAndRemoveTap()
+        let finish = fileSink.finish()
+        cancelStartTimeout()
+        segmentURL = nil
+        segmentDidStart = false
+        startContinuation = nil
+        stopping = false
+        clearEngineAndRoute()
+
+        let salvagedURL: URL?
+        if
+            preservingPartialRecording,
+            finish.frameCount > 0,
+            let staleURL,
+            isPlausiblePartialWAV(at: staleURL)
+        {
+            salvagedURL = staleURL
+        } else {
+            salvagedURL = nil
+            if let staleURL { try? FileManager.default.removeItem(at: staleURL) }
+        }
+        continuation?.resume(throwing: error)
+        return salvagedURL
+    }
+
+    private func stopEngineAndRemoveTap() {
+        stopEngineAndRemoveTap(
+            engine: engine,
+            inputNode: inputNode,
+            tapInstalled: tapInstalled
+        )
+        tapInstalled = false
+    }
+
+    private func stopEngineAndRemoveTap(
+        engine: AVAudioEngine?,
+        inputNode: AVAudioInputNode?,
+        tapInstalled: Bool
+    ) {
+        if let inputNode,
+           inputNode.isVoiceProcessingEnabled,
+           let originalDuckingConfiguration {
+            inputNode.voiceProcessingOtherAudioDuckingConfiguration =
+                originalDuckingConfiguration
+        }
+        engine?.stop()
+        if tapInstalled {
+            inputNode?.removeTap(onBus: 0)
+        }
+    }
+
+    private func removeEngineObserver() {
+        if let engineObserver {
+            NotificationCenter.default.removeObserver(engineObserver)
+        }
+        engineObserver = nil
+    }
+
+    /// Engine stop, tap removal, and private-device destruction all finish on
+    /// the serial capture queue before the caller resumes or transcription can
+    /// begin. No route survives pause, end, Escape, failure, sleep, or Quit.
+    private func clearEngineAndRoute() {
+        let staleRoute = route
+        clearEngineState()
+        route = nil
+        staleRoute?.destroy()
+    }
+
+    private func clearEngineState() {
+        removeEngineObserver()
+        engine = nil
+        inputNode = nil
+        activeDeviceUID = nil
+        tapFormat = nil
+        tapInstalled = false
+        originalDuckingConfiguration = nil
+        otherAudioDuckingEnabled = false
+        sampleFlow.reset()
+    }
+
+    private func isPlausiblePartialWAV(at url: URL) -> Bool {
+        let keys: Set<URLResourceKey> = [
+            .isRegularFileKey,
+            .isSymbolicLinkKey,
+            .fileSizeKey,
+        ]
+        guard
+            let values = try? url.resourceValues(forKeys: keys),
+            values.isRegularFile == true,
+            values.isSymbolicLink != true,
+            let fileSize = values.fileSize,
+            fileSize > 44,
+            let handle = try? FileHandle(forReadingFrom: url)
+        else {
+            return false
+        }
+        defer { try? handle.close() }
+        guard let header = try? handle.read(upToCount: 12), header.count == 12 else {
+            return false
+        }
+        return Array(header.prefix(4)) == Array("RIFF".utf8)
+            && Array(header.dropFirst(8).prefix(4)) == Array("WAVE".utf8)
+    }
+}
+
+// MARK: - Recorder facade
+
+/// Keeps Mac capture unchanged while using the Mic-Mode-compatible backend for
+/// an explicitly selected Continuity source. Neither path ever substitutes the
+/// other source when connection fails.
+final class MacAudioRecorder: @unchecked Sendable {
+    private let backendLock = NSLock()
+    private var activeBackend: MacAudioRecorderBackendChoice?
+    private var activeDeviceUID: String?
+    private let captureRecorder = MacCaptureSessionAudioRecorder()
+    private let voiceRecorder = MacVoiceProcessingAudioRecorder()
+    private let duckingCompanion = MacVoiceProcessingDuckingSession()
+
+    func setRecordingFailureHandler(
+        _ handler: @escaping @Sendable (Error, URL?) -> Void
+    ) {
+        captureRecorder.setRecordingFailureHandler(handler)
+        voiceRecorder.setRecordingFailureHandler(handler)
+    }
+
+    /// PRO-26 integration surface. Continuity configures its recording VPIO;
+    /// the built-in Mac path uses a process-local VPIO companion while keeping
+    /// AVCaptureSession as the recorder. Enabling can fail and must be surfaced
+    /// as a nonfatal warning rather than silently claiming ducking is active.
+    func setOtherAudioDucking(enabled: Bool) async throws {
+        if !enabled {
+            // Disable both so teardown remains correct even if a backend switch
+            // raced an AppModel phase transition.
+            try await voiceRecorder.setOtherAudioDucking(enabled: false)
+            try await duckingCompanion.setEnabled(false, selectedInputUID: nil)
+            return
+        }
+
+        let state = currentBackendState()
+        switch state.backend {
+        case .captureSession:
+            try await duckingCompanion.setEnabled(
+                true,
+                selectedInputUID: state.deviceUID
+            )
+        case .voiceProcessing:
+            try await voiceRecorder.setOtherAudioDucking(enabled: true)
+        case nil:
+            throw MacAudioRecorderError.otherAudioDuckingUnavailable
+        }
+
+        let current = currentBackendState()
+        guard
+            current.backend == state.backend,
+            current.deviceUID == state.deviceUID
+        else {
+            // Disconnect or a newer source won while the enable was suspended.
+            // Do not let this stale route survive its recording.
+            try? await voiceRecorder.setOtherAudioDucking(enabled: false)
+            try? await duckingCompanion.setEnabled(false, selectedInputUID: nil)
+            throw MacAudioRecorderError.otherAudioDuckingUnavailable
+        }
+    }
+
+    var normalizedLevel: Double {
+        switch currentBackend() {
+        case .captureSession:
+            captureRecorder.normalizedLevel
+        case .voiceProcessing:
+            voiceRecorder.normalizedLevel
+        case nil:
+            0
+        }
+    }
+
+    var deliveredSampleCount: UInt64 {
+        switch currentBackend() {
+        case .captureSession:
+            captureRecorder.deliveredSampleCount
+        case .voiceProcessing:
+            voiceRecorder.deliveredSampleCount
+        case nil:
+            0
+        }
+    }
+
+    func connect(deviceID: String) async throws -> Bool {
+        guard let device = MacAudioDeviceCatalog.availableInputs()
+            .first(where: { $0.id == deviceID })
+        else {
+            throw MacAudioRecorderError.deviceUnavailable
+        }
+        let backend = MacAudioRecorderBackendChoice.choose(
+            isContinuityDevice: device.isContinuityDevice
+        )
+
+        try? await setOtherAudioDucking(enabled: false)
+        await disconnectBackendOtherThan(backend)
+        setCurrentBackend(backend, deviceUID: deviceID)
+        do {
+            switch backend {
+            case .captureSession:
+                return try await captureRecorder.connect(deviceID: deviceID)
+            case .voiceProcessing:
+                return try await voiceRecorder.connect(deviceID: deviceID)
+            }
+        } catch {
+            clearCurrentBackend(if: backend)
+            throw error
+        }
+    }
+
+    func startSegment() async throws -> URL {
+        switch currentBackend() {
+        case .captureSession:
+            try await captureRecorder.startSegment()
+        case .voiceProcessing:
+            try await voiceRecorder.startSegment()
+        case nil:
+            throw MacAudioRecorderError.connectionFailed
+        }
+    }
+
+    func stop() async throws -> MacRecordedSegment {
+        guard let backend = currentBackend() else {
+            throw MacAudioRecorderError.noActiveRecording
+        }
+        // This is a safety net for callers that miss a phase transition. The
+        // AppModel also awaits this before stop so other audio is restored
+        // before recording finalization begins.
+        try? await setOtherAudioDucking(enabled: false)
+        defer { clearCurrentBackend(if: backend) }
+        switch backend {
+        case .captureSession:
+            return try await captureRecorder.stop()
+        case .voiceProcessing:
+            return try await voiceRecorder.stop()
+        }
+    }
+
+    func disconnect() {
+        setCurrentBackend(nil, deviceUID: nil)
+        duckingCompanion.disconnect()
+        captureRecorder.disconnect()
+        voiceRecorder.disconnect()
+    }
+
+    func disconnectAndWait() async {
+        setCurrentBackend(nil, deviceUID: nil)
+        async let ducking: Void = duckingCompanion.disconnectAndWait()
+        async let capture: Void = captureRecorder.disconnectAndWait()
+        async let voice: Void = voiceRecorder.disconnectAndWait()
+        _ = await (ducking, capture, voice)
+    }
+
+    func disconnectSynchronously() {
+        setCurrentBackend(nil, deviceUID: nil)
+        duckingCompanion.disconnectSynchronously()
+        captureRecorder.disconnectSynchronously()
+        voiceRecorder.disconnectSynchronously()
+    }
+
+    private func disconnectBackendOtherThan(
+        _ backend: MacAudioRecorderBackendChoice
+    ) async {
+        guard let current = currentBackend(), current != backend else { return }
+        setCurrentBackend(nil, deviceUID: nil)
+        switch current {
+        case .captureSession:
+            await duckingCompanion.disconnectAndWait()
+            await captureRecorder.disconnectAndWait()
+        case .voiceProcessing:
+            await voiceRecorder.disconnectAndWait()
+        }
+    }
+
+    private func currentBackend() -> MacAudioRecorderBackendChoice? {
+        backendLock.lock()
+        defer { backendLock.unlock() }
+        return activeBackend
+    }
+
+    private func currentBackendState() -> (
+        backend: MacAudioRecorderBackendChoice?,
+        deviceUID: String?
+    ) {
+        backendLock.lock()
+        defer { backendLock.unlock() }
+        return (activeBackend, activeDeviceUID)
+    }
+
+    private func setCurrentBackend(
+        _ backend: MacAudioRecorderBackendChoice?,
+        deviceUID: String?
+    ) {
+        backendLock.lock()
+        activeBackend = backend
+        activeDeviceUID = deviceUID
+        backendLock.unlock()
+    }
+
+    private func clearCurrentBackend(if backend: MacAudioRecorderBackendChoice) {
+        backendLock.lock()
+        if activeBackend == backend {
+            activeBackend = nil
+            activeDeviceUID = nil
+        }
+        backendLock.unlock()
     }
 }
