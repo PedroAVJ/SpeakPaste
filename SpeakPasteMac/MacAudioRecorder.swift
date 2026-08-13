@@ -1448,7 +1448,7 @@ private final class MacVoiceProcessingDuckingSession: @unchecked Sendable {
             self.route = route
             activeDeviceUID = selectedInputUID
             tapInstalled = true
-            originalConfiguration = original
+            self.originalConfiguration = original
         } catch {
             if let originalConfiguration {
                 inputNode.voiceProcessingOtherAudioDuckingConfiguration =
