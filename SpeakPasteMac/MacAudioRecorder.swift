@@ -20,7 +20,6 @@ enum MacAudioRecorderError: LocalizedError {
     case audioStreamStalled
     case voiceProcessingUnavailable
     case privateVoiceRouteUnavailable
-    case otherAudioDuckingUnavailable
     case microphoneModeNotActive(
         preferred: MacSystemMicrophoneMode,
         active: MacSystemMicrophoneMode
@@ -60,8 +59,6 @@ enum MacAudioRecorderError: LocalizedError {
             "macOS could not start the Voice Processing I/O route required for microphone modes. SpeakPaste reset the connection; reconnect the iPhone and try again."
         case .privateVoiceRouteUnavailable:
             "macOS could not create a private Voice Processing route for the selected iPhone microphone. No system audio device was changed; reconnect the iPhone and try again."
-        case .otherAudioDuckingUnavailable:
-            "Recording is still live, but macOS could not start voice-aware audio ducking for this microphone. Other audio may stay at full volume."
         case let .microphoneModeNotActive(preferred, active):
             "macOS has \(preferred.title) selected, but the iPhone route activated \(active.title). SpeakPaste released the microphone instead of recording without the selected mode."
         }
@@ -1375,190 +1372,6 @@ private enum MacVoiceProcessingIO {
     }
 }
 
-/// The built-in Mac path deliberately keeps AVCaptureSession as its recorder.
-/// While the microphone is actively recording, this process-local VPIO session
-/// supplies Apple's voice-activity signal for advanced ducking and discards its
-/// own input tap. It never changes a system default and owns no output media.
-private final class MacVoiceProcessingDuckingSession: @unchecked Sendable {
-    private let queue = DispatchQueue(
-        label: "com.example.speakpaste.voice-processing-ducking"
-    )
-    private var engine: AVAudioEngine?
-    private var inputNode: AVAudioInputNode?
-    private var route: MacVoiceProcessingRoute?
-    private var activeDeviceUID: String?
-    private var tapInstalled = false
-    private var originalConfiguration:
-        AVAudioVoiceProcessingOtherAudioDuckingConfiguration?
-
-    func setEnabled(_ enabled: Bool, selectedInputUID: String?) async throws {
-        try await withCheckedThrowingContinuation {
-            (continuation: CheckedContinuation<Void, Error>) in
-            queue.async { [weak self] in
-                guard let self else {
-                    continuation.resume(
-                        throwing: MacAudioRecorderError.otherAudioDuckingUnavailable
-                    )
-                    return
-                }
-                if !enabled {
-                    teardown()
-                    continuation.resume()
-                    return
-                }
-                guard let selectedInputUID else {
-                    continuation.resume(
-                        throwing: MacAudioRecorderError.otherAudioDuckingUnavailable
-                    )
-                    return
-                }
-                if activeDeviceUID == selectedInputUID,
-                   engine?.isRunning == true,
-                   let inputNode,
-                   inputNode.isVoiceProcessingEnabled {
-                    do {
-                        try applyEnabledConfiguration(to: inputNode)
-                        continuation.resume()
-                    } catch {
-                        teardown()
-                        continuation.resume(
-                            throwing: MacAudioRecorderError.otherAudioDuckingUnavailable
-                        )
-                    }
-                    return
-                }
-
-                teardown()
-                do {
-                    try configure(selectedInputUID: selectedInputUID)
-                    continuation.resume()
-                } catch {
-                    teardown()
-                    continuation.resume(
-                        throwing: MacAudioRecorderError.otherAudioDuckingUnavailable
-                    )
-                }
-            }
-        }
-    }
-
-    func disconnect() {
-        queue.async { [weak self] in self?.teardown() }
-    }
-
-    func disconnectAndWait() async {
-        await withCheckedContinuation { continuation in
-            queue.async { [weak self] in
-                self?.teardown()
-                continuation.resume()
-            }
-        }
-    }
-
-    func disconnectSynchronously() {
-        queue.sync { teardown() }
-    }
-
-    private func configure(selectedInputUID: String) throws {
-        let route = try MacVoiceProcessingRoute.create(
-            selectedInputUID: selectedInputUID
-        )
-        let engine = AVAudioEngine()
-        let inputNode = engine.inputNode
-        var didInstallTap = false
-        var originalConfiguration:
-            AVAudioVoiceProcessingOtherAudioDuckingConfiguration?
-
-        do {
-            guard let initialAudioUnit = inputNode.audioUnit else {
-                throw MacAudioRecorderError.otherAudioDuckingUnavailable
-            }
-            // VPIO derives its input/output pair while it initializes. Binding
-            // afterward is interpreted as changing only VPIO's output device
-            // and rejects a full-duplex aggregate with -10851.
-            try MacVoiceProcessingIO.bind(audioUnit: initialAudioUnit, to: route)
-            try inputNode.setVoiceProcessingEnabled(true)
-            guard inputNode.isVoiceProcessingEnabled,
-                  let audioUnit = inputNode.audioUnit
-            else {
-                throw MacAudioRecorderError.otherAudioDuckingUnavailable
-            }
-            try MacVoiceProcessingIO.verify(audioUnit: audioUnit, route: route)
-
-            let format = inputNode.outputFormat(forBus: 0)
-            guard format.sampleRate > 0, format.channelCount > 0 else {
-                throw MacAudioRecorderError.otherAudioDuckingUnavailable
-            }
-            inputNode.installTap(
-                onBus: 0,
-                bufferSize: 1024,
-                format: format
-            ) { _, _ in
-                // Intentionally discarded. Pulling the VPIO input keeps voice
-                // activity analysis live without becoming a second recorder.
-            }
-            didInstallTap = true
-
-            let original = inputNode.voiceProcessingOtherAudioDuckingConfiguration
-            originalConfiguration = original
-            try applyEnabledConfiguration(to: inputNode)
-            engine.prepare()
-            try engine.start()
-            guard engine.isRunning else {
-                throw MacAudioRecorderError.otherAudioDuckingUnavailable
-            }
-
-            self.engine = engine
-            self.inputNode = inputNode
-            self.route = route
-            activeDeviceUID = selectedInputUID
-            tapInstalled = true
-            self.originalConfiguration = original
-        } catch {
-            if let originalConfiguration {
-                inputNode.voiceProcessingOtherAudioDuckingConfiguration =
-                    originalConfiguration
-            }
-            engine.stop()
-            if didInstallTap { inputNode.removeTap(onBus: 0) }
-            route.destroy()
-            throw error
-        }
-    }
-
-    private func applyEnabledConfiguration(to inputNode: AVAudioInputNode) throws {
-        inputNode.voiceProcessingOtherAudioDuckingConfiguration = .init(
-            enableAdvancedDucking: true,
-            duckingLevel: .mid
-        )
-        let applied = inputNode.voiceProcessingOtherAudioDuckingConfiguration
-        guard applied.enableAdvancedDucking.boolValue,
-              applied.duckingLevel == .mid
-        else {
-            throw MacAudioRecorderError.otherAudioDuckingUnavailable
-        }
-    }
-
-    private func teardown() {
-        if let inputNode,
-           inputNode.isVoiceProcessingEnabled,
-           let originalConfiguration {
-            inputNode.voiceProcessingOtherAudioDuckingConfiguration =
-                originalConfiguration
-        }
-        engine?.stop()
-        if tapInstalled { inputNode?.removeTap(onBus: 0) }
-        let staleRoute = route
-        engine = nil
-        inputNode = nil
-        route = nil
-        activeDeviceUID = nil
-        tapInstalled = false
-        originalConfiguration = nil
-        staleRoute?.destroy()
-    }
-}
-
 private final class MacVoiceProcessingSampleFlow: @unchecked Sendable {
     private let lock = NSLock()
     private var storedCount: UInt64 = 0
@@ -1719,9 +1532,6 @@ private final class MacVoiceProcessingAudioRecorder: @unchecked Sendable {
     private var sessionGeneration: UInt64 = 0
     private var tapFormat: AVAudioFormat?
     private var tapInstalled = false
-    private var originalDuckingConfiguration:
-        AVAudioVoiceProcessingOtherAudioDuckingConfiguration?
-    private var otherAudioDuckingEnabled = false
 
     private var segmentURL: URL?
     private var segmentDidStart = false
@@ -1740,39 +1550,6 @@ private final class MacVoiceProcessingAudioRecorder: @unchecked Sendable {
     ) {
         captureQueue.async { [weak self] in
             self?.recordingFailureHandler = handler
-        }
-    }
-
-    /// Integration hook for PRO-26. The original Voice Processing configuration
-    /// is restored before every stop, pause, error, cancellation, or quit.
-    func setOtherAudioDucking(enabled: Bool) async throws {
-        try await withCheckedThrowingContinuation {
-            (continuation: CheckedContinuation<Void, Error>) in
-            captureQueue.async { [weak self] in
-                guard let self else {
-                    continuation.resume(
-                        throwing: MacAudioRecorderError.otherAudioDuckingUnavailable
-                    )
-                    return
-                }
-                guard !enabled || (
-                    engine?.isRunning == true
-                        && inputNode?.isVoiceProcessingEnabled == true
-                ) else {
-                    continuation.resume(
-                        throwing: MacAudioRecorderError.otherAudioDuckingUnavailable
-                    )
-                    return
-                }
-                otherAudioDuckingEnabled = enabled
-                do {
-                    try applyOtherAudioDucking(enabled: enabled)
-                    continuation.resume()
-                } catch {
-                    otherAudioDuckingEnabled = false
-                    continuation.resume(throwing: error)
-                }
-            }
         }
     }
 
@@ -2156,10 +1933,6 @@ private final class MacVoiceProcessingAudioRecorder: @unchecked Sendable {
             tapFormat = format
             pendingRecordingError = nil
             sampleFlow.reset()
-            originalDuckingConfiguration =
-                inputNode.voiceProcessingOtherAudioDuckingConfiguration
-            try applyOtherAudioDucking(enabled: otherAudioDuckingEnabled)
-
             engine.prepare()
             try engine.start()
             guard engine.isRunning else {
@@ -2265,25 +2038,6 @@ private final class MacVoiceProcessingAudioRecorder: @unchecked Sendable {
         }
     }
 
-    private func applyOtherAudioDucking(enabled: Bool) throws {
-        guard let inputNode, inputNode.isVoiceProcessingEnabled else { return }
-        if enabled {
-            inputNode.voiceProcessingOtherAudioDuckingConfiguration = .init(
-                enableAdvancedDucking: true,
-                duckingLevel: .mid
-            )
-            let applied = inputNode.voiceProcessingOtherAudioDuckingConfiguration
-            guard applied.enableAdvancedDucking.boolValue,
-                  applied.duckingLevel == .mid
-            else {
-                throw MacAudioRecorderError.otherAudioDuckingUnavailable
-            }
-        } else if let originalDuckingConfiguration {
-            inputNode.voiceProcessingOtherAudioDuckingConfiguration =
-                originalDuckingConfiguration
-        }
-    }
-
     private func scheduleStartTimeout(url: URL, generation: UInt64) {
         cancelStartTimeout()
         let workItem = DispatchWorkItem { [weak self] in
@@ -2376,12 +2130,6 @@ private final class MacVoiceProcessingAudioRecorder: @unchecked Sendable {
         inputNode: AVAudioInputNode?,
         tapInstalled: Bool
     ) {
-        if let inputNode,
-           inputNode.isVoiceProcessingEnabled,
-           let originalDuckingConfiguration {
-            inputNode.voiceProcessingOtherAudioDuckingConfiguration =
-                originalDuckingConfiguration
-        }
         engine?.stop()
         if tapInstalled {
             inputNode?.removeTap(onBus: 0)
@@ -2412,8 +2160,6 @@ private final class MacVoiceProcessingAudioRecorder: @unchecked Sendable {
         activeDeviceUID = nil
         tapFormat = nil
         tapInstalled = false
-        originalDuckingConfiguration = nil
-        otherAudioDuckingEnabled = false
         sampleFlow.reset()
     }
 
@@ -2453,53 +2199,12 @@ final class MacAudioRecorder: @unchecked Sendable {
     private var activeDeviceUID: String?
     private let captureRecorder = MacCaptureSessionAudioRecorder()
     private let voiceRecorder = MacVoiceProcessingAudioRecorder()
-    private let duckingCompanion = MacVoiceProcessingDuckingSession()
 
     func setRecordingFailureHandler(
         _ handler: @escaping @Sendable (Error, URL?) -> Void
     ) {
         captureRecorder.setRecordingFailureHandler(handler)
         voiceRecorder.setRecordingFailureHandler(handler)
-    }
-
-    /// PRO-26 integration surface. Continuity normally configures its recording
-    /// VPIO; if macOS rejected that private route and capture fell back to the
-    /// exact AVCapture device, it uses the same process-local companion as the
-    /// built-in Mac path. Enabling can fail and must be surfaced as a nonfatal
-    /// warning rather than silently claiming ducking is active.
-    func setOtherAudioDucking(enabled: Bool) async throws {
-        if !enabled {
-            // Disable both so teardown remains correct even if a backend switch
-            // raced an AppModel phase transition.
-            try await voiceRecorder.setOtherAudioDucking(enabled: false)
-            try await duckingCompanion.setEnabled(false, selectedInputUID: nil)
-            return
-        }
-
-        let state = currentBackendState()
-        switch state.backend {
-        case .captureSession:
-            try await duckingCompanion.setEnabled(
-                true,
-                selectedInputUID: state.deviceUID
-            )
-        case .voiceProcessing:
-            try await voiceRecorder.setOtherAudioDucking(enabled: true)
-        case nil:
-            throw MacAudioRecorderError.otherAudioDuckingUnavailable
-        }
-
-        let current = currentBackendState()
-        guard
-            current.backend == state.backend,
-            current.deviceUID == state.deviceUID
-        else {
-            // Disconnect or a newer source won while the enable was suspended.
-            // Do not let this stale route survive its recording.
-            try? await voiceRecorder.setOtherAudioDucking(enabled: false)
-            try? await duckingCompanion.setEnabled(false, selectedInputUID: nil)
-            throw MacAudioRecorderError.otherAudioDuckingUnavailable
-        }
     }
 
     var normalizedLevel: Double {
@@ -2534,7 +2239,6 @@ final class MacAudioRecorder: @unchecked Sendable {
             isContinuityDevice: device.isContinuityDevice
         )
 
-        try? await setOtherAudioDucking(enabled: false)
         await disconnectBackendOtherThan(backend)
         setCurrentBackend(backend, deviceUID: deviceID)
         do {
@@ -2585,10 +2289,6 @@ final class MacAudioRecorder: @unchecked Sendable {
         guard let backend = currentBackend() else {
             throw MacAudioRecorderError.noActiveRecording
         }
-        // This is a safety net for callers that miss a phase transition. The
-        // AppModel also awaits this before stop so other audio is restored
-        // before recording finalization begins.
-        try? await setOtherAudioDucking(enabled: false)
         defer { clearCurrentBackend(if: backend) }
         switch backend {
         case .captureSession:
@@ -2600,22 +2300,19 @@ final class MacAudioRecorder: @unchecked Sendable {
 
     func disconnect() {
         setCurrentBackend(nil, deviceUID: nil)
-        duckingCompanion.disconnect()
         captureRecorder.disconnect()
         voiceRecorder.disconnect()
     }
 
     func disconnectAndWait() async {
         setCurrentBackend(nil, deviceUID: nil)
-        async let ducking: Void = duckingCompanion.disconnectAndWait()
         async let capture: Void = captureRecorder.disconnectAndWait()
         async let voice: Void = voiceRecorder.disconnectAndWait()
-        _ = await (ducking, capture, voice)
+        _ = await (capture, voice)
     }
 
     func disconnectSynchronously() {
         setCurrentBackend(nil, deviceUID: nil)
-        duckingCompanion.disconnectSynchronously()
         captureRecorder.disconnectSynchronously()
         voiceRecorder.disconnectSynchronously()
     }
@@ -2627,7 +2324,6 @@ final class MacAudioRecorder: @unchecked Sendable {
         setCurrentBackend(nil, deviceUID: nil)
         switch current {
         case .captureSession:
-            await duckingCompanion.disconnectAndWait()
             await captureRecorder.disconnectAndWait()
         case .voiceProcessing:
             await voiceRecorder.disconnectAndWait()

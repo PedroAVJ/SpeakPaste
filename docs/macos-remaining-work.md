@@ -66,8 +66,12 @@ TCC grants, or Application Support.
       returns over 900 ms on pause, End, Escape, error, sleep, disconnect, and
       Quit. Reverse start/stop rapidly without a jump. Change volume manually
       during capture and confirm SpeakPaste yields rather than restoring an old
-      value. Switch to an output without writable volume and confirm recording
-      continues while media remains unchanged.
+      value. Force-quit between the receipt write and each stereo-channel write,
+      and again during restoration; relaunch and confirm the original map returns.
+      Disconnect the faded output, relaunch, reconnect it, and confirm restoration
+      follows its device identity without touching the new default. Switch to an
+      output without writable scalar volume or scalar/dB translation and confirm
+      recording continues while media remains unchanged.
 
 - [ ] Complete and revisit every onboarding step. Check API-key states,
       permission/readiness explanations, microphone selection/test, shortcuts,

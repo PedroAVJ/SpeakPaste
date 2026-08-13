@@ -2781,8 +2781,9 @@ final class MacAppModel: ObservableObject {
         let deviceName = selectedDevice?.name ?? "Unknown microphone"
         let recordingDuration = Date().timeIntervalSince(recordingStartedAt ?? Date())
 
-        // Restore other apps before recorder finalization and before any
-        // transcription work. This await also serializes behind a racing enable.
+        // Begin releasing other audio before recorder finalization and before
+        // transcription. Ordinary stops complete the smooth release without
+        // retaining the microphone; app termination restores synchronously.
         restoreCompetingMedia()
 
         let segment: MacRecordedSegment
@@ -5430,7 +5431,7 @@ final class MacAppModel: ObservableObject {
     /// extra VPIO merely to ask for ducking interrupted Spotify in physical
     /// testing, so media attenuation is intentionally independent of capture.
     private func attenuateCompetingMedia() {
-        guard phase == .recording else { return }
+        guard MacCompetingMediaPolicy.isEnabled(during: phase) else { return }
         competingMediaFader.fadeDown()
     }
 

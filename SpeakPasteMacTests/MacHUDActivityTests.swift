@@ -274,8 +274,8 @@ final class MacLoudnessPromptFilterTests: XCTestCase {
     }
 }
 
-final class MacOtherAudioDuckingPolicyTests: XCTestCase {
-    func testDuckingExistsOnlyForLiveRecording() {
+final class MacCompetingMediaPolicyTests: XCTestCase {
+    func testAttenuationExistsOnlyForLiveRecording() {
         let phases: [MacCapturePhase] = [
             .ready,
             .connecting,
@@ -287,7 +287,7 @@ final class MacOtherAudioDuckingPolicyTests: XCTestCase {
         ]
 
         XCTAssertEqual(
-            phases.filter(MacOtherAudioDuckingPolicy.isEnabled(during:)),
+            phases.filter(MacCompetingMediaPolicy.isEnabled(during:)),
             [.recording]
         )
     }

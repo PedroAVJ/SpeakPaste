@@ -161,11 +161,15 @@ current output about 16 dB quieter over 400 ms, leaves playback running, then
 eases it back over 900 ms on pause, End, Escape, error, sleep, disconnect, or
 Quit. This is independent of the microphone route: it never sends a player a
 pause command and never starts a second Voice Processing session merely to ask
-for ducking. SpeakPaste remembers the original output level for crash recovery,
-but a volume-key press or output-route change immediately yields ownership so a
-user's newer choice is never overwritten. Outputs without a writable volume
-control simply keep playing unchanged. “While transcribing” means only this
-live-microphone phase, not the later network request.
+for ducking. Before every hardware write, SpeakPaste fsyncs a private recovery
+receipt containing the original level and the write in flight. It keeps that
+receipt without an age limit and retries the same output by device identity after
+a crash, failed write, or disconnect; only a complete original-map write plus
+readback removes it. Core Audio listeners make a volume-key or slider change win
+immediately. Outputs without writable scalar controls and scalar/dB translators
+keep playing unchanged, because the 16 dB contract cannot be represented exactly.
+“While transcribing” means only this live-microphone phase, not the later network
+request.
 
 You can also build the macOS target from Terminal:
 

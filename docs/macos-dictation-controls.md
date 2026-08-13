@@ -108,14 +108,19 @@ ease it back over 900 ms. Connecting, Paused, Draining, and network transcriptio
 never attenuate.
 
 The same contract applies to the built-in Mac and Continuity/iPhone sources. It
-sends no transport or per-app commands and changes no default device. One
-crash-recovery lease records the exact original and last-written output levels.
-If the output route changes or the observed volume differs from SpeakPaste's
-last write, the lease is abandoned without another write; the user's choice
-wins. An output without writable volume controls fails open at full volume.
-Physical acceptance still needs media playing through the real output while
-exercising both sources through rapid start/reverse, pause/resume, End, Esc,
-disconnect, sleep/wake, crash recovery, and Quit.
+sends no transport or per-app commands and changes no default device. Before
+every hardware change, one private atomic receipt records the exact original,
+last readback, and pending write. The receipt has no expiry: a crash, failed HAL
+operation, route change, or disconnect retries restoration by device identity,
+including after the old output reconnects. It is removed only after every
+original element is written and read back. Core Audio property listeners monitor
+each owned element; a volume-key, slider, or other external change ends ownership
+at a 0.001 scalar tolerance so the user's choice wins. An output without writable
+scalar controls and both scalar/dB translators fails open unchanged rather than
+claiming an approximate fade. Physical acceptance still needs media playing
+through the real output while exercising both sources through rapid
+start/reverse, pause/resume, End, Esc, disconnect/reconnect, sleep/wake, forced
+crashes during fade and restore, recovery, and Quit.
 
 ## Menu bar keyboard sheet
 

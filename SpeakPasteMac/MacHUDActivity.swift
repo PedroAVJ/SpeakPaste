@@ -114,9 +114,8 @@ struct MacLoudnessPromptFilter: Equatable, Sendable {
 /// "While transcribing" means the interval in which the user is actively
 /// speaking into a live microphone. Network transcription starts only after
 /// that microphone is released, when competing media no longer makes the user
-/// strain. Keeping this policy pure makes every lifecycle edge testable while
-/// the recorder owns the platform-specific Voice Processing implementation.
-enum MacOtherAudioDuckingPolicy {
+/// strain. Keeping this policy pure makes every lifecycle edge testable.
+enum MacCompetingMediaPolicy {
     static func isEnabled(during phase: MacCapturePhase) -> Bool {
         phase == .recording
     }
