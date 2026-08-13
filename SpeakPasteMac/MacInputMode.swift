@@ -49,6 +49,40 @@ enum MacVoiceProcessingRoutePlan: Equatable, Sendable {
     }
 }
 
+/// Core Audio devices can expose channels in both directions even when the
+/// user selected them for only one side of a route. In particular, enabling
+/// VPIO may add reference-input channels to an output-only speaker, and a
+/// Bluetooth output can contribute its microphone. Declare each subdevice's
+/// role explicitly so the aggregate remains one selected input plus one output
+/// instead of changing shape while Voice Processing initializes.
+struct MacVoiceProcessingAggregateChannelPlan: Equatable, Sendable {
+    let selectedInputChannels: UInt32
+    let selectedInputOutputChannels: UInt32 = 0
+    let currentOutputInputChannels: UInt32 = 0
+    let currentOutputChannels: UInt32
+
+    static func make(
+        selectedInputChannels: UInt32,
+        currentOutputChannels: UInt32
+    ) -> Self? {
+        guard selectedInputChannels > 0, currentOutputChannels > 0 else {
+            return nil
+        }
+        return Self(
+            selectedInputChannels: selectedInputChannels,
+            currentOutputChannels: currentOutputChannels
+        )
+    }
+
+    func matchesAggregate(
+        inputChannels: UInt32,
+        outputChannels: UInt32
+    ) -> Bool {
+        inputChannels == selectedInputChannels
+            && outputChannels == currentOutputChannels
+    }
+}
+
 /// A private aggregate can also contain input channels exposed by the current
 /// output device (for example an AirPods microphone). SpeakPaste puts its
 /// selected input first, then pins every destination channel to that leading

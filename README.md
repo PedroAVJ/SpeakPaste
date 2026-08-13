@@ -145,20 +145,23 @@ transcript remains on the clipboard.
 
 The user chooses Standard, Wide Spectrum, or Voice Isolation in macOS; SpeakPaste
 does not write that system preference. For a selected iPhone microphone it
-records through Voice Processing I/O, using a short-lived process-private
-aggregate with the current output when necessary. The selected input is first
-in the aggregate and its input channels are pinned explicitly, so a full-duplex
-output such as AirPods cannot silently become the recording source. Readiness is
-bounded and requires both steady, audible samples and (when Voice Isolation was
-selected) macOS reporting Voice Isolation as active. A mismatch fails visibly
-and releases the route; no system default audio device is changed.
+first asks Voice Processing I/O to use a short-lived process-private aggregate
+with the current output. Each subdevice is direction-pinned, so reference input
+channels or a full-duplex output such as AirPods cannot silently become the
+recording source. If macOS rejects that private route, SpeakPaste falls back to
+the exact selected iPhone through AVCapture rather than closing the dictation.
+Both paths use bounded readiness, require steady audible samples, and (when
+Voice Isolation was selected) require macOS to report Voice Isolation active. A
+mismatch fails visibly and releases the route; no system default audio device
+is changed.
 
 While either microphone is actually recording, SpeakPaste asks Apple's voice
 processing path for speech-aware mid-level ducking of other audio. The built-in
-Mac recorder uses a temporary VPIO companion; Continuity uses its recording
-VPIO. If ducking cannot start, recording continues with a visible warning. Pause,
-End, Escape, errors, sleep, disconnect, and Quit all restore the prior ducking
-configuration and destroy every private route before transcription begins.
+Mac recorder and an AVCapture fallback use a temporary VPIO companion;
+Continuity normally uses its recording VPIO. If ducking cannot start, recording
+continues with a visible warning. Pause, End, Escape, errors, sleep, disconnect,
+and Quit all restore the prior ducking configuration and destroy every private
+route before transcription begins.
 “While transcribing” means only this live-microphone phase, not the later
 network request; SpeakPaste never pauses media apps or writes their volume
 settings.
