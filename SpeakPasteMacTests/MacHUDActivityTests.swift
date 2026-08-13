@@ -142,6 +142,25 @@ final class MacHUDVisualStateTests: XCTestCase {
     }
 }
 
+final class MacCompetingMediaPolicyTests: XCTestCase {
+    func testAttenuationExistsOnlyForLiveRecording() {
+        let phases: [MacCapturePhase] = [
+            .ready,
+            .connecting,
+            .recording,
+            .finalizing,
+            .paused,
+            .succeeded("done"),
+            .failed("failed"),
+        ]
+
+        XCTAssertEqual(
+            phases.filter(MacCompetingMediaPolicy.isEnabled(during:)),
+            [.recording]
+        )
+    }
+}
+
 final class MacOrderedDictationBatchTests: XCTestCase {
     func testClosedDictationWaitsForEveryPausedSegment() {
         let batch = MacOrderedDictationBatch(sequences: [4, 5, 6])

@@ -379,6 +379,7 @@ final class MacAppModel: ObservableObject {
     private let reliabilityStore: MacReliabilityStore
     private let globalHotKey: MacGlobalHotKey
     private let sessionHealthMarker: MacSessionHealthMarker
+    private let competingMediaFader = MacCompetingMediaFader()
     private let networkMonitor = NWPathMonitor()
     private let networkMonitorQueue = DispatchQueue(
         label: "com.speakpaste.network-monitor",
@@ -2076,6 +2077,11 @@ final class MacAppModel: ObservableObject {
         guard !hasStartedSessionTracking else { return }
         hasStartedSessionTracking = true
 
+        // A previous crash may have happened between fade-down and release.
+        // Recover only after the single-instance guard identifies this process
+        // as the surviving primary; a secondary launch must never touch audio.
+        competingMediaFader.recoverStaleFade()
+
         do {
             let previous = try sessionHealthMarker.beginSession()
             if previous.endedWithoutCleanTermination == true {
@@ -2282,6 +2288,7 @@ final class MacAppModel: ObservableObject {
         captureStartTask = nil
         microphoneTestTask?.cancel()
         microphoneTestTask = nil
+        competingMediaFader.restoreImmediately()
         recorder.disconnectSynchronously()
         endRecordingActivity()
         networkMonitor.cancel()
@@ -2364,6 +2371,8 @@ final class MacAppModel: ObservableObject {
         captureRequestID = nil
         captureStartTask?.cancel()
         captureStartTask = nil
+
+        restoreCompetingMedia()
 
         let deviceName = selectedDevice?.name ?? "Unknown microphone"
         let recordingDuration = max(0, Date().timeIntervalSince(recordingStartedAt ?? Date()))
@@ -2686,6 +2695,7 @@ final class MacAppModel: ObservableObject {
             beginRecordingActivity()
             sounds.playRecordingStarted()
             startMeter()
+            attenuateCompetingMedia()
         } catch {
             guard captureRequestID == requestID else { return }
             await recorder.disconnectAndWait()
@@ -2703,6 +2713,11 @@ final class MacAppModel: ObservableObject {
         let hudCapture = hudPipeline.capture
         let deviceName = selectedDevice?.name ?? "Unknown microphone"
         let recordingDuration = Date().timeIntervalSince(recordingStartedAt ?? Date())
+
+        // Start the smooth release before recorder finalization and before any
+        // transcription work. The microphone does not need to remain open for
+        // the output fade to finish.
+        restoreCompetingMedia()
 
         let segment: MacRecordedSegment
         do {
@@ -5205,6 +5220,7 @@ final class MacAppModel: ObservableObject {
         let target = deliveryTarget
         let hudCapture = hudPipeline.capture
         stopMeter()
+        restoreCompetingMedia()
         endRecordingActivity()
         isMicrophoneConnected = false
         connectedDeviceID = nil
@@ -5299,6 +5315,18 @@ final class MacAppModel: ObservableObject {
         meterTimer?.invalidate()
         meterTimer = nil
         inputLevel = 0
+    }
+
+    /// macOS has no AVAudioSession-style `duckOthers` contract. Starting an
+    /// extra Voice Processing route interrupted Spotify in physical testing,
+    /// so this reversible output fade stays independent of microphone capture.
+    private func attenuateCompetingMedia() {
+        guard MacCompetingMediaPolicy.isEnabled(during: phase) else { return }
+        competingMediaFader.fadeDown()
+    }
+
+    private func restoreCompetingMedia() {
+        competingMediaFader.fadeUp()
     }
 
     private func beginRecordingActivity() {

@@ -56,6 +56,16 @@ bundle identifier, redirected `CFFIXED_USER_HOME`/`TMPDIR`, and a non-secret
 placeholder API key. Do not point this run at the installed app's Keychain,
 TCC grants, or Application Support.
 
+- [ ] For both the Mac and iPhone source, play media before recording. Confirm
+      it keeps advancing while output eases 16 dB down over 400 ms and returns
+      over 900 ms on pause, End, Escape, error, sleep, disconnect, and Quit.
+      Reverse start/stop rapidly without a jump. Change volume manually during
+      capture and confirm SpeakPaste yields. Force-quit during fade and restore,
+      then relaunch and confirm the original channel map returns. Disconnect the
+      faded output, relaunch, reconnect it, and confirm restoration follows that
+      device without touching the new default. Unsupported outputs must keep
+      playing unchanged.
+
 - [ ] Complete and revisit every onboarding step. Check API-key states,
       permission/readiness explanations, microphone selection/test, shortcuts,
       successful-audio disclosure, and the language menu.

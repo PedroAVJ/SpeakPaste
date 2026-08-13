@@ -91,6 +91,29 @@ cursor, and that is the whole cost. The unheld fn path takes no artificial
 delay — delivery is only ever as slow as transcription itself. Held adds only
 the delay the user explicitly owns and ends with the next `fn`.
 
+## Competing-media integration contract
+
+“While transcribing” means **Recording(source)** — the interval in which the
+user can still be speaking. It does not mean Scribe's later network request: by
+then the microphone is free and media should already be back at its prior level.
+
+macOS has no AVAudioSession-style `duckOthers` contract. Physical Spotify
+testing showed that starting a second Voice Processing I/O session merely to
+request ducking interrupted and restarted playback. The desktop contract is
+therefore a microphone-independent output fade: once Recording is truthful,
+ease the current output 16 dB down over 400 ms; on every transition out of
+Recording, ease it back over 900 ms. Connecting, Paused, Draining, and network
+transcription never attenuate.
+
+The same contract applies to the Mac and Continuity/iPhone sources. It sends no
+transport or per-app command and changes no default device. Before every
+hardware change, one private atomic receipt records the exact original, last
+readback, and pending write. The receipt has no expiry: crashes, failed writes,
+route changes, and disconnects retry restoration by device identity. It is
+removed only after every original element is written and read back. Core Audio
+listeners make a manual volume change win. An output without writable scalar
+controls and both scalar/dB translators fails open unchanged.
+
 ## Menu bar keyboard sheet
 
 Clicking the menu bar icon opens a small anchored panel that is a live

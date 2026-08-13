@@ -140,6 +140,18 @@ the capture-live cue confirms that audio is ready. Automatic paste and the
 global shortcut require macOS Accessibility permission; without it, the
 transcript remains on the clipboard.
 
+While either microphone is actually recording, SpeakPaste smoothly fades the
+current output about 16 dB quieter over 400 ms, leaves playback running, then
+eases it back over 900 ms on pause, End, Escape, error, sleep, disconnect, or
+Quit. It never sends a player a pause command and never starts a second audio
+capture session to request ducking. Before every hardware write, SpeakPaste
+fsyncs a private recovery receipt containing the original level and the write
+in flight. That receipt follows the exact output through a crash or disconnect
+and is removed only after the original channel map is restored and read back.
+A manual volume change wins immediately; outputs without writable scalar
+controls and exact scalar/dB translation keep playing unchanged. This fade is
+limited to the live-microphone phase, not the later network request.
+
 You can also build the macOS target from Terminal:
 
 ```sh

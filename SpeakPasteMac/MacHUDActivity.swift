@@ -38,6 +38,14 @@ enum MacHUDCaptureActivity: Equatable, Sendable {
     case releasing
 }
 
+/// Media is attenuated only while the microphone is genuinely live. Connecting,
+/// paused, finalizing, and later network transcription leave playback alone.
+enum MacCompetingMediaPolicy {
+    static func isEnabled(during phase: MacCapturePhase) -> Bool {
+        phase == .recording
+    }
+}
+
 /// The delivery gate for one user-owned dictation. Segment transcription may
 /// complete in any order, but none of it is eligible for output until every
 /// sequence in the closed dictation has produced a result.
