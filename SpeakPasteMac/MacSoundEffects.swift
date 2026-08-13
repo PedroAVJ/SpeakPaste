@@ -32,6 +32,7 @@ final class MacSoundEffects: ObservableObject {
     private let needsAttention: AVAudioPlayer?
     private let waitTick: AVAudioPlayer?
     private let dictationHeld: AVAudioPlayer?
+    private let deliveryHeld: AVAudioPlayer?
     private let dismissFold: AVAudioPlayer?
     /// The closing face's pair. The patter is the only continuous sound in the
     /// product: it loops for exactly as long as the typing dots are on screen,
@@ -54,6 +55,7 @@ final class MacSoundEffects: ObservableObject {
         needsAttention = Self.loadSound(named: "needs-attention")
         waitTick = Self.loadSound(named: "wait-tick")
         dictationHeld = Self.loadSound(named: "dictation-held")
+        deliveryHeld = Self.loadSound(named: "delivery-held")
         dismissFold = Self.loadSound(named: "dismiss-fold")
         typingPatter = Self.loadSound(named: "typing-patter")
         deliveryPlop = Self.loadSound(named: "delivery-plop")
@@ -73,6 +75,15 @@ final class MacSoundEffects: ObservableObject {
     /// The microphone is free and the dictation remains owed to the user.
     func playDictationHeld() {
         play(dictationHeld)
+    }
+
+    /// The delivery parking brake. Two dry, level knocks distinguish this
+    /// user-controlled output hold from Paused's single low held tone. Entering
+    /// Held also stops the typing state immediately; release starts the patter
+    /// again and needs no second edge cue.
+    func playDeliveryHeld() {
+        stopTypingPatter()
+        play(deliveryHeld)
     }
 
     /// The low fold sound, fired only once the live microphone has actually

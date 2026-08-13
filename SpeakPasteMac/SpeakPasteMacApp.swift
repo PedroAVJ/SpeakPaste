@@ -270,6 +270,8 @@ struct SpeakPasteMacApp: App {
     }
 
     private func menuBarSymbol(for model: MacAppModel) -> String {
+        if model.deliveryTimingState == .held { return "hand.raised.fill" }
+        if model.deliveryTimingState == .draining { return "ellipsis.bubble.fill" }
         return switch model.phase {
         case .connecting: "antenna.radiowaves.left.and.right"
         case .recording: "record.circle.fill"
@@ -285,7 +287,13 @@ struct SpeakPasteMacApp: App {
     }
 
     private func menuBarAccessibilityLabel(for model: MacAppModel) -> String {
-        switch model.phase {
+        if model.deliveryTimingState == .held {
+            return "SpeakPaste, delivery held. Transcription continues. Press the Function key to deliver at the current cursor"
+        }
+        if model.deliveryTimingState == .draining {
+            return "SpeakPaste, dictation transcribing for delivery. Press the Function key to hold delivery"
+        }
+        return switch model.phase {
         case .connecting: "SpeakPaste, connecting to microphone"
         case .recording: "SpeakPaste, recording. Speak now. Press the same source key again to pause, or the Function key to end and deliver"
         case .finalizing: "SpeakPaste, recording stopped. Releasing microphone"

@@ -2,9 +2,9 @@
 """Generate and verify SpeakPaste's deterministic macOS earcon family.
 
 The cues intentionally use one restrained struck-tone instrument. Capture is
-the only rising go-signal. Waiting, resting, and dismissal stay low and level;
-attention is the family's only phrase, inverted low and falling. No samples or
-generative audio are used.
+the only rising go-signal. Waiting, resting, delivery parking, and dismissal
+stay low and level; attention is the family's only phrase, inverted low and
+falling. No samples or generative audio are used.
 """
 
 from __future__ import annotations
@@ -73,6 +73,16 @@ CUES = (
     # pitch and level: they acknowledge a held/not-yet state, never progress.
     Cue("wait-tick.caf", (Note(0.0, E4),), -22.0, 0.400),
     Cue("dictation-held.caf", (Note(0.0, A3),), -20.0, 0.400),
+    # A repeated level knock is categorically different from Paused's single
+    # low tone and from the falling two-note error phrase. It means the typing
+    # patter has stopped because the user parked delivery, not because work
+    # failed or the microphone merely rested.
+    Cue(
+        "delivery-held.caf",
+        (Note(0.0, E4), Note(0.150, E4)),
+        -21.0,
+        0.550,
+    ),
     Cue("dismiss-fold.caf", (Note(0.0, D3),), -22.0, 0.400),
 )
 

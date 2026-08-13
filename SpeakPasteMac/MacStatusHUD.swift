@@ -332,6 +332,7 @@ private enum MacHUDMetrics {
         case .source: 54
         case .waveform: 150
         case .typing: 64
+        case .deliveryHeld: 56
         case .held: 56
         case .positioning: 56
         }
@@ -468,6 +469,10 @@ private struct MacHUDCapsuleView: View {
             )
             .opacity(visual == .typing ? 1 : 0)
             .scaleEffect(visual == .typing ? 1 : 0.72)
+
+            MacHUDDeliveryHeldBadge()
+                .opacity(visual == .deliveryHeld ? 1 : 0)
+                .scaleEffect(visual == .deliveryHeld ? 1 : 0.72)
 
             MacHUDHeldBadge(clipboardBacked: heldClipboardBacked)
                 .opacity(visual == .held ? 1 : 0)
@@ -846,6 +851,22 @@ private struct MacHUDHeldBadge: View {
                 ? Color(nsColor: .systemOrange)
                 : Color(nsColor: .secondaryLabelColor)
         )
+        .accessibilityHidden(true)
+    }
+}
+
+/// A steady amber raised hand is the delivery parking brake. It shares
+/// Draining's small output-side capsule, but cannot be mistaken for Paused:
+/// Paused is always the wide, dim, frozen waveform and never uses this glyph.
+private struct MacHUDDeliveryHeldBadge: View {
+    var body: some View {
+        Image(
+            systemName: MacHUDDeliveryHoldSymbol.systemName { name in
+                NSImage(systemSymbolName: name, accessibilityDescription: nil) != nil
+            }
+        )
+        .font(.system(size: 14, weight: .semibold))
+        .foregroundStyle(Color(nsColor: .systemOrange))
         .accessibilityHidden(true)
     }
 }
