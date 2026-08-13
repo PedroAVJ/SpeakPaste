@@ -64,6 +64,9 @@ The Xcode project contains four product targets:
    open dictation. A Mac start briefly shows a neutral laptop glyph; an iPhone
    start shows a neutral phone glyph with an amber breathing wait-dot until
    capture is live. Both then spring-morph into the real red voice waveform.
+   Sustained near-peak speech adds a small, wordless double-down chevron beside
+   that waveform, asking for an easier voice without labeling an ordinary
+   phrase as loud; hysteresis keeps it stable through pauses between words.
    Paused segments transcribe as invisible plumbing: there are no segment cards,
    rails, slivers, counts, or `+N` badges. Pressing `fn` turns the same capsule
    directly into a small typing pill with three hopping dots. The dots claim no
@@ -129,6 +132,12 @@ dictation reconnects and may briefly show the capsule's connecting pulse before
 the capture-live cue confirms that audio is ready. Automatic paste and the
 global shortcut require macOS Accessibility permission; without it, the
 transcript remains on the clipboard.
+
+The media-ducking integration contract treats “while transcribing” as only the
+live-microphone phase, not the later network request. A recorder integration
+must use macOS Voice Processing's reversible other-audio ducking and release it
+before pause, transcription, delivery, dismissal, error recovery, or Quit. The
+policy never authorizes pausing media apps or writing their volume settings.
 
 You can also build the macOS target from Terminal:
 
