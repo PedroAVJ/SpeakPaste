@@ -143,52 +143,133 @@ final class MacHUDVisualStateTests: XCTestCase {
 }
 
 final class MacLoudnessPromptFilterTests: XCTestCase {
-    func testOrdinarySpeechAndBriefPeakDoNotPrompt() {
-        var filter = MacLoudnessPromptFilter()
+    private let sampleInterval = 0.08
 
+    /// Mirrors `MacCaptureSessionAudioRecorder.normalizedLevel`: AVFoundation
+    /// reports dBFS average power and the recorder converts it to linear
+    /// amplitude before the filter sees it.
+    private func amplitude(decibels: Double) -> Double {
+        pow(10, decibels / 20)
+    }
+
+    private func timeToPrompt(at level: Double) -> TimeInterval? {
+        var filter = MacLoudnessPromptFilter()
+        for sampleIndex in 1...12 {
+            if filter.observe(
+                normalizedLevel: level,
+                interval: sampleInterval
+            ) {
+                return Double(sampleIndex) * sampleInterval
+            }
+        }
+        return nil
+    }
+
+    func testNormalSpeechOnBothRecorderScalesDoesNotPrompt() {
+        // Direct AVCapture path: about -27 dBFS after the recorder's conversion.
+        var captureFilter = MacLoudnessPromptFilter()
         for _ in 0..<80 {
-            XCTAssertFalse(filter.observe(normalizedLevel: 0.25, interval: 0.08))
+            XCTAssertFalse(
+                captureFilter.observe(
+                    normalizedLevel: amplitude(decibels: -27),
+                    interval: sampleInterval
+                )
+            )
         }
-        for _ in 0..<2 {
-            XCTAssertFalse(filter.observe(normalizedLevel: 0.95, interval: 0.08))
-        }
-        for _ in 0..<20 {
-            XCTAssertFalse(filter.observe(normalizedLevel: 0.10, interval: 0.08))
+
+        // Voice Processing path: raw PCM RMS already is linear amplitude.
+        var voiceProcessingFilter = MacLoudnessPromptFilter()
+        for _ in 0..<80 {
+            XCTAssertFalse(
+                voiceProcessingFilter.observe(
+                    normalizedLevel: 0.05,
+                    interval: sampleInterval
+                )
+            )
         }
     }
 
-    func testSustainedHighLevelPromptsThenHoldsAcrossSpeechGap() {
+    func testDeliberateLoudPhrasePromptsWithinHalfSecondOnBothRecorderScales() {
+        let capturePromptTime = timeToPrompt(
+            at: amplitude(decibels: -20.5)
+        )
+        let voiceProcessingPromptTime = timeToPrompt(at: 0.09)
+
+        XCTAssertNotNil(capturePromptTime)
+        XCTAssertNotNil(voiceProcessingPromptTime)
+        XCTAssertLessThanOrEqual(capturePromptTime ?? .infinity, 0.5)
+        XCTAssertLessThanOrEqual(voiceProcessingPromptTime ?? .infinity, 0.5)
+    }
+
+    func testBriefPeakDoesNotPrompt() {
         var filter = MacLoudnessPromptFilter()
 
-        for _ in 0..<20 {
-            _ = filter.observe(normalizedLevel: 0.75, interval: 0.08)
+        // Two meter ticks model a sharp 160 ms impact or emphatic consonant.
+        for _ in 0..<2 {
+            XCTAssertFalse(
+                filter.observe(
+                    normalizedLevel: 0.95,
+                    interval: sampleInterval
+                )
+            )
         }
-        XCTAssertTrue(filter.isPrompting)
-
-        // A pause between phrases must not make the wordless cue flicker.
-        for _ in 0..<8 {
-            _ = filter.observe(normalizedLevel: 0, interval: 0.08)
-        }
-        XCTAssertTrue(filter.isPrompting)
-
         for _ in 0..<24 {
-            _ = filter.observe(normalizedLevel: 0, interval: 0.08)
+            XCTAssertFalse(
+                filter.observe(
+                    normalizedLevel: 0.05,
+                    interval: sampleInterval
+                )
+            )
+        }
+    }
+
+    func testPromptHoldsAcrossSpeechGapThenReleasesOnQuietVoice() {
+        var filter = MacLoudnessPromptFilter()
+        for _ in 0..<12 {
+            _ = filter.observe(
+                normalizedLevel: 0.10,
+                interval: sampleInterval
+            )
+        }
+        XCTAssertTrue(filter.isPrompting)
+
+        // A normal between-phrase gap must not make the wordless cue flicker.
+        for _ in 0..<8 {
+            _ = filter.observe(
+                normalizedLevel: 0.015,
+                interval: sampleInterval
+            )
+        }
+        XCTAssertTrue(filter.isPrompting)
+
+        for _ in 0..<12 {
+            _ = filter.observe(
+                normalizedLevel: 0.015,
+                interval: sampleInterval
+            )
         }
         XCTAssertFalse(filter.isPrompting)
     }
 
     func testResetAndInvalidSamplesReturnToSafeFloor() {
         var filter = MacLoudnessPromptFilter()
-        for _ in 0..<20 {
-            _ = filter.observe(normalizedLevel: 0.75, interval: 0.08)
+        for _ in 0..<12 {
+            _ = filter.observe(
+                normalizedLevel: 0.10,
+                interval: sampleInterval
+            )
         }
         XCTAssertTrue(filter.isPrompting)
 
         filter.reset()
         XCTAssertFalse(filter.isPrompting)
         XCTAssertEqual(filter.filteredLevel, 0)
-        XCTAssertFalse(filter.observe(normalizedLevel: .nan, interval: 0.08))
-        XCTAssertFalse(filter.observe(normalizedLevel: .infinity, interval: 0.08))
+        XCTAssertFalse(
+            filter.observe(normalizedLevel: .nan, interval: sampleInterval)
+        )
+        XCTAssertFalse(
+            filter.observe(normalizedLevel: .infinity, interval: sampleInterval)
+        )
         XCTAssertFalse(filter.observe(normalizedLevel: 1, interval: .nan))
     }
 }

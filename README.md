@@ -66,9 +66,10 @@ The Xcode project contains four product targets:
    open dictation. A Mac start briefly shows a neutral laptop glyph; an iPhone
    start shows a neutral phone glyph with an amber breathing wait-dot until
    capture is live. Both then spring-morph into the real red voice waveform.
-   Sustained near-peak speech adds a small, wordless double-down chevron beside
-   that waveform, asking for an easier voice without labeling an ordinary
-   phrase as loud; hysteresis keeps it stable through pauses between words.
+   Sustained unusually strong speech adds a small, wordless double-down chevron
+   beside that waveform, asking for an easier voice without labeling an
+   ordinary phrase as loud; hysteresis keeps it stable through pauses between
+   words.
    Paused segments transcribe as invisible plumbing: there are no segment cards,
    rails, slivers, counts, or `+N` badges. Pressing `fn` turns the same capsule
    directly into a small typing pill with three hopping dots. The dots claim no
