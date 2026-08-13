@@ -38,19 +38,21 @@ enum MacHUDCaptureActivity: Equatable, Sendable {
     case releasing
 }
 
-/// Turns the recorder's normalized average-power samples into one calm
-/// "ease down" decision for the HUD. A high threshold and dwell time avoid
-/// calling ordinary speech loud; separate release criteria and a slow envelope
-/// keep the cue from blinking between syllables.
+/// Turns either recorder's linear full-scale amplitude into one calm
+/// "ease down" decision for the HUD. AVCapture's dBFS average power is already
+/// converted to linear amplitude at the recorder boundary; Voice Processing
+/// supplies PCM RMS in the same unit. A short dwell rejects transients, while
+/// separate release criteria and a slow envelope keep the cue stable between
+/// syllables.
 struct MacLoudnessPromptFilter: Equatable, Sendable {
-    /// Normalized amplitude, equivalent to roughly -7.5 dBFS. This is
-    /// deliberately near the top of the recorder's range: the cue is for
-    /// sustained close/loud speech, not a judgment on normal conversation.
-    static let engageLevel = 0.42
-    /// Roughly -14 dBFS. The wide gap is intentional hysteresis.
-    static let releaseLevel = 0.20
-    static let engageDuration: TimeInterval = 0.48
-    static let releaseDuration: TimeInterval = 0.88
+    /// About -22.5 dBFS. This sits near the strong end of the range used by the
+    /// live waveform, rather than near clipping, so a deliberate loud phrase
+    /// can surface the cue on both recorder backends.
+    static let engageLevel = 0.075
+    /// About -30.5 dBFS. The wide gap is intentional hysteresis.
+    static let releaseLevel = 0.03
+    static let engageDuration: TimeInterval = 0.32
+    static let releaseDuration: TimeInterval = 0.64
 
     private(set) var filteredLevel = 0.0
     private(set) var isPrompting = false
