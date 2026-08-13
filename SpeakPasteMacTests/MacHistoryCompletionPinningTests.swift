@@ -385,6 +385,81 @@ final class MacHistoryCompletionPinningTests: XCTestCase {
             XCTAssertNil(relaunched.transcript(withID: sibling.id))
         }
     }
+
+    func testArchivingDeliveryEscrowsKeepsRichHistoryAndRecoversMissingText() async throws {
+        try await MainActor.run {
+            let scratch = try makeHistoryPinningScratch()
+            defer { try? FileManager.default.removeItem(at: scratch) }
+            let (suiteName, defaults) = makeHistoryPinningDefaults()
+            defer { defaults.removePersistentDomain(forName: suiteName) }
+            defaults.set(0, forKey: "mac-history-retention-days")
+            let directory = scratch.appendingPathComponent("History", isDirectory: true)
+            let history = MacHistoryStore(defaults: defaults, directory: directory)
+            let existing = MacTranscriptRecord(
+                createdAt: Date(timeIntervalSince1970: 1_725_400_000),
+                text: "History is authoritative",
+                destination: "Editor",
+                deviceName: "Continuity microphone",
+                recordingDuration: 4.5,
+                retainedAudioFileName: "\(UUID().uuidString).m4a"
+            )
+            XCTAssertTrue(history.append(existing))
+            let duplicate = MacPendingTranscript(
+                id: existing.id,
+                text: "Temporary escrow must not replace History",
+                destinationApplicationName: "Other editor",
+                destinationBundleIdentifier: nil,
+                createdAt: existing.createdAt
+            )
+            let missing = MacPendingTranscript(
+                text: "Recovered from temporary delivery state",
+                destinationApplicationName: "Notes",
+                destinationBundleIdentifier: nil,
+                createdAt: existing.createdAt.addingTimeInterval(1)
+            )
+
+            XCTAssertTrue(history.archiveDeliveryEscrows([duplicate, missing]))
+
+            XCTAssertEqual(history.records.count, 2)
+            XCTAssertEqual(history.records.first?.id, missing.id)
+            XCTAssertEqual(history.records.first?.text, missing.text)
+            XCTAssertEqual(history.records.first?.destination, "Notes")
+            XCTAssertEqual(history.records.first?.deviceName, "Recovered transcript")
+            XCTAssertEqual(history.records.first?.recordingDuration, 0)
+            XCTAssertEqual(history.records.last, existing)
+            XCTAssertEqual(
+                MacHistoryStore(defaults: defaults, directory: directory).records,
+                history.records
+            )
+        }
+    }
+
+    func testArchivingLargeEscrowBacklogAppliesHistoryLimitInOneTransition() async throws {
+        try await MainActor.run {
+            let scratch = try makeHistoryPinningScratch()
+            defer { try? FileManager.default.removeItem(at: scratch) }
+            let (suiteName, defaults) = makeHistoryPinningDefaults()
+            defer { defaults.removePersistentDomain(forName: suiteName) }
+            defaults.set(0, forKey: "mac-history-retention-days")
+            let directory = scratch.appendingPathComponent("History", isDirectory: true)
+            let history = MacHistoryStore(defaults: defaults, directory: directory)
+            let base = Date(timeIntervalSince1970: 1_725_500_000)
+            let escrows = (0 ..< 600).map { offset in
+                MacPendingTranscript(
+                    text: "Recovered \(offset)",
+                    destinationApplicationName: "Editor",
+                    destinationBundleIdentifier: nil,
+                    createdAt: base.addingTimeInterval(TimeInterval(offset))
+                )
+            }
+
+            XCTAssertTrue(history.archiveDeliveryEscrows(escrows))
+
+            XCTAssertEqual(history.records.count, MacHistoryStore.maximumRecords)
+            XCTAssertEqual(history.records.first?.id, escrows.last?.id)
+            XCTAssertEqual(history.records.last?.id, escrows[100].id)
+        }
+    }
 }
 
 private enum HistoryPinningTestError: Error {

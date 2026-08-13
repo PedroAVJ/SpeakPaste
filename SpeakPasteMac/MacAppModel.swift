@@ -713,6 +713,26 @@ final class MacAppModel: ObservableObject {
         if let error = pendingAudioStore.lastPersistenceError {
             recoveryNotice = "Audio recovery needed attention: \(error)"
         }
+
+        // Delivery escrows are transactional plumbing, not a second transcript
+        // library. Old builds kept every unverified paste here indefinitely,
+        // making each new dictation sort, encode, write, publish, and render a
+        // multi-megabyte queue. Once source-audio cleanup is complete, fold any
+        // genuinely missing text into bounded History and retire the whole
+        // stale queue atomically from the user's point of view: History first,
+        // escrow removal second.
+        if !pendingTranscriptStore.transcripts.isEmpty,
+           history.retentionDays != -1,
+           history.isPendingAudioRecoveryAuthorityTrusted,
+           history.records.allSatisfy({ $0.sourcePendingAudioID == nil }),
+           history.archiveDeliveryEscrows(pendingTranscriptStore.transcripts) {
+            do {
+                try pendingTranscriptStore.removeAll()
+                suppressedDuplicateDeliveryEscrowIDs.removeAll()
+            } catch {
+                recoveryNotice = "Recovered transcripts are in History, but their temporary delivery state could not be cleared: \(error.localizedDescription)"
+            }
+        }
         heldTranscripts = pendingTranscriptStore.transcripts
             .filter { !suppressedDuplicateDeliveryEscrowIDs.contains($0.id) }
             .map { pending in
@@ -3509,7 +3529,7 @@ final class MacAppModel: ObservableObject {
         guard hasBankedSegments else { return }
         discardedSpeakSequences.formUnion(openDictationSequences)
         openDictationSequences.removeAll()
-        recoveryNotice = "Discarded this dictation. Its transcribed text stays recoverable below until you paste or delete it."
+        recoveryNotice = "Dismissed this dictation. Its transcribed text remains in History."
     }
 
     /// Delivers closed dictations strictly in spoken order. Pauses create
@@ -3574,24 +3594,27 @@ final class MacAppModel: ObservableObject {
         await deliverJoined(MacFinishedDictationBatch(segments: successful))
     }
 
-    /// A discarded segment that had already been transcribed. It keeps its
-    /// durable escrow and its History row; it simply loses its delivery turn.
+    /// A discarded segment that had already been transcribed. History normally
+    /// remains the durable user-facing copy, so its temporary escrow can retire.
     private func bankDiscardedDictation(_ finished: MacFinishedDictation) {
-        guard
-            let escrowID = finished.deliveryEscrowID,
-            let pending = pendingTranscriptStore.transcript(withID: escrowID)
-        else {
+        if hasDurableHistoryCopy(finished.historyRecordID) {
+            _ = finishDeliveryEscrow(finished.deliveryEscrowID)
             finishHUDCard(finished.hudCardID)
-            return
+            recoveryNotice = "Dismissed this dictation. Its transcript remains in History."
+        } else if let escrowID = finished.deliveryEscrowID,
+                  let pending = pendingTranscriptStore.transcript(withID: escrowID) {
+            presentPendingTranscript(
+                pending,
+                target: nil,
+                preparedChunk: finished.preparedChunk,
+                hudCardID: finished.hudCardID,
+                hudOrdinal: finished.hudOrdinal,
+                recordingDuration: finished.recordingDuration
+            )
+            recoveryNotice = "Dismissed this dictation, but its temporary recovery copy was retained because History is unavailable."
+        } else {
+            finishHUDCard(finished.hudCardID)
         }
-        presentPendingTranscript(
-            pending,
-            target: nil,
-            preparedChunk: finished.preparedChunk,
-            hudCardID: finished.hudCardID,
-            hudOrdinal: finished.hudOrdinal,
-            recordingDuration: finished.recordingDuration
-        )
     }
 
     /// Imports are intentionally a manual-output lane. A long file must not
@@ -3606,11 +3629,13 @@ final class MacAppModel: ObservableObject {
         transcriptLearningNotice = nil
         lastHistoryRecordID = finished.historyRecordID
         lastTranscriptPendingID = finished.deliveryEscrowID
-        lastTranscriptOutputIsResolved = false
-        var pendingHandoffSaved = false
-        if let deliveryEscrowID = finished.deliveryEscrowID,
-           let pending = pendingTranscriptStore.transcript(withID: deliveryEscrowID),
-           pending.text == finished.text {
+        let historyCopyIsDurable = hasDurableHistoryCopy(finished.historyRecordID)
+        lastTranscriptOutputIsResolved = historyCopyIsDurable
+        if historyCopyIsDurable {
+            _ = finishDeliveryEscrow(finished.deliveryEscrowID)
+            finishHUDCard(finished.hudCardID)
+        } else if let escrowID = finished.deliveryEscrowID,
+                  let pending = pendingTranscriptStore.transcript(withID: escrowID) {
             presentPendingTranscript(
                 pending,
                 target: nil,
@@ -3619,18 +3644,14 @@ final class MacAppModel: ObservableObject {
                 hudOrdinal: finished.hudOrdinal,
                 recordingDuration: finished.recordingDuration
             )
-            pendingHandoffSaved = true
+        } else {
+            finishHUDCard(finished.hudCardID)
         }
-        if !pendingHandoffSaved { finishHUDCard(finished.hudCardID) }
-        let manualOutputIsReady = pendingHandoffSaved
+        let manualOutputIsReady = historyCopyIsDurable
         var detail: String
         let sourceLabel = isImport ? "Imported file" : "Saved recording"
-        if pendingHandoffSaved, finished.historyRecordID == nil {
-            detail = "\(sourceLabel) transcribed — ready for manual placement; its delivery copy remains until output is resolved"
-        } else if pendingHandoffSaved, finished.historyRecordID != nil {
+        if historyCopyIsDurable {
             detail = "\(sourceLabel) transcribed — ready in History for manual placement"
-        } else if finished.historyRecordID != nil {
-            detail = "\(sourceLabel) transcribed and preserved in History, but manual output is paused until its delivery handoff can be saved; recovery audio was kept"
         } else {
             detail = "\(sourceLabel) transcribed — visible now, but its durable recovery handoff could not finish; recovery audio was kept"
         }
@@ -3757,6 +3778,9 @@ final class MacAppModel: ObservableObject {
         let delivery = deliveryOutcome.result
         let deliveredTarget = deliveryOutcome.target
         activeDeliveryEscrowIDs.remove(combinedPending.id)
+        let historyCopyIsDurable = batch.segments.allSatisfy {
+            self.hasDurableHistoryCopy($0.historyRecordID)
+        }
 
         if delivery.isDelivered, completesHUDDictation {
             markHUDCardsDelivered(batch.hudCardIDs)
@@ -3764,52 +3788,44 @@ final class MacAppModel: ObservableObject {
 
         var detail = delivery.detail
         if case let .held(reason) = delivery {
-            restoreDeliveryEscrowPending(combinedPending.id)
-            let target = deliveredTarget ?? batch.target
-            if let target {
-                hold(
-                    batch.text,
-                    preparedChunk: batch.combinedPreparedChunk,
-                    for: target,
-                    pendingID: combinedPending.id,
-                    createdAt: batch.createdAt,
-                    hudCardID: batch.primaryHUDCardID,
-                    hudOrdinal: batch.hudOrdinal,
-                    recordingDuration: batch.recordingDuration,
-                    copyOnPersistenceFailure: false
-                )
-                finishHUDCards(batch.hudCardIDs.subtracting([batch.primaryHUDCardID]))
-                detail = "Held the complete dictation for \(target.applicationName) — \(reason.explanation)"
+            if historyCopyIsDurable {
+                _ = finishDeliveryEscrow(combinedPending.id)
+                finishHUDCards(batch.hudCardIDs)
+                detail = "Kept the complete dictation in History — \(reason.explanation)"
             } else {
+                restoreDeliveryEscrowPending(combinedPending.id)
                 presentPendingTranscript(
-                    pendingTranscriptStore.transcript(withID: combinedPending.id)
-                        ?? combinedPending,
-                    target: nil,
+                    pendingTranscriptStore.transcript(withID: combinedPending.id) ?? combinedPending,
+                    target: deliveredTarget,
                     preparedChunk: batch.combinedPreparedChunk,
                     hudCardID: batch.primaryHUDCardID,
                     hudOrdinal: batch.hudOrdinal,
-                    recordingDuration: batch.recordingDuration,
-                    showTransientHUD: true
+                    recordingDuration: batch.recordingDuration
                 )
                 finishHUDCards(batch.hudCardIDs.subtracting([batch.primaryHUDCardID]))
-                detail = "Held the complete dictation for manual placement — \(reason.explanation)"
+                detail = "Held the complete dictation for recovery — \(reason.explanation)"
             }
         } else if case let .pasted(_, verified) = delivery,
                   MacPasteboardRecoveryPolicy.shouldSuspendAutomaticRetry(
                       deliveryReachedOutputBoundary: true,
                       pasteWasVerified: verified
                   ) {
-            presentPendingTranscript(
-                pendingTranscriptStore.transcript(withID: combinedPending.id)
-                    ?? combinedPending,
-                target: deliveredTarget,
-                preparedChunk: batch.combinedPreparedChunk,
-                hudCardID: batch.primaryHUDCardID,
-                hudOrdinal: batch.hudOrdinal,
-                recordingDuration: batch.recordingDuration
-            )
-            finishHUDCards(batch.hudCardIDs.subtracting([batch.primaryHUDCardID]))
-            detail = "\(delivery.detail); complete combined recovery copy retained"
+            if historyCopyIsDurable {
+                _ = finishDeliveryEscrow(combinedPending.id)
+                finishHUDCards(batch.hudCardIDs)
+                detail = "\(delivery.detail); transcript remains in History"
+            } else {
+                presentPendingTranscript(
+                    pendingTranscriptStore.transcript(withID: combinedPending.id) ?? combinedPending,
+                    target: deliveredTarget,
+                    preparedChunk: batch.combinedPreparedChunk,
+                    hudCardID: batch.primaryHUDCardID,
+                    hudOrdinal: batch.hudOrdinal,
+                    recordingDuration: batch.recordingDuration
+                )
+                finishHUDCards(batch.hudCardIDs.subtracting([batch.primaryHUDCardID]))
+                detail = "\(delivery.detail); recovery copy retained"
+            }
         } else if case .clipboardFallback = delivery {
             _ = finishDeliveryEscrow(combinedPending.id)
             finishHUDCards(batch.hudCardIDs.subtracting([batch.primaryHUDCardID]))
@@ -3821,17 +3837,22 @@ final class MacAppModel: ObservableObject {
             )
             refreshHeldClipboardOwnership()
         } else if case .clipboardFailed = delivery {
-            restoreDeliveryEscrowPending(combinedPending.id)
-            presentPendingTranscript(
-                pendingTranscriptStore.transcript(withID: combinedPending.id)
-                    ?? combinedPending,
-                target: deliveredTarget,
-                preparedChunk: batch.combinedPreparedChunk,
-                hudCardID: batch.primaryHUDCardID,
-                hudOrdinal: batch.hudOrdinal,
-                recordingDuration: batch.recordingDuration
-            )
-            finishHUDCards(batch.hudCardIDs.subtracting([batch.primaryHUDCardID]))
+            if historyCopyIsDurable {
+                _ = finishDeliveryEscrow(combinedPending.id)
+                finishHUDCards(batch.hudCardIDs)
+                detail = "\(delivery.detail); transcript remains in History"
+            } else {
+                restoreDeliveryEscrowPending(combinedPending.id)
+                presentPendingTranscript(
+                    pendingTranscriptStore.transcript(withID: combinedPending.id) ?? combinedPending,
+                    target: deliveredTarget,
+                    preparedChunk: batch.combinedPreparedChunk,
+                    hudCardID: batch.primaryHUDCardID,
+                    hudOrdinal: batch.hudOrdinal,
+                    recordingDuration: batch.recordingDuration
+                )
+                finishHUDCards(batch.hudCardIDs.subtracting([batch.primaryHUDCardID]))
+            }
         } else {
             _ = finishDeliveryEscrow(combinedPending.id)
             finishHUDCards(batch.hudCardIDs)
@@ -4128,87 +4149,72 @@ final class MacAppModel: ObservableObject {
         let delivery = deliveryOutcome.result
         let deliveredTarget = deliveryOutcome.target
         activeDeliveryEscrowIDs.remove(deliveryEscrowID)
+        let historyCopyIsDurable = hasDurableHistoryCopy(finished.historyRecordID)
         if delivery.isDelivered, completesHUDDictation {
             markHUDCardsDelivered(Set([finished.hudCardID]))
         }
         var detail = delivery.detail
         if case let .held(reason) = delivery, let target = deliveredTarget {
-            restoreDeliveryEscrowPending(finished.deliveryEscrowID)
-            hold(
-                finished.text,
-                preparedChunk: finished.preparedChunk,
-                for: target,
-                pendingID: finished.deliveryEscrowID,
-                createdAt: finished.createdAt,
-                hudCardID: finished.hudCardID,
-                hudOrdinal: finished.hudOrdinal,
-                recordingDuration: finished.recordingDuration,
-                copyOnPersistenceFailure: false
-            )
-            detail = "Held for \(target.applicationName) — \(reason.explanation)"
-        } else if case let .held(reason) = delivery {
-            // A late focus change can invalidate the live target after capture.
-            // Keep the durable handoff for explicit placement; never guess or
-            // reinterpret that no-side-effect result as delivered.
-            restoreDeliveryEscrowPending(deliveryEscrowID)
-            if let pending = pendingTranscriptStore.transcript(withID: deliveryEscrowID) {
-                presentPendingTranscript(
-                    pending,
-                    target: nil,
-                    preparedChunk: finished.preparedChunk,
-                    hudCardID: finished.hudCardID,
-                    hudOrdinal: finished.hudOrdinal,
-                    recordingDuration: finished.recordingDuration
-                )
+            if historyCopyIsDurable {
+                finishDeliveryEscrow(finished.deliveryEscrowID)
+                finishHUDCard(finished.hudCardID)
+                detail = "Kept in History for \(target.applicationName) — \(reason.explanation)"
             } else {
-                // `beginDeliveryEscrowAttempt` proved this entry existed. If
-                // its backing store changes underneath us, keep the in-memory
-                // text and HUD card visible rather than treating a hold as a
-                // successful output and destroying the last user-facing copy.
-                markHUDCardHeld(
-                    finished.hudCardID,
-                    ordinal: finished.hudOrdinal,
-                    createdAt: finished.createdAt,
-                    recordingDuration: finished.recordingDuration
-                )
-                recoveryNotice = "Delivery was held, but its saved recovery entry could not be reloaded. The transcript remains visible in this session."
+                restoreDeliveryEscrowPending(deliveryEscrowID)
+                if let pending = pendingTranscriptStore.transcript(withID: deliveryEscrowID) {
+                    presentPendingTranscript(
+                        pending,
+                        target: target,
+                        preparedChunk: finished.preparedChunk,
+                        hudCardID: finished.hudCardID,
+                        hudOrdinal: finished.hudOrdinal,
+                        recordingDuration: finished.recordingDuration
+                    )
+                }
+                detail = "Held for \(target.applicationName) — \(reason.explanation)"
             }
-            detail = "Held for manual placement — \(reason.explanation)"
+        } else if case let .held(reason) = delivery {
+            if historyCopyIsDurable {
+                finishDeliveryEscrow(deliveryEscrowID)
+                finishHUDCard(finished.hudCardID)
+                detail = "Kept in History for manual placement — \(reason.explanation)"
+            } else {
+                restoreDeliveryEscrowPending(deliveryEscrowID)
+                if let pending = pendingTranscriptStore.transcript(withID: deliveryEscrowID) {
+                    presentPendingTranscript(
+                        pending,
+                        target: nil,
+                        preparedChunk: finished.preparedChunk,
+                        hudCardID: finished.hudCardID,
+                        hudOrdinal: finished.hudOrdinal,
+                        recordingDuration: finished.recordingDuration
+                    )
+                }
+                detail = "Held for manual placement — \(reason.explanation)"
+            }
         } else if case let .pasted(_, verified) = delivery,
                   MacPasteboardRecoveryPolicy.shouldSuspendAutomaticRetry(
                       deliveryReachedOutputBoundary: true,
                       pasteWasVerified: verified
                   ) {
-            // The side effect may already have happened. Keep the durable
-            // uncertain escrow visible and refuse every implicit retry.
-            let escrowID = finished.deliveryEscrowID ?? finished.hudCardID
-            let pending = pendingTranscriptStore.transcript(withID: escrowID)
-                ?? MacPendingTranscript(
-                    id: escrowID,
-                    text: finished.text,
-                    destinationApplicationName: deliveredTarget?.applicationName
-                        ?? finished.target?.applicationName
-                        ?? "Unknown app",
-                    destinationBundleIdentifier: deliveredTarget?.bundleIdentifier
-                        ?? finished.target?.bundleIdentifier,
-                    createdAt: finished.createdAt,
-                    deliveryState: .deliveryUncertain
+            // The side effect may already have happened. Never retry it
+            // automatically, but do not retain a second transcript library:
+            // the exact text is already durable in History.
+            if historyCopyIsDurable {
+                finishDeliveryEscrow(finished.deliveryEscrowID)
+                finishHUDCard(finished.hudCardID)
+                detail = "\(delivery.detail); transcript remains in History"
+            } else if let pending = pendingTranscriptStore.transcript(withID: deliveryEscrowID) {
+                presentPendingTranscript(
+                    pending,
+                    target: deliveredTarget,
+                    preparedChunk: finished.preparedChunk,
+                    hudCardID: finished.hudCardID,
+                    hudOrdinal: finished.hudOrdinal,
+                    recordingDuration: finished.recordingDuration
                 )
-            presentPendingTranscript(
-                pending,
-                target: deliveredTarget,
-                preparedChunk: finished.preparedChunk,
-                hudCardID: finished.hudCardID,
-                hudOrdinal: finished.hudOrdinal,
-                recordingDuration: finished.recordingDuration
-            )
-            let hasDurableRecovery = pendingTranscriptStore.transcript(withID: escrowID) != nil
-            if !hasDurableRecovery {
-                recoveryNotice = "The paste may have landed. Its durable recovery entry could not be reloaded, so the exact transcript remains visible for this session and will not be retried automatically."
+                detail = "\(delivery.detail); recovery copy retained"
             }
-            detail = hasDurableRecovery
-                ? "\(delivery.detail); saved recovery entry marked as possibly delivered"
-                : "\(delivery.detail); possibly delivered copy retained for this session"
         } else if case .clipboardFallback = delivery {
             finishDeliveryEscrow(finished.deliveryEscrowID)
             showClipboardFallbackHUD(
@@ -4220,21 +4226,23 @@ final class MacAppModel: ObservableObject {
             refreshHeldClipboardOwnership()
         } else if case .clipboardFailed = delivery,
                   let escrowID = finished.deliveryEscrowID {
-            // No external insertion was attempted successfully, so an escrow
-            // marked uncertain before the delivery gate can safely return to
-            // pending. The clipboard failure itself remains visible.
-            restoreDeliveryEscrowPending(escrowID)
-            if let restored = pendingTranscriptStore.transcript(withID: escrowID) {
-                presentPendingTranscript(
-                    restored,
-                    target: deliveredTarget,
-                    preparedChunk: finished.preparedChunk,
-                    hudCardID: finished.hudCardID,
-                    hudOrdinal: finished.hudOrdinal,
-                    recordingDuration: finished.recordingDuration
-                )
+            if historyCopyIsDurable {
+                finishDeliveryEscrow(escrowID)
+                finishHUDCard(finished.hudCardID)
+                detail = "\(delivery.detail); transcript remains in History"
+            } else {
+                restoreDeliveryEscrowPending(escrowID)
+                if let pending = pendingTranscriptStore.transcript(withID: escrowID) {
+                    presentPendingTranscript(
+                        pending,
+                        target: deliveredTarget,
+                        preparedChunk: finished.preparedChunk,
+                        hudCardID: finished.hudCardID,
+                        hudOrdinal: finished.hudOrdinal,
+                        recordingDuration: finished.recordingDuration
+                    )
+                }
             }
-            detail = delivery.detail
         } else {
             finishDeliveryEscrow(finished.deliveryEscrowID)
             finishHUDCard(finished.hudCardID)
@@ -4569,6 +4577,11 @@ final class MacAppModel: ObservableObject {
                 presentPendingTranscript(pending, target: nil)
             }
         }
+    }
+
+    private func hasDurableHistoryCopy(_ id: UUID?) -> Bool {
+        guard let id else { return false }
+        return history.records.contains { $0.id == id }
     }
 
     @discardableResult

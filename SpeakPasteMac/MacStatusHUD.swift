@@ -698,7 +698,7 @@ private struct MacHUDWaveform: View {
     var body: some View {
         TimelineView(
             .animation(
-                minimumInterval: 1.0 / 60,
+                minimumInterval: 1.0 / 30,
                 paused: reduceMotion || frozen || !isActive
             )
         ) { context in
@@ -797,7 +797,7 @@ private struct MacHUDTypingDots: View {
     var body: some View {
         TimelineView(
             .animation(
-                minimumInterval: 1.0 / 60,
+                minimumInterval: 1.0 / 30,
                 paused: reduceMotion || !isActive
             )
         ) { context in

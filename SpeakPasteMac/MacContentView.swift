@@ -252,7 +252,12 @@ private struct MacDashboardView: View {
                 Spacer(minLength: 0)
             }
 
-            Text(model.heldTranscripts.map(\.text).joined(separator: " "))
+            Text(
+                model.heldTranscripts
+                    .suffix(3)
+                    .map { String($0.text.prefix(600)) }
+                    .joined(separator: " ")
+            )
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(3)
@@ -319,7 +324,7 @@ private struct MacDashboardView: View {
                 Spacer(minLength: 0)
             }
 
-            ForEach(model.retryableFailures) { failure in
+            ForEach(Array(model.retryableFailures.prefix(6))) { failure in
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 8) {
                         Text("\(failure.deviceName) · \(timeString(failure.recordingDuration)) · \(failure.createdAt.formatted(date: .abbreviated, time: .shortened))")
@@ -351,6 +356,11 @@ private struct MacDashboardView: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+            }
+            if model.retryableFailures.count > 6 {
+                Text("\(model.retryableFailures.count - 6) more saved recordings are available in the recovery store.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
 
             if count > 1 {

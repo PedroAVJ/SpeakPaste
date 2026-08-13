@@ -355,6 +355,42 @@ final class MacHistoryStore: ObservableObject {
         return true
     }
 
+    /// Moves abandoned delivery escrows into their durable product home.
+    ///
+    /// History is already committed before SpeakPaste creates a delivery
+    /// escrow. Older builds nevertheless retained thousands of those temporary
+    /// rows after an unverified paste. Preserve any escrow whose History row is
+    /// genuinely missing, keep the richer existing History row on UUID
+    /// collisions, and apply the normal retention/count limits in one write.
+    @discardableResult
+    func archiveDeliveryEscrows(_ escrows: [MacPendingTranscript]) -> Bool {
+        guard !escrows.isEmpty else { return true }
+        var byID: [UUID: MacTranscriptRecord] = [:]
+        for record in records where byID[record.id] == nil {
+            byID[record.id] = record
+        }
+        for escrow in escrows where byID[escrow.id] == nil {
+            byID[escrow.id] = MacTranscriptRecord(
+                id: escrow.id,
+                createdAt: escrow.createdAt,
+                text: escrow.text,
+                destination: escrow.destinationApplicationName,
+                deviceName: "Recovered transcript",
+                recordingDuration: 0
+            )
+        }
+        let merged = byID.values.sorted { lhs, rhs in
+            if lhs.createdAt == rhs.createdAt {
+                return lhs.id.uuidString < rhs.id.uuidString
+            }
+            return lhs.createdAt > rhs.createdAt
+        }
+        let proposed = recordsWithinAutomaticLimits(merged)
+        guard persist(proposed) else { return false }
+        records = proposed
+        return true
+    }
+
     @discardableResult
     func delete(_ id: UUID) -> Bool {
         guard let record = records.first(where: { $0.id == id }) else { return false }
