@@ -63,6 +63,7 @@ enum MacKeyIndication: Equatable, Sendable {
 
 enum MacKeyTint: Equatable, Sendable {
     case source
+    case hold
     case deliver
     case discard
 }
@@ -73,6 +74,7 @@ enum MacKeyTint: Equatable, Sendable {
 enum MacKeyboardMapState {
     static func indications(
         phase: MacCapturePhase,
+        deliveryTimingState: MacDeliveryTimingState,
         activeSource: MacInputMode?,
         hasBankedSegments: Bool,
         canStartRecording: Bool
@@ -82,6 +84,7 @@ enum MacKeyboardMapState {
             result[key] = indication(
                 for: key,
                 phase: phase,
+                deliveryTimingState: deliveryTimingState,
                 activeSource: activeSource,
                 hasBankedSegments: hasBankedSegments,
                 canStartRecording: canStartRecording
@@ -93,6 +96,7 @@ enum MacKeyboardMapState {
     private static func indication(
         for key: MacDictationKey,
         phase: MacCapturePhase,
+        deliveryTimingState: MacDeliveryTimingState,
         activeSource: MacInputMode?,
         hasBankedSegments: Bool,
         canStartRecording: Bool
@@ -102,24 +106,39 @@ enum MacKeyboardMapState {
             sourceIndication(
                 for: key,
                 phase: phase,
+                deliveryTimingState: deliveryTimingState,
                 activeSource: activeSource,
                 canStartRecording: canStartRecording
             )
         case .end:
-            endIndication(phase: phase, hasBankedSegments: hasBankedSegments)
+            endIndication(
+                phase: phase,
+                deliveryTimingState: deliveryTimingState,
+                hasBankedSegments: hasBankedSegments
+            )
         case .cancel:
-            cancelIndication(phase: phase, hasBankedSegments: hasBankedSegments)
+            cancelIndication(
+                phase: phase,
+                deliveryTimingState: deliveryTimingState,
+                hasBankedSegments: hasBankedSegments
+            )
         }
     }
 
     private static func sourceIndication(
         for key: MacDictationKey,
         phase: MacCapturePhase,
+        deliveryTimingState: MacDeliveryTimingState,
         activeSource: MacInputMode?,
         canStartRecording: Bool
     ) -> MacKeyIndication {
         guard let mode = key.inputMode else { return .blank }
         let sourceSymbol = mode == .mac ? "laptopcomputer" : "iphone"
+        if deliveryTimingState.isAwaitingDelivery {
+            return canStartRecording
+                ? .active(symbol: sourceSymbol, tint: .source)
+                : .inert(symbol: sourceSymbol)
+        }
         switch phase {
         case .ready, .succeeded, .failed:
             return canStartRecording
@@ -145,9 +164,18 @@ enum MacKeyboardMapState {
 
     private static func endIndication(
         phase: MacCapturePhase,
+        deliveryTimingState: MacDeliveryTimingState,
         hasBankedSegments: Bool
     ) -> MacKeyIndication {
         let symbol = "text.insert"
+        switch deliveryTimingState {
+        case .draining:
+            return .active(symbol: "pause.circle.fill", tint: .hold)
+        case .held:
+            return .active(symbol: symbol, tint: .deliver)
+        case .inactive:
+            break
+        }
         switch phase {
         case .recording, .paused, .finalizing:
             return .active(symbol: symbol, tint: .deliver)
@@ -164,9 +192,13 @@ enum MacKeyboardMapState {
 
     private static func cancelIndication(
         phase: MacCapturePhase,
+        deliveryTimingState: MacDeliveryTimingState,
         hasBankedSegments: Bool
     ) -> MacKeyIndication {
         let symbol = "xmark"
+        if deliveryTimingState.isAwaitingDelivery {
+            return .active(symbol: symbol, tint: .discard)
+        }
         switch phase {
         case .connecting, .recording:
             return .active(symbol: symbol, tint: .discard)

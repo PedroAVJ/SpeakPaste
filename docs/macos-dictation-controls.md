@@ -12,13 +12,15 @@ cannot drift from what the keys do.
 |---|---|
 | right ⌘ | Mac mic: start / pause / resume |
 | right ⌥ | iPhone mic: start / pause / resume |
-| fn | End: close the dictation, deliver everything banked |
+| fn | End / hold / release: close the dictation toward delivery, park it while Draining, or release it from Held |
 | Esc | Dismiss: close the dictation away from the cursor, into recovery |
 
-- A source key can never deliver text and never destroy it. `fn` always
-  delivers. `Esc` always dismisses — and dismissal destroys nothing:
-  the dictation becomes a recovery entry. No key changes consequence
-  class with state.
+- A source key can never deliver text and never destroy it. `fn` only ever
+  moves text toward delivery: the first press ends the dictation, a press
+  while Draining parks *when* it may land, and a press from Held releases it
+  toward the then-current cursor. `Esc` always dismisses — and dismissal
+  destroys nothing: the dictation becomes a recovery entry. No key changes
+  consequence class with state.
 - Bare taps, acting immediately — no double-taps, no chords, no timing
   windows. Modifier double-press belongs to the OS.
 - There is no stored Mac/iPhone mode. The key pressed is the microphone
@@ -30,7 +32,8 @@ cannot drift from what the keys do.
 A dictation is an ordered list of segments plus at most one hot or
 pending capture. **There is only ever one dictation.** States: **Idle**,
 **Connecting(source)**, **Recording(source)**, **Paused**, and
-**Draining** — ended, delivery not yet landed.
+**Draining** — ended, delivery not yet landed — and **Held** — ended,
+transcription still running or complete, but landing parked by the user.
 
 | | right ⌘ | right ⌥ | fn | Esc |
 |---|---|---|---|---|
@@ -40,7 +43,8 @@ pending capture. **There is only ever one dictation.** States: **Idle**,
 | Recording Mac | **pause** | inert + HUD nudge | end | dismiss² |
 | Recording iPhone | inert + HUD nudge | **pause** | end | dismiss² |
 | Paused | resume Mac | resume iPhone | end | dismiss² |
-| Draining | **reopen** on Mac | **reopen** on iPhone | inert | dismiss² |
+| Draining | **reopen** on Mac | **reopen** on iPhone | **hold** | dismiss² |
+| Held | **reopen** on Mac | **reopen** on iPhone | **deliver now** | dismiss² |
 
 ¹ Inert when nothing is banked.
 ² Dismissal is instant and destroys nothing: the whole dictation — hot
@@ -67,18 +71,25 @@ atomic**: End closes the dictation, and when every segment's transcript
 is in, the whole message lands at the cursor as one delivery. The first
 landed character **seals** the dictation — until then a source key
 **reopens** it (back to recording; delivery called off) and Esc
-dismisses it (delivery called off; everything to recovery). After the
-seal it is immutable and leaves the HUD.
+dismisses it (delivery called off; everything to recovery). While Draining,
+another `fn` parks the landing in **Held**. Held is indefinite: it has no
+expiry, grace period, or timing window. Transcription continues normally in
+the background, but the ordered drain may not enter the delivery escrow or
+resolve a destination until `fn` releases the hold. Release resolves the
+currently focused destination fresh and delivers exactly once there when the
+complete transcript is ready. After the seal the dictation is immutable and
+leaves the HUD.
 There is no queue of concurrent dictations: starting during Draining is
-a reopen, not a second message. Pause finalizes eagerly — the
+a reopen, not a second message, and the same is true from Held. Pause finalizes eagerly — the
 microphone is released first, then the segment transcribes immediately —
 so End after a pause is typically near-instant, and the reopen window
-correspondingly short.
+correspondingly short unless the user deliberately extends it with Held.
 
 Esc never delivers. It dismisses instantly, and a dismissed dictation
 is a recovery entry, not a loss — slower to get back than text at the
-cursor, and that is the whole cost. The fn path takes no artificial
-delay — delivery is only ever as slow as transcription itself.
+cursor, and that is the whole cost. The unheld fn path takes no artificial
+delay — delivery is only ever as slow as transcription itself. Held adds only
+the delay the user explicitly owns and ends with the next `fn`.
 
 ## Competing-media integration contract
 
@@ -113,8 +124,9 @@ keyboard map, replacing menu items.
   glyphed: laptop (right ⌘), phone (right ⌥), deliver (fn), dismiss
   (Esc).
 - Live: keys re-glyph from the current state per the matrix — while
-  Recording on Mac, right ⌘ shows pause and right ⌥ is dark. The panel
-  is a mirror, not a control surface.
+  Recording on Mac, right ⌘ shows pause and right ⌥ is dark; while Draining,
+  `fn` shows hold; while Held, it shows delivery. The panel is a mirror, not a
+  control surface.
 - The keyboard drawn is the user's physical layout (ANSI/ISO/JIS).
 - Opening the panel never grants Dock or Command-Tab presence.
 - Footer only: Settings, Quit, readiness/offline notices.

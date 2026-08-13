@@ -43,20 +43,22 @@ The Xcode project contains four product targets:
    | --- | --- |
    | right ⌘ | Mac microphone: start / pause / resume |
    | right ⌥ | iPhone microphone: start / pause / resume |
-   | fn | End: close the dictation and deliver everything banked |
+   | fn | End / hold / release: close toward delivery, park while Draining, or release Held text |
    | Esc | Dismiss |
 
    The left ⌘ and ⌥ are deliberately untouched, and every chord — including
    ⌘C, ⌘V, and ⌘Tab — keeps its normal behavior. Only a bare press-and-release
    with no other key or modifier is read as dictation.
-7. A source key can never deliver text and never destroy it; `fn` always
-   delivers; `Esc` always dismisses — instantly, with nothing destroyed: the
+7. A source key can never deliver text and never destroy it; `fn` only moves
+   text toward delivery; `Esc` always dismisses — instantly, with nothing destroyed: the
    dictation leaves the screen and stays recoverable in the waiting-text
    list. Pausing releases the microphone (handing
    your iPhone straight back) and banks the segment, which starts transcribing
-   immediately — so the End after a pause is usually instant. Nothing reaches
-   your cursor until you press `fn`, and then everything banked is delivered in
-   the order you spoke it.
+   immediately — so the End after a pause is usually instant. The first `fn`
+   ends the dictation into Draining. Press `fn` again before it lands to hold
+   delivery indefinitely while transcription continues; press `fn` from Held
+   to release everything once at the cursor focused then. Nothing reaches your
+   cursor before release, and everything banked stays in spoken order.
 8. To change microphone mid-thought, pause with the key that is live and resume
    with the other one. While a microphone is hot the other source key only
    nudges: there is no mid-recording handover.
@@ -71,7 +73,11 @@ The Xcode project contains four product targets:
    rails, slivers, counts, or `+N` badges. Pressing `fn` turns the same capsule
    directly into a small typing pill with three hopping dots. The dots claim no
    progress or time remaining; completion is the verified delivery event, not
-   an animation finishing. Success, errors, model details, and offline notices
+   an animation finishing. A second `fn` parks landing as one steady amber
+   raised hand in the same small output pill; the patter stops, transcription
+   continues, and the hand remains until `fn`, a source key, or Esc resolves it.
+   It cannot be confused with paused recording's wide frozen waveform. Success,
+   errors, model details, and offline notices
    stay in the app instead of becoming floating notifications.
    The two terminal exits happen in place and differ by shape: a delivered
    dictation **pops** (a bloom outward), a dismissed one **folds** (a squash to
@@ -81,17 +87,20 @@ The Xcode project contains four product targets:
 10. A resting dictation shows a **still, dim, sourceless** front card — no
    laptop or phone glyph, because no microphone is live and the next source key
    decides. It never times out; transient caps apply only to connecting,
-   releasing, draining, and held acknowledgments.
+   releasing, draining, and recovery-held acknowledgments. User-controlled
+   Held also never times out.
 11. Preloaded sounds: the iPhone wait begins with a low tick, capture-live gets
    one rising ping, pause gets a low held tone, and Escape gets a muted fold
    tone. Closing has its own pair — a quiet typing patter that loops while the
    dots are up, then a soft falling plop as the message lands. Nothing sounds at
-   the `fn` press itself; the patter is the acknowledgment. Errors are the
+   the first `fn` press itself; the patter is the acknowledgment. Parking
+   Draining with `fn` stops the patter and plays two dry level knocks, distinct
+   from the pause tone; releasing Held simply restarts the patter. Errors are the
    family's only phrase: low and falling. Every cue is synthesized
    deterministically by `scripts/generate-macos-earcons.py`.
 
-You do not have to wait at the keyboard. When a transcript reaches the delivery
-boundary, SpeakPaste uses the currently focused writable, non-secure editor —
+You do not have to wait at the keyboard. When an unheld transcript reaches the
+delivery boundary, SpeakPaste uses the currently focused writable, non-secure editor —
 including a different field or application from where dictation began — and
 delivers through the safest supported route for that destination. It does not
 require the editor to retain the same Accessibility object identity throughout
@@ -116,7 +125,8 @@ paste or delete it.
 
 The menu bar item opens a small anchored panel: a live map of your own keyboard
 — ANSI, ISO, or JIS, whichever you are typing on — with every key blank except
-the four bound ones, which re-glyph as the state changes. It is a mirror, not a
+the four bound ones, which re-glyph as the state changes — including hold on
+`fn` while Draining and delivery while Held. It is a mirror, not a
 control surface; nothing on the board is clickable. Its footer carries only the
 readiness or offline notice, Open SpeakPaste, Settings, and Quit, and opening it
 never grants Dock or Command-Tab presence. Opening the dashboard
@@ -398,13 +408,17 @@ The macOS target builds with local ad-hoc signing. Its floating indicator is one
 click-through Liquid Glass capsule with a stable identity for the entire open
 dictation. Source glyphs bloom at center, listening uses the real voice
 waveform, rest freezes that waveform in gray, and `fn` morphs directly to one
-typing-dots face while every banked segment remains invisible plumbing. Only
-verified delivery pops outward; Escape folds inward to recovery. A new hold
-appears only as one count-free clipboard-or-document glyph for two seconds.
+typing-dots face while every banked segment remains invisible plumbing. A
+second `fn` before landing parks delivery indefinitely as a steady amber raised
+hand while transcription continues; `fn` releases it once at the current
+cursor, either source reopens it, and Escape moves it to recovery. Only verified
+delivery pops outward; Escape folds inward. A separate recovery hold appears
+only as one count-free clipboard-or-document glyph for two seconds.
 Recovered and possibly delivered text stays in the dashboard and is never
 replayed into the HUD on launch. The capsule has no controls and never presents
 results, offline notices, or errors. Draining is capped at 90 seconds so a
-stalled request cannot pin it onscreen; the dashboard and menu bar remain
+stalled request cannot pin it onscreen; user-controlled Held has no cap. The
+dashboard and menu bar remain
 authoritative. Its persisted custom position is editable only through the
 menu-bar panel's deliberate move mode, so normal HUD use stays click-through.
 The Mac source courtesy beat is capped at 0.5 seconds, an iPhone
@@ -419,8 +433,8 @@ network requests, retry concurrency, and long-session limits are bounded.
 
 The indicator can be anchored at any screen edge without becoming a second
 control surface. Each dictation verb has its own bare key: right ⌘ and right ⌥
-start, pause, and resume on the Mac and iPhone microphones, `fn` ends and
-delivers, and `Esc` dismisses. Changing microphone mid-thought is pause then
+start, pause, and resume on the Mac and iPhone microphones, `fn` ends, parks
+Draining, or releases Held delivery, and `Esc` dismisses. Changing microphone mid-thought is pause then
 resume on the other key, which finalizes the current segment and releases its
 hardware before the next one starts. One Escape dismisses connecting or
 recording immediately, without destroying anything. Its preloaded sound family

@@ -87,8 +87,13 @@ TCC grants, or Application Support.
       confirm the actual waveform freezes in place, gray and sourceless, without
       timing out. Press fn and confirm it morphs directly into the small typing
       dots with no gray intermediate; only verified delivery may pop it outward.
-      Reopen while draining and confirm the same capsule stands back up into the
-      live waveform. Press Escape from hot, resting, and draining and confirm the
+      Before it lands, press fn again and confirm the dots and patter stop, the
+      same compact capsule becomes a steady amber raised hand, and it remains
+      there for several minutes while transcription continues. Confirm it cannot
+      be confused with the wide frozen Resting waveform. Press fn from Held and
+      confirm the same face returns to dots and lands once at the cursor focused
+      then. Reopen while draining or Held and confirm the same capsule stands back up into the
+      live waveform. Press Escape from hot, resting, draining, and Held and confirm the
       capsule folds inward while all owed text moves to recovery. The indicator
       must hide at idle, after delivery, and for success, errors, and offline
       state; it must never become an error notification. Force a held
@@ -130,7 +135,8 @@ TCC grants, or Application Support.
       the cursor at any pause. Press fn and confirm all three arrive at once, in
       spoken order. Confirm the End after a long pause is effectively instant,
       because pausing already started transcription.
-- [ ] With VoiceOver, confirm capture, rest, draining, held, delivery, and
+- [ ] With VoiceOver, confirm capture, rest, draining, user-controlled Held,
+      the separate recovery-held receipt, delivery, and
       dismissal announcements describe the consequential phase without exposing
       internal segment ordinals. With Reduce Motion, confirm pop and fold become
       restrained crossfades rather than scale travel.
@@ -138,7 +144,10 @@ TCC grants, or Application Support.
       level, capture-live gets one rising ping with no load delay, pause gets the
       low held tone, and Escape gets the muted fold tone. Confirm fn itself is
       silent, the low irregular typing patter runs only while the dots are up,
-      and the falling delivery plop plays only after verified insertion. Confirm
+      and the falling delivery plop plays only after verified insertion. While
+      Draining, press fn and confirm the patter stops and two dry level knocks
+      announce Held without resembling the single low pause tone; release from
+      Held should restart the patter without another chime. Confirm
       errors use the only two-note phrase, E4 to B3 low and falling, and disabling
       Sounds silences the complete family.
 - [ ] Verify every vocabulary action: add, search, edit Save/Cancel, paste-list
@@ -218,6 +227,17 @@ for the release evidence.
       then tap **fn**. Keep that writable field focused through the delivery
       boundary and confirm text reaches the current cursor while the iPhone's
       system-owned capture surface dismisses before transcription.
+- [ ] Repeat, but press **fn** again while the HUD is Draining. Confirm the HUD
+      becomes Held and stays there for several minutes while transcription may
+      finish. Switch windows and click into a different writable field, then
+      press **fn**: the complete dictation must land exactly once at that
+      then-current cursor. Repeat from Held with Escape and confirm every banked
+      segment reaches waiting-text recovery with nothing pasted or destroyed.
+      Repeat from Held with each source key and confirm the same dictation
+      reopens, accepts another segment, and later delivers once with no loss or
+      duplicate. Open the menu-bar map in Draining and Held and confirm fn shows
+      different hold and deliver glyphs while both source keys and Escape retain
+      their documented verbs.
 - [ ] Repeat immediately to prove clean Continuity release and reconnect, not
       merely one successful transcription.
 - [ ] Tap right ⌥ from idle and confirm the iPhone microphone is used without

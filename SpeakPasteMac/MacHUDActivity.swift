@@ -18,6 +18,19 @@ enum MacHUDHeldSymbol {
     }
 }
 
+/// The user-controlled delivery brake is visually separate from both the
+/// frozen recording waveform (Paused) and the clipboard/document receipt used
+/// for output that fell back to recovery. A raised hand says "hold here"; the
+/// fallback preserves that verb if the preferred symbol is unavailable.
+enum MacHUDDeliveryHoldSymbol {
+    static let preferred = "hand.raised.fill"
+    static let fallback = "pause.fill"
+
+    static func systemName(isAvailable: (String) -> Bool) -> String {
+        isAvailable(preferred) ? preferred : fallback
+    }
+}
+
 enum MacHUDCaptureActivity: Equatable, Sendable {
     case inactive
     case connecting
@@ -122,6 +135,16 @@ struct MacOrderedDictationBatch: Equatable, Sendable {
     func isReady(completedSequences: Set<Int>) -> Bool {
         !sequences.isEmpty && sequences.isSubset(of: completedSequences)
     }
+
+    /// Completion and delivery permission are independent. Held may have every
+    /// transcript ready but must remain outside the output boundary until fn
+    /// explicitly returns the face to Draining.
+    func isReadyForDelivery(
+        completedSequences: Set<Int>,
+        timingState: MacDeliveryTimingState
+    ) -> Bool {
+        timingState == .draining && isReady(completedSequences: completedSequences)
+    }
 }
 
 /// Runtime-only state for the floating indicator.
@@ -154,6 +177,7 @@ struct MacHUDPipeline: Equatable, Sendable {
         )
         case resting(startedAt: Date)
         case draining(startedAt: Date)
+        case deliveryHeld(startedAt: Date)
         case held(startedAt: Date)
     }
 
@@ -192,6 +216,20 @@ struct MacHUDPipeline: Equatable, Sendable {
         if case .draining = face.stage { return true }
         return false
     }
+
+    var isDeliveryHeld: Bool {
+        guard let face else { return false }
+        if case .deliveryHeld = face.stage { return true }
+        return false
+    }
+
+    var deliveryTimingState: MacDeliveryTimingState {
+        if isDeliveryHeld { return .held }
+        if isDraining { return .draining }
+        return .inactive
+    }
+
+    var isAwaitingDelivery: Bool { deliveryTimingState.isAwaitingDelivery }
 
     var isTyping: Bool { isDraining }
 
@@ -305,6 +343,27 @@ struct MacHUDPipeline: Equatable, Sendable {
 
     mutating func beginDraining(at date: Date = Date()) {
         guard var face else { return }
+        face.stage = .draining(startedAt: date)
+        self.face = face
+        capture = nil
+        sourceNudge = nil
+    }
+
+    /// Parks only the landing. Segment transcription continues and keeps its
+    /// one face identity, but the ordered drain may not enter the output
+    /// boundary until `releaseDeliveryHold` moves this face back to Draining.
+    mutating func beginDeliveryHold(at date: Date = Date()) {
+        guard var face, case .draining = face.stage else { return }
+        face.stage = .deliveryHeld(startedAt: date)
+        self.face = face
+        capture = nil
+        sourceNudge = nil
+    }
+
+    /// Re-arms automatic landing from Held. The draining visibility cap begins
+    /// again at this explicit release; Held itself has no expiry.
+    mutating func releaseDeliveryHold(at date: Date = Date()) {
+        guard var face, case .deliveryHeld = face.stage else { return }
         face.stage = .draining(startedAt: date)
         self.face = face
         capture = nil
@@ -454,7 +513,7 @@ struct MacHUDPipeline: Equatable, Sendable {
         }
         guard !dictations.contains(where: { $0.faceID == candidateID }) else { return }
         switch currentFace.stage {
-        case .draining, .held:
+        case .draining, .deliveryHeld, .held:
             face = nil
             sourceNudge = nil
         case .capture, .resting:
@@ -483,12 +542,12 @@ struct MacHUDPipeline: Equatable, Sendable {
 }
 
 private extension MacHUDPipeline.Face {
-    /// Capture/rest/drain are phases of one still-open dictation. Held is a
-    /// terminal recovery acknowledgment; a new source press should visually
-    /// morph the shared capsule but must start a new model identity.
+    /// Capture/rest/drain/user-held are phases of one reopenable dictation.
+    /// Recovery `.held` is a terminal acknowledgment; a new source press may
+    /// reuse the capsule visually but must start a new model identity.
     var canReopen: Bool {
         switch stage {
-        case .capture, .resting, .draining:
+        case .capture, .resting, .draining, .deliveryHeld:
             true
         case .held:
             false
@@ -509,6 +568,7 @@ struct MacHUDStack: Equatable, Sendable {
         )
         case resting
         case draining
+        case deliveryHeld
         case held
         case positioning
     }
@@ -540,6 +600,7 @@ struct MacHUDStack: Equatable, Sendable {
     var isEmpty: Bool { cards.isEmpty }
     var isResting: Bool { cards.first?.content == .resting }
     var isDraining: Bool { cards.first?.content == .draining }
+    var isDeliveryHeld: Bool { cards.first?.content == .deliveryHeld }
     var frontIsReleasing: Bool {
         guard case .capture(_, .releasing, _) = cards.first?.content else {
             return false
@@ -581,6 +642,8 @@ struct MacHUDStack: Equatable, Sendable {
                     return .empty
                 }
                 content = .draining
+            case .deliveryHeld:
+                content = .deliveryHeld
             case let .held(startedAt):
                 guard date.timeIntervalSince(startedAt) < heldVisibilityCap else {
                     return .empty
@@ -620,6 +683,8 @@ struct MacHUDStack: Equatable, Sendable {
                 deadline = nil
             case let .draining(startedAt):
                 deadline = startedAt.addingTimeInterval(drainingVisibilityCap)
+            case .deliveryHeld:
+                deadline = nil
             case let .held(startedAt):
                 deadline = startedAt.addingTimeInterval(heldVisibilityCap)
             }
@@ -653,6 +718,9 @@ struct MacHUDStack: Equatable, Sendable {
             parts.append("Dictation resting — nothing has been delivered")
         case .draining:
             parts.append("Dictation transcribing for delivery")
+        case .deliveryHeld:
+            parts.append("Delivery held — transcription continues")
+            parts.append("Press the Function key to deliver at the current cursor")
         case .held:
             parts.append("Dictation held")
             if heldClipboardBacked {
@@ -696,6 +764,7 @@ enum MacHUDVisualState: Equatable, Sendable {
     case source(MacInputMode, waiting: Bool)
     case waveform(frozen: Bool)
     case typing
+    case deliveryHeld
     case held
     case positioning
 
@@ -731,6 +800,8 @@ enum MacHUDVisualState: Equatable, Sendable {
             return .waveform(frozen: true)
         case .draining:
             return .typing
+        case .deliveryHeld:
+            return .deliveryHeld
         case .held:
             return .held
         case .positioning:
