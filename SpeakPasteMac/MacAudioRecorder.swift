@@ -1102,8 +1102,7 @@ private final class MacCaptureSessionAudioRecorder: NSObject, AVCaptureFileOutpu
 /// Selects the recorder without consulting a localized device name. The Mac's
 /// built-in microphone keeps the mature AVCaptureSession implementation;
 /// Continuity is the only recording source routed through AUVoiceIO for Mic
-/// Modes. A short-lived VPIO companion supplies PRO-26 ducking on the Mac path
-/// without changing its recording and recovery behavior.
+/// Modes. Media attenuation is independent of both capture backends.
 enum MacAudioRecorderBackendChoice: Equatable, Sendable {
     case captureSession
     case voiceProcessing

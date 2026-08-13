@@ -149,4 +149,47 @@ final class MacAudioPolicyTests: XCTestCase {
             )
         )
     }
+
+    func testCompetingMediaFadeUsesSmoothMonotonicEndpoints() {
+        let down = stride(from: 0.0, through: 1.0, by: 0.05).map {
+            MacCompetingMediaFadePolicy.volume(
+                from: 0.8,
+                to: MacCompetingMediaFadePolicy.quietVolume(for: 0.8),
+                progress: $0
+            )
+        }
+        XCTAssertEqual(down.first ?? -1, 0.8, accuracy: 0.0001)
+        let quiet = MacCompetingMediaFadePolicy.quietVolume(for: 0.8)
+        XCTAssertEqual(down.last ?? -1, quiet, accuracy: 0.0001)
+        XCTAssertTrue(zip(down, down.dropFirst()).allSatisfy { $0 >= $1 })
+
+        let up = stride(from: 0.0, through: 1.0, by: 0.05).map {
+            MacCompetingMediaFadePolicy.volume(
+                from: quiet,
+                to: 0.8,
+                progress: $0
+            )
+        }
+        XCTAssertTrue(zip(up, up.dropFirst()).allSatisfy { $0 <= $1 })
+        XCTAssertEqual(up.last ?? -1, 0.8, accuracy: 0.0001)
+    }
+
+    func testCompetingMediaFadeHasGentleEdgesAndRespectsUserChanges() {
+        XCTAssertEqual(MacCompetingMediaFadePolicy.easedProgress(0), 0)
+        XCTAssertEqual(MacCompetingMediaFadePolicy.easedProgress(1), 1)
+        XCTAssertLessThan(MacCompetingMediaFadePolicy.easedProgress(0.05), 0.01)
+        XCTAssertGreaterThan(MacCompetingMediaFadePolicy.easedProgress(0.95), 0.99)
+        XCTAssertTrue(
+            MacCompetingMediaFadePolicy.stillOwns(
+                current: 0.201,
+                lastWritten: 0.20
+            )
+        )
+        XCTAssertFalse(
+            MacCompetingMediaFadePolicy.stillOwns(
+                current: 0.30,
+                lastWritten: 0.20
+            )
+        )
+    }
 }

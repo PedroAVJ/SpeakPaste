@@ -62,10 +62,12 @@ TCC grants, or Application Support.
       silent iPhone never reaches Listening, and a mode mismatch fails after the
       bounded wait without changing the system default input or output.
 - [ ] For both the Mac and iPhone source, play media before recording. Confirm
-      speech-aware mid ducking begins only after capture is live, follows speech,
-      and restores before pause, End, Escape, error, sleep, disconnect, and Quit.
-      Force the ducking setup to fail and confirm recording remains usable while
-      a visible warning says other audio may stay at full volume.
+      it keeps advancing while output eases about 16 dB down over 400 ms and
+      returns over 900 ms on pause, End, Escape, error, sleep, disconnect, and
+      Quit. Reverse start/stop rapidly without a jump. Change volume manually
+      during capture and confirm SpeakPaste yields rather than restoring an old
+      value. Switch to an output without writable volume and confirm recording
+      continues while media remains unchanged.
 
 - [ ] Complete and revisit every onboarding step. Check API-key states,
       permission/readiness explanations, microphone selection/test, shortcuts,

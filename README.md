@@ -156,16 +156,16 @@ Voice Isolation was selected) require macOS to report Voice Isolation active. A
 mismatch fails visibly and releases the route; no system default audio device
 is changed.
 
-While either microphone is actually recording, SpeakPaste asks Apple's voice
-processing path for speech-aware mid-level ducking of other audio. The built-in
-Mac recorder and an AVCapture fallback use a temporary VPIO companion;
-Continuity normally uses its recording VPIO. If ducking cannot start, recording
-continues with a visible warning. Pause, End, Escape, errors, sleep, disconnect,
-and Quit all restore the prior ducking configuration and destroy every private
-route before transcription begins.
-“While transcribing” means only this live-microphone phase, not the later
-network request; SpeakPaste never pauses media apps or writes their volume
-settings.
+While either microphone is actually recording, SpeakPaste smoothly fades the
+current output about 16 dB quieter over 400 ms, leaves playback running, then
+eases it back over 900 ms on pause, End, Escape, error, sleep, disconnect, or
+Quit. This is independent of the microphone route: it never sends a player a
+pause command and never starts a second Voice Processing session merely to ask
+for ducking. SpeakPaste remembers the original output level for crash recovery,
+but a volume-key press or output-route change immediately yields ownership so a
+user's newer choice is never overwritten. Outputs without a writable volume
+control simply keep playing unchanged. “While transcribing” means only this
+live-microphone phase, not the later network request.
 
 You can also build the macOS target from Terminal:
 
