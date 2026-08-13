@@ -130,6 +130,23 @@ the capture-live cue confirms that audio is ready. Automatic paste and the
 global shortcut require macOS Accessibility permission; without it, the
 transcript remains on the clipboard.
 
+The user chooses Standard, Wide Spectrum, or Voice Isolation in macOS; SpeakPaste
+does not write that system preference. For a selected iPhone microphone it
+records through Voice Processing I/O, using a short-lived process-private
+aggregate with the current output when necessary. The selected input is first
+in the aggregate and its input channels are pinned explicitly, so a full-duplex
+output such as AirPods cannot silently become the recording source. Readiness is
+bounded and requires both steady, audible samples and (when Voice Isolation was
+selected) macOS reporting Voice Isolation as active. A mismatch fails visibly
+and releases the route; no system default audio device is changed.
+
+While either microphone is actually recording, SpeakPaste asks Apple's voice
+processing path for speech-aware mid-level ducking of other audio. The built-in
+Mac recorder uses a temporary VPIO companion; Continuity uses its recording
+VPIO. If ducking cannot start, recording continues with a visible warning. Pause,
+End, Escape, errors, sleep, disconnect, and Quit all restore the prior ducking
+configuration and destroy every private route before transcription begins.
+
 You can also build the macOS target from Terminal:
 
 ```sh

@@ -56,6 +56,17 @@ bundle identifier, redirected `CFFIXED_USER_HOME`/`TMPDIR`, and a non-secret
 placeholder API key. Do not point this run at the installed app's Keychain,
 TCC grants, or Application Support.
 
+- [ ] With Voice Isolation selected in macOS, use the iPhone microphone while
+      output stays on AirPods. Confirm Settings reports Voice Isolation active,
+      the captured audio is the iPhone (not the AirPods microphone), a muted or
+      silent iPhone never reaches Listening, and a mode mismatch fails after the
+      bounded wait without changing the system default input or output.
+- [ ] For both the Mac and iPhone source, play media before recording. Confirm
+      speech-aware mid ducking begins only after capture is live, follows speech,
+      and restores before pause, End, Escape, error, sleep, disconnect, and Quit.
+      Force the ducking setup to fail and confirm recording remains usable while
+      a visible warning says other audio may stay at full volume.
+
 - [ ] Complete and revisit every onboarding step. Check API-key states,
       permission/readiness explanations, microphone selection/test, shortcuts,
       successful-audio disclosure, and the language menu.
