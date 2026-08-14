@@ -1,5 +1,10 @@
 # SpeakPaste
 
+> [!NOTE]
+> This standalone repository is archived. SpeakPaste is now maintained as the
+> native macOS and iPhone interface inside Pedro's private ElevenLabs plugin.
+> This repository remains available as the historical MIT-licensed source.
+
 SpeakPaste is a native Swift dictation project for macOS and iPhone. It sends
 recorded audio directly to [ElevenLabs Scribe](https://elevenlabs.io/speech-to-text),
 then lets you edit, copy, or paste the transcript.
